@@ -16,6 +16,14 @@ withHuman (request.resolved, Standard-Webhooks signed)
 A cron job (`durable-park-sweep`, every 5 min, no agent) re-posts wakes for anything a lost notification
 left behind and turns `executing` rows older than 10 min into `unknown` with one alert line.
 
+**Retries.** The SDK receiver answers withHuman `204` as soon as the signature checks out and only then,
+in the background, reads the request and posts the wake (agentapprovalprotocol 0.3.3 `receiver.py:158-166`).
+withHuman therefore counts the notification as delivered even if the wake later fails (Hermes down, wake
+refused, withHuman read failed) and never retries it. Recovery is the sweep: within 5 minutes it re-posts a
+wake for every `parked` row and every decided row the chat was not told about, so a lost wake costs at most
+one sweep interval. withHuman's own retries (up to 7 days) only cover the receiver being unreachable or
+answering non-2xx (e.g. 401 before provisioning).
+
 ## Files and owners
 
 | Path | Owner / mode | Written by | Holds |
@@ -86,8 +94,14 @@ hermes cron list                                                   # durable-par
    instance), a finished one is never re-provisioned. Exit 2 = refused before anything was sent;
    exit 1 = a step failed, fix and re-run.
 
-4. After it printed the instance id: `sudo rm /etc/durable-park/provisioner_token` (not needed any more;
-   only keep it while a run is failing and you want to retry).
+4. After it printed the instance id: `sudo rm /etc/durable-park/provisioner_token`. It is needed only to
+   create the instance (keep it while a run is failing and you want to retry). Once provisioned, a re-run
+   never calls withHuman and works without the file: it only checks `receiver.json` and restores a missing
+   or wrong `instance_token` (0640 root:hermes):
+
+   ```sh
+   sudo /opt/durable-park/bin/python -I /opt/durable-park/receiver/provision.py --url https://proto-agents.taila95862.ts.net/aap/events --name proto-agents-1
+   ```
 
 The plugin reads `instance_token` lazily on each risky call, so no Hermes restart is needed.
 

@@ -249,3 +249,46 @@ def test_main_refuses_to_run_as_non_root(monkeypatch, capsys):
     monkeypatch.setattr(provision.os, "geteuid", lambda: 1001)
     assert provision.main(["--provisioner-token-file", "/nonexistent", "--url", URL, "--name", NAME]) == 2
     assert "root" in capsys.readouterr().err
+
+
+def _args_without_token_file(extra=()):
+    return provision.parse_args(["--url", URL, "--name", NAME, "--aap-base-url", BASE_URL, *extra])
+
+
+def test_repair_needs_no_provisioner_token_file(env, capsys):
+    """M5: after provisioning, the token file may be deleted; repairing instance_token must still work and
+    must not call withHuman."""
+    assert _run(env) == 0
+    instance_id = capsys.readouterr().out.strip()
+    env["token_file"].unlink()
+    (env["etc"] / "instance_token").unlink()
+    calls = len(env["provider"].calls)
+    for args in (_args_without_token_file(), provision.parse_args(
+            ["--provisioner-token-file", str(env["token_file"]), "--url", URL, "--name", NAME,
+             "--aap-base-url", BASE_URL])):
+        (env["etc"] / "instance_token").unlink(missing_ok=True)
+        rc = asyncio.run(provision.run(args, etc_dir=env["etc"], chown=env["chown"], restart=env["live"].restart,
+                                       receiver_http=env["live"].http(),
+                                       provider_http=env["provider"].async_http(), retry_delay=0))
+        assert rc == 0
+        assert capsys.readouterr().out.strip() == instance_id
+        assert (env["etc"] / "instance_token").read_text() == TOKEN + "\n"
+    assert len(env["provider"].calls) == calls
+
+
+def test_provisioning_without_a_token_file_is_refused_before_anything_happens(env, capsys):
+    rc = asyncio.run(provision.run(_args_without_token_file(), etc_dir=env["etc"], chown=env["chown"],
+                                   restart=env["live"].restart, receiver_http=env["live"].http(),
+                                   provider_http=env["provider"].async_http(), retry_delay=0))
+    assert rc == 2
+    assert "--provisioner-token-file" in capsys.readouterr().err
+    assert env["provider"].calls == [] and env["live"].restarts == 0
+    assert not (env["etc"] / "receiver.json").exists()
+
+
+def test_missing_token_file_is_refused_before_the_receiver_is_touched(env, capsys):
+    env["token_file"].unlink()
+    assert _run(env) == 2
+    assert "provisioner token" in capsys.readouterr().err
+    assert env["provider"].calls == [] and env["live"].restarts == 0
+    assert not (env["etc"] / "receiver.json").exists()

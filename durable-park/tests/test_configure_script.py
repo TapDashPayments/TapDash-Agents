@@ -50,3 +50,11 @@ def test_never_creates_the_bridge_secret_and_never_echoes_secret_files():
 ])
 def test_plan_values(needle):
     assert needle in SCRIPT.read_text()
+
+
+def test_no_pipe_into_grep_q_under_pipefail():
+    """M2: `cmd | grep -q` under pipefail can turn the writer's SIGPIPE into "not found" (duplicate cron job)."""
+    import re
+    assert "set -euo pipefail" in SCRIPT.read_text()
+    for line in _code_lines():
+        assert not re.search(r"\|\s*grep\b[^|]*-[a-zA-Z]*q", line), line

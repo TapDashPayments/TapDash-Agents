@@ -22,7 +22,8 @@ So, in order:
 Prints only the instance id. Idempotent: a pending registration is reused as is (same secret, same
 registration id, same idempotency key, so withHuman replays the original result instead of creating a
 second instance), and a finished one is never re-provisioned (``instance_token`` is repaired from
-receiver.json if it went missing). Secrets are never printed.
+receiver.json if it went missing; that needs no provisioner token, so its file can be deleted after the
+first success). Secrets are never printed.
 """
 
 from __future__ import annotations
@@ -64,7 +65,9 @@ class Failed(Exception):
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Provision the withHuman AAP instance for durable-park's receiver")
-    p.add_argument("--provisioner-token-file", required=True, help="file holding the whp_ provisioner token")
+    p.add_argument("--provisioner-token-file",
+                   help="file holding the whp_ provisioner token; required to provision, not needed once "
+                        "provisioned (a re-run then only repairs the files and never calls withHuman)")
     p.add_argument("--url", required=True, help="public HTTPS URL of the receiver (Tailscale Funnel)")
     p.add_argument("--name", required=True, help="instance name, e.g. proto-agents-1")
     p.add_argument("--aap-base-url", default=DEFAULT_AAP_BASE_URL)
@@ -206,11 +209,13 @@ async def run(args, *, etc_dir=None, chown=_default_chown, restart=_default_rest
 async def _provision(args, etc: Path, chown, restart, receiver_http, provider_http, retry_delay) -> str:
     if not args.url.startswith("https://"):
         raise Refused("--url must be the receiver's public https:// URL")
-    provisioner_token = _read_provisioner_token(args.provisioner_token_file)
     receiver_json = etc / "receiver.json"
     existing = _load_receiver_json(receiver_json)
     if existing is not None and existing.get("instance_id"):
-        return _repair(existing, etc, args, chown)
+        return _repair(existing, etc, args, chown)  # no withHuman call: the provisioner token is not needed
+    if not args.provisioner_token_file:
+        raise Refused("not provisioned yet: --provisioner-token-file is required")
+    provisioner_token = _read_provisioner_token(args.provisioner_token_file)
 
     identity = {"url": args.url, "instance_name": args.name, "aap_base_url": args.aap_base_url}
     if existing is not None and not args.new_registration:

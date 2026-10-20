@@ -62,6 +62,9 @@ hermes_cli() { as_hermes "$HERMES_BIN" "$@"; }
 user_systemctl() { as_hermes systemctl --user "$@"; }
 # agent.log lines written since a "YYYY-MM-DD HH:MM:SS" timestamp
 log_since() { awk -v s="$1" 'substr($0, 1, 19) >= s' "$HERMES_HOME/logs/agent.log" 2>/dev/null || true; }
+# grep a captured string, never a pipe: under pipefail, `cmd | grep -q` can report the writer's SIGPIPE
+# (grep exits at the first match) as "not found". Usage: has TEXT GREP-ARGS...
+has() { local text=$1; shift; grep -q "$@" <<<"$text"; }
 
 # --- 1. users, groups, directory --------------------------------------------------------------------------
 getent group dpwake >/dev/null || { groupadd --system dpwake; log "created group dpwake"; }
@@ -70,7 +73,7 @@ if ! id -u aaprecv >/dev/null 2>&1; then
     log "created system user aaprecv"
 fi
 for member in "$HERMES_USER" aaprecv; do
-    if ! id -nG "$member" | tr ' ' '\n' | grep -qx dpwake; then
+    if ! has "$(id -nG "$member" | tr ' ' '\n')" -x dpwake; then
         usermod -aG dpwake "$member"
         log "added $member to dpwake"
     fi
@@ -122,7 +125,8 @@ if [[ "$(readlink "$link" 2>/dev/null || true)" != "$REPO/plugin/durable_park" ]
     log "linked $link"
 fi
 
-if ! hermes_cli config get plugins.enabled 2>/dev/null | grep -qE -- "^[[:space:]]*- ${PLUGIN_ID}[[:space:]]*\$"; then
+enabled_plugins=$(hermes_cli config get plugins.enabled 2>/dev/null || true)
+if ! has "$enabled_plugins" -E -- "^[[:space:]]*- ${PLUGIN_ID}[[:space:]]*\$"; then
     # PM admission: resolves plugin.yaml python_dependencies into Hermes's environment with the config change.
     hermes_cli plugins enable "$PLUGIN_ID" --no-allow-tool-override
 fi
@@ -176,14 +180,18 @@ exec /usr/bin/python3 -I $REPO/scripts/durable_park_sweep.py --ledger $LEDGER --
 WRAPPER
 install -m 0750 -o "$HERMES_USER" -g "$HERMES_USER" "$wrapper" "$SWEEP_WRAPPER"
 rm -f "$wrapper"
-if ! hermes_cli cron list --all 2>/dev/null | grep -q -- "$CRON_NAME"; then
+cron_jobs=$(hermes_cli cron list --all 2>/dev/null) || die "hermes cron list failed; not creating a job blindly"
+has "$cron_jobs" -E "Scheduled Jobs|No scheduled jobs" \
+    || die "hermes cron list printed no job list; not creating a job blindly"
+if ! has "$cron_jobs" -E -- "^[[:space:]]*Name:[[:space:]]+${CRON_NAME}[[:space:]]*\$"; then
     hermes_cli cron create "every 5m" --no-agent --script "$(basename "$SWEEP_WRAPPER")" \
         --deliver telegram --name "$CRON_NAME"
     log "created cron job $CRON_NAME"
 fi
 
 # --- 6. Funnel ---------------------------------------------------------------------------------------------
-if ! tailscale funnel status 2>/dev/null | grep -qF -- "$FUNNEL_PATH"; then
+funnel_status=$(tailscale funnel status 2>/dev/null || true)
+if ! has "$funnel_status" -F -- "$FUNNEL_PATH"; then
     tailscale funnel --bg --set-path="$FUNNEL_PATH" "$RECEIVER_LOCAL"
 fi
 
@@ -191,7 +199,8 @@ fi
 dpwake_gid=$(getent group dpwake | cut -d: -f3)
 gateway_pid=$(user_systemctl show -p MainPID --value hermes-gateway 2>/dev/null || echo 0)
 since=$(date '+%Y-%m-%d %H:%M:%S')
-if [[ "${gateway_pid:-0}" != 0 ]] && grep -E '^Groups:' "/proc/$gateway_pid/status" | grep -qw -- "$dpwake_gid"; then
+gateway_groups=$(grep -E '^Groups:' "/proc/${gateway_pid:-0}/status" 2>/dev/null || true)
+if [[ "${gateway_pid:-0}" != 0 ]] && has "$gateway_groups" -w -- "$dpwake_gid"; then
     user_systemctl restart hermes-gateway
     log "restarted hermes-gateway"
 else
@@ -201,14 +210,14 @@ else
     log "restarted user@$HERMES_UID.service (new dpwake membership)"
 fi
 for _ in $(seq 1 120); do
-    if user_systemctl is-active --quiet hermes-gateway && log_since "$since" | grep -q "durable-park loaded"; then
+    if user_systemctl is-active --quiet hermes-gateway && has "$(log_since "$since")" -F "durable-park loaded"; then
         break
     fi
     sleep 1
 done
-log_since "$since" | grep -q "durable-park loaded" \
+has "$(log_since "$since")" -F "durable-park loaded" \
     || die "hermes-gateway did not log 'durable-park loaded' within 120 s (see $HERMES_HOME/logs/agent.log)"
-if log_since "$since" | grep -q "Failed to load plugin '$PLUGIN_ID'"; then
+if has "$(log_since "$since")" -F "Failed to load plugin '$PLUGIN_ID'"; then
     die "a Hermes process failed to load $PLUGIN_ID after the restart (see $HERMES_HOME/logs/agent.log)"
 fi
 log "gateway: $(user_systemctl is-active hermes-gateway), durable-park loaded"
