@@ -9,7 +9,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 FILTER=${DP_FILTER_REPO:-$HOME/.local/share/dp-backup-venv/bin/git-filter-repo}
 KEY=${DP_DEPLOY_KEY:-$HOME/.ssh/tapdash_agents_deploy}
 HOSTS=${DP_KNOWN_HOSTS:-$HOME/.ssh/known_hosts_github}
-REMOTE=git@github.com:TapDashPayments/tapdash-agents.git
+REMOTE=git@github.com:TapDashPayments/TapDash-Agents.git
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 git clone -q --no-local --branch main "$REPO" "$WORK/export"
