@@ -109,15 +109,18 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
             if (busy := other_active()) is not None:
                 return _block(ALREADY_WAITING_MESSAGE.format(park_id=busy.park_id))
 
-            # Never ask a human to approve a call the server would reject: check the form first.
-            try:
-                problem = checker.check(tool, args)
-            except FormCheckUnavailable as exc:
-                log.error("form check unavailable for tool=%s: %s", tool, exc)
-                return _block(CHECK_UNAVAILABLE_MESSAGE.format(tool=tool))
-            if problem is not None:
-                log.info("refused tool=%s: arguments break its rules", tool)
-                return _block(INVALID_ARGS_MESSAGE.format(tool=tool, problem=problem))
+            # Never ask a human to approve a call the server would reject: check the form first. A replay of
+            # a call that is already parked passed this check when it was parked and is not checked again,
+            # so a later rules hiccup can never tell the model "no approval was requested" for it.
+            if ledger.get_by_call(session_id, tool_call_id) is None:
+                try:
+                    problem = checker.check(tool, args)
+                except FormCheckUnavailable as exc:
+                    log.error("form check unavailable for tool=%s: %s", tool, exc)
+                    return _block(CHECK_UNAVAILABLE_MESSAGE.format(tool=tool))
+                if problem is not None:
+                    log.info("refused tool=%s: arguments break its rules", tool)
+                    return _block(INVALID_ARGS_MESSAGE.format(tool=tool, problem=problem))
 
             row = ledger.park(
                 session_key=session_key, session_id=session_id, tool_call_id=tool_call_id, tool=tool,

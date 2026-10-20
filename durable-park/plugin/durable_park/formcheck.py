@@ -5,12 +5,15 @@ fresh on every call. A call that breaks them is refused with the first problem f
 it and no approval is wasted on a call the server would reject. Anything that stops the check from running
 (no rules, unusable rules, a lookup error) raises ``FormCheckUnavailable`` and the caller fails closed.
 
-Safety choices:
-- the withHuman gateway's own top-level fields (``withhuman_scope``, ``withhuman_context``) are removed
-  from both the arguments and the rules first: the gateway strips them before the server sees the call;
+Safety choices (the check must never block what the server would accept, and never change a call):
+- arguments get Hermes's own type fixing first (``"5"`` -> ``5``), as dispatch would, on a copy;
+- the withHuman gateway's own top-level ``withhuman_*`` fields are removed from the arguments and the
+  rules: the gateway strips them before the server sees the call;
+- fields Hermes marked ``nullable`` accept ``null`` (Hermes folds ``anyOf: [X, null]`` into ``X``);
+- ``format``, ``multipleOf`` (float rounding), ``pattern`` and ``propertyNames`` (regexes from outside
+  could hang the hook) are left to the server; ``patternProperties`` is dropped and its object opened up;
 - ``$ref`` is followed only inside the rules themselves; every other reference is refused (never fetched);
-- ``format`` is not enforced and defaults are never filled in, so the check is never stricter than the
-  rules' structure and never changes the arguments.
+- defaults are never filled in.
 """
 
 from __future__ import annotations
@@ -32,7 +35,12 @@ from ._vendor import fastjsonschema
 
 log = logging.getLogger("durable_park")
 
-GATEWAY_FIELDS = frozenset({"withhuman_scope", "withhuman_context"})
+GATEWAY_PREFIX = "withhuman_"  # withhuman_scope, withhuman_context, and any the gateway adds later
+THREAD_NAME = "durable-park-formcheck"
+_LEFT_TO_SERVER = ("format", "multipleOf", "pattern", "propertyNames")
+_SCHEMA_MAPS = ("properties", "patternProperties", "definitions", "$defs", "dependencies")
+_SCHEMA_VALUES = ("items", "additionalItems", "additionalProperties", "contains", "not", "if", "then",
+                  "else", "anyOf", "allOf", "oneOf")
 MAX_PROBLEM_CHARS = 300
 STATUS_FILENAME = "formcheck_status.json"
 _CACHE_MAX = 128
@@ -70,21 +78,66 @@ def registry_tool_names() -> list[str]:
     return list(registry.get_all_tool_names())
 
 
+def hermes_coerce(tool_name: str, args: dict) -> dict:
+    """Hermes's own schema-guided type fixing, the same step dispatch applies (raises outside Hermes)."""
+    from tools.arg_coercion import coerce_tool_args  # Hermes runtime only (not a documented plugin API)
+
+    return coerce_tool_args(tool_name, args)
+
+
+def _is_gateway_field(name: object) -> bool:
+    return isinstance(name, str) and name.startswith(GATEWAY_PREFIX)
+
+
 def strip_gateway_args(args: dict) -> dict:
     """Top-level arguments without the gateway's own fields (nested keys are the server's and are kept)."""
-    return {k: v for k, v in args.items() if k not in GATEWAY_FIELDS}
+    return {k: v for k, v in args.items() if not _is_gateway_field(k)}
 
 
-def _strip_gateway_rules(schema: dict) -> dict:
-    rules = copy.deepcopy(schema)
+def _loosen(node: Any) -> Any:
+    """Walk a schema (keywords only, never property names) applying the safety choices above."""
+    if isinstance(node, list):
+        return [_loosen(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict = {}
+    for key, value in node.items():
+        if key in _LEFT_TO_SERVER or key == "patternProperties":
+            continue
+        if key in _SCHEMA_MAPS and isinstance(value, dict):
+            out[key] = {name: _loosen(sub) for name, sub in value.items()}
+        elif key in _SCHEMA_VALUES:
+            out[key] = _loosen(value)
+        else:
+            out[key] = value
+    if "patternProperties" in node:
+        out["additionalProperties"] = True
+    if node.get("nullable") is True:
+        kind = out.get("type")
+        if isinstance(kind, str) and kind != "null":
+            out["type"] = [kind, "null"]
+        elif isinstance(kind, list) and "null" not in kind:
+            out["type"] = [*kind, "null"]
+        if isinstance(out.get("enum"), list) and None not in out["enum"]:
+            out["enum"] = [*out["enum"], None]
+    return out
+
+
+def _prepare_rules(schema: dict) -> dict:
+    try:
+        rules = json.loads(json.dumps(schema))  # plain JSON data only
+    except (TypeError, ValueError) as exc:
+        raise FormCheckUnavailable("rules are not plain JSON") from exc
+    if not isinstance(rules, dict):
+        raise FormCheckUnavailable("no rules found for this tool")
     props = rules.get("properties")
     if isinstance(props, dict):
-        for name in GATEWAY_FIELDS:
-            props.pop(name, None)
+        for name in [n for n in props if _is_gateway_field(n)]:
+            del props[name]
     required = rules.get("required")
     if isinstance(required, list):
-        rules["required"] = [r for r in required if r not in GATEWAY_FIELDS]
-    return rules
+        rules["required"] = [r for r in required if not _is_gateway_field(r)]
+    return _loosen(rules)
 
 
 def _describe(exc: Exception) -> str:
@@ -101,10 +154,23 @@ class FormChecker:
     """Validates arguments against the rules ``schema_fn(tool)`` returns (default: Hermes's registry,
     looked up when called). Thread-safe."""
 
-    def __init__(self, schema_fn: Callable[[str], Any] | None = None) -> None:
+    def __init__(self, schema_fn: Callable[[str], Any] | None = None,
+                 coerce_fn: Callable[[str, dict], dict] | None = None) -> None:
         self._schema_fn = schema_fn
+        self._coerce_fn = coerce_fn
         self._cache: OrderedDict[str, Callable[[Any], Any]] = OrderedDict()
         self._lock = threading.Lock()
+
+    def coercion_problem(self) -> str | None:
+        """Why Hermes's type fixing is unavailable (arguments are then checked as sent), else ``None``."""
+        if self._coerce_fn is not None:
+            return None
+        try:
+            from tools.arg_coercion import coerce_tool_args  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            return (f"Hermes type fixing is unavailable ({type(exc).__name__}); "
+                    "arguments are checked exactly as the model sent them")
+        return None
 
     def cache_size(self) -> int:
         with self._lock:
@@ -118,11 +184,8 @@ class FormChecker:
             raise FormCheckUnavailable(f"could not read the rules ({type(exc).__name__})") from exc
         if not isinstance(schema, dict):
             raise FormCheckUnavailable("no rules found for this tool")
-        rules = _strip_gateway_rules(schema)
-        try:
-            key = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        except (TypeError, ValueError) as exc:
-            raise FormCheckUnavailable("rules are not plain JSON") from exc
+        rules = _prepare_rules(schema)
+        key = hashlib.sha256(json.dumps(rules, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         with self._lock:
             validate = self._cache.get(key)
             if validate is not None:
@@ -144,7 +207,12 @@ class FormChecker:
     def check(self, tool: str, args: dict) -> str | None:
         """``None`` when ``args`` follow the rules, else a short description of the first problem."""
         validate = self.prepare(tool)
-        data = copy.deepcopy(strip_gateway_args(args if isinstance(args, dict) else {}))
+        raw = copy.deepcopy(args if isinstance(args, dict) else {})
+        try:
+            fixed = (self._coerce_fn or hermes_coerce)(tool, copy.deepcopy(raw))
+        except Exception:  # noqa: BLE001 - without type fixing, check the arguments as sent
+            fixed = raw
+        data = strip_gateway_args(fixed if isinstance(fixed, dict) else raw)
         try:
             validate(data)
         except fastjsonschema.JsonSchemaValueException as exc:
@@ -164,18 +232,26 @@ def run_selfcheck(checker: FormChecker, names_fn: Callable[[], Iterable[str]],
                   risky: list[re.Pattern]) -> dict:
     """Prove the check works end to end: the validator, the rules lookup, and every risky tool's rules."""
     problems: list[str] = []
-    canary = FormChecker(lambda _tool: _CANARY_RULES)
+    canary = FormChecker(lambda _tool: _CANARY_RULES, coerce_fn=lambda _tool, args: args)
     try:
         if canary.check("canary", {"a": "x"}) is not None or canary.check("canary", {}) is None:
             problems.append("the form checker gives wrong answers")
     except Exception as exc:  # noqa: BLE001
         problems.append(f"the form checker does not run ({type(exc).__name__})")
+    if (coercion := checker.coercion_problem()) is not None:
+        problems.append(coercion)
     checked = 0
-    try:
-        names = sorted(n for n in names_fn() if any(p.fullmatch(n) for p in risky))
-    except Exception as exc:  # noqa: BLE001
+    names: list[str] | None = None
+    error: Exception | None = None
+    for _attempt in range(2):  # the registry can change while it is read (MCP re-registration)
+        try:
+            names = sorted(n for n in list(names_fn()) if any(p.fullmatch(n) for p in risky))
+            break
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+    if names is None:
         names = []
-        problems.append(f"could not read the tool registry ({type(exc).__name__})")
+        problems.append(f"could not read the tool registry ({type(error).__name__})")
     else:
         if not names:
             problems.append("no risky tools are registered (is the gateway connected?)")
@@ -247,6 +323,11 @@ _started = False
 _started_lock = threading.Lock()
 
 
+def _selfcheck_thread_alive() -> bool:
+    """Process-wide: survives a re-import of this module (which would reset ``_started``)."""
+    return any(t.name == THREAD_NAME and t.is_alive() for t in threading.enumerate())
+
+
 def start_selfcheck(checker: FormChecker, risky: list[re.Pattern], status_path: str) -> bool:
     """Start the background self-check once per Hermes process. Returns False outside Hermes."""
     global _started
@@ -255,9 +336,9 @@ def start_selfcheck(checker: FormChecker, risky: list[re.Pattern], status_path: 
     except ImportError:
         return False
     with _started_lock:
-        if _started:
+        if _started or _selfcheck_thread_alive():
             return False
         _started = True
-    threading.Thread(target=selfcheck_loop, args=(checker, registry_tool_names, risky, status_path),
-                     name="durable-park-formcheck", daemon=True).start()
+        threading.Thread(target=selfcheck_loop, args=(checker, registry_tool_names, risky, status_path),
+                         name=THREAD_NAME, daemon=True).start()
     return True

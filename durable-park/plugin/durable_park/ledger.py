@@ -187,6 +187,11 @@ class Ledger:
         with self._connect() as con:
             return _row(con.execute("SELECT * FROM parks WHERE park_id=?", (park_id,)).fetchone())
 
+    def get_by_call(self, session_id: str, tool_call_id: str) -> ParkRow | None:
+        with self._connect() as con:
+            return _row(con.execute("SELECT * FROM parks WHERE session_id=? AND tool_call_id=?",
+                                    (session_id, tool_call_id)).fetchone())
+
     def active_for_session(self, session_key: str) -> list[ParkRow]:
         marks = ",".join("?" * len(ACTIVE_STATUSES))
         with self._connect() as con:

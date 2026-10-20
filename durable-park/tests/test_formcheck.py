@@ -38,8 +38,12 @@ BAD_BILL = {"params": {"bill": {"Line": [{"Amount": 3,  # DetailType missing (th
                                 "VendorRef": {"value": "56"}}}}
 
 
-def checker(schema=BILL_SCHEMA):
-    return FormChecker(lambda tool: schema)
+def same(tool, args):
+    return args
+
+
+def checker(schema=BILL_SCHEMA, coerce=same):
+    return FormChecker(lambda tool: schema, coerce_fn=coerce)
 
 
 def test_valid_call_passes():
@@ -103,7 +107,7 @@ def test_rules_lookup_error_is_unavailable():
     def boom(tool):
         raise RuntimeError("registry moved")
     with pytest.raises(FormCheckUnavailable):
-        FormChecker(boom).check("t", GOOD_BILL)
+        FormChecker(boom, coerce_fn=same).check("t", GOOD_BILL)
 
 
 @pytest.mark.parametrize("ref", ["https://example.invalid/schema.json", "http://x/y#/a", "other.json",
@@ -136,7 +140,7 @@ def test_compiled_rules_are_cached():
     def schema_fn(tool):
         calls.append(tool)
         return BILL_SCHEMA
-    fc = FormChecker(schema_fn)
+    fc = FormChecker(schema_fn, coerce_fn=same)
     for _ in range(3):
         assert fc.check("t", GOOD_BILL) is None
     assert len(calls) == 3  # rules re-read every call (they can change) ...
@@ -157,7 +161,7 @@ RISKY = ["mcp__wh__quickbooks__create_bill", "mcp__wh__quickbooks__create_paymen
 def selfcheck(names, schema_fn, risky=RISKY):
     import re
     patterns = [re.compile(p) for p in risky]
-    return run_selfcheck(FormChecker(schema_fn), lambda: names, patterns)
+    return run_selfcheck(FormChecker(schema_fn, coerce_fn=same), lambda: names, patterns)
 
 
 def test_selfcheck_ok_when_all_risky_rules_compile():
@@ -181,7 +185,7 @@ def test_selfcheck_fails_when_registry_unreadable():
 
     def names():
         raise RuntimeError("registry API changed")
-    status = run_selfcheck(FormChecker(lambda t: BILL_SCHEMA), names, [re.compile(RISKY[0])])
+    status = run_selfcheck(FormChecker(lambda t: BILL_SCHEMA, coerce_fn=same), names, [re.compile(RISKY[0])])
     assert status["ok"] is False and "registry" in status["problems"][0]
 
 
@@ -210,7 +214,7 @@ def test_selfcheck_loop_waits_for_tools_then_writes(tmp_path):
     def clock():
         t["now"] += 1
         return t["now"]
-    selfcheck_loop(FormChecker(lambda tool: BILL_SCHEMA), names, [re.compile(RISKY[0])], str(path),
+    selfcheck_loop(FormChecker(lambda tool: BILL_SCHEMA, coerce_fn=same), names, [re.compile(RISKY[0])], str(path),
                    sleep=sleep, clock=clock, iterations=1)
     data = json.loads(path.read_text())
     assert data["ok"] is True and data["tools_checked"] == 1
@@ -235,7 +239,7 @@ def test_selfcheck_loop_reports_tools_lost_after_they_were_seen(tmp_path):
     from durable_park.formcheck import selfcheck_loop
     path = tmp_path / "formcheck_status.json"
     lists = iter([["mcp__wh__quickbooks__create_bill"], [], []])
-    selfcheck_loop(FormChecker(lambda tool: BILL_SCHEMA), lambda: next(lists), [re.compile(RISKY[0])], str(path),
+    selfcheck_loop(FormChecker(lambda tool: BILL_SCHEMA, coerce_fn=same), lambda: next(lists), [re.compile(RISKY[0])], str(path),
                    sleep=lambda s: None, iterations=1)
     status = json.loads(path.read_text())
     assert status["ok"] is False and "no risky tools" in status["problems"][0]
@@ -252,3 +256,122 @@ def test_start_selfcheck_is_noop_outside_hermes(tmp_path):
     import re
     from durable_park.formcheck import start_selfcheck
     assert start_selfcheck(FormChecker(), [re.compile("x")], str(tmp_path / "s.json")) is False
+
+
+
+# ---- review fixes ------------------------------------------------------------------------------
+
+def test_nullable_optional_field_accepts_null():
+    # Hermes turns anyOf:[X, null] into X plus a "nullable": true hint; null must still be allowed.
+    schema = {"type": "object", "properties": {"memo": {"type": "string", "nullable": True},
+                                               "name": {"type": "string"}}}
+    assert checker(schema).check("t", {"memo": None}) is None
+    assert checker(schema).check("t", {"name": None}) is not None  # not nullable: still refused
+
+
+def test_any_top_level_withhuman_field_is_ignored():
+    assert checker().check("t", {**GOOD_BILL, "withhuman_future": {"x": 1}}) is None
+
+
+def test_multiple_of_is_left_to_the_server():
+    schema = {"type": "object", "properties": {"amt": {"type": "number", "multipleOf": 0.01}}}
+    assert checker(schema).check("t", {"amt": 19.99}) is None
+
+
+def test_integral_float_is_an_integer():
+    schema = {"$schema": "http://json-schema.org/draft-07/schema#", "type": "object",
+              "properties": {"qty": {"type": "integer"}}}
+    assert checker(schema).check("t", {"qty": 1.0}) is None
+
+
+def test_patterns_are_left_to_the_server_and_cannot_hang():
+    import time
+    schema = {"type": "object", "properties": {"s": {"type": "string", "pattern": "^(a+)+$"}},
+              "propertyNames": {"pattern": "^(b+)+$"}}
+    start = time.monotonic()
+    assert checker(schema).check("t", {"s": "a" * 40 + "!"}) is None
+    assert time.monotonic() - start < 1.0
+
+
+def test_pattern_properties_never_cause_a_false_block():
+    schema = {"type": "object", "additionalProperties": False, "properties": {"a": {"type": "string"}},
+              "patternProperties": {"^x_": {"type": "string"}}}
+    assert checker(schema).check("t", {"a": "1", "x_b": "2"}) is None
+
+
+def test_remote_id_with_relative_ref_is_refused_without_fetching(monkeypatch):
+    import urllib.request
+
+    def no_network(*a, **k):
+        raise AssertionError("network fetch attempted")
+    monkeypatch.setattr(urllib.request, "urlopen", no_network)
+    schema = {"$id": "http://example.invalid/a.json", "type": "object", "properties": {"b": {"$ref": "b.json"}}}
+    with pytest.raises(FormCheckUnavailable):
+        checker(schema).check("t", {"b": 1})
+
+
+def test_rules_that_are_not_plain_json_are_unavailable():
+    with pytest.raises(FormCheckUnavailable):
+        checker({"type": "object", "properties": {"a": {"type": "string", "x": object()}}}).check("t", {"a": "1"})
+
+
+def test_hermes_type_fixing_runs_before_the_check():
+    schema = {"type": "object", "properties": {"n": {"type": "number"}}}
+
+    def fix(tool, args):
+        return {k: (float(v) if isinstance(v, str) and v.isdigit() else v) for k, v in args.items()}
+    assert checker(schema, coerce=fix).check("t", {"n": "5"}) is None
+    assert checker(schema).check("t", {"n": "5"}) is not None  # without fixing, a string is not a number
+
+
+def test_type_fixing_gets_a_copy_and_errors_fall_back_to_raw_args():
+    schema = {"type": "object", "properties": {"n": {"type": "number"}}}
+    seen = []
+
+    def mutate(tool, args):
+        seen.append(args)
+        args["n"] = "mutated"
+        raise RuntimeError("coercion broke")
+    original = {"n": 5}
+    assert checker(schema, coerce=mutate).check("t", original) is None
+    assert original == {"n": 5} and seen and seen[0] is not original
+
+
+def test_default_type_fixing_outside_hermes_is_reported_unavailable():
+    fc = FormChecker(lambda tool: {"type": "object"})
+    assert fc.check("t", {}) is None  # still checks, on the raw arguments
+    assert "type fixing" in fc.coercion_problem()
+    assert FormChecker(lambda tool: {}, coerce_fn=same).coercion_problem() is None
+
+
+def test_selfcheck_flags_missing_type_fixing():
+    import re
+    status = run_selfcheck(FormChecker(lambda t: BILL_SCHEMA), lambda: [RISKY[0]], [re.compile(RISKY[0])])
+    assert status["ok"] is False and any("type fixing" in p for p in status["problems"])
+
+
+def test_selfcheck_retries_a_registry_read_once():
+    import re
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("dictionary changed size during iteration")
+        return [RISKY[0]]
+    status = run_selfcheck(FormChecker(lambda t: BILL_SCHEMA, coerce_fn=same), flaky, [re.compile(RISKY[0])])
+    assert status["ok"] is True and calls["n"] == 2
+
+
+def test_only_one_selfcheck_thread_per_process_even_after_reimport():
+    import threading
+    from durable_park import formcheck
+    stop = threading.Event()
+    t = threading.Thread(target=stop.wait, name=formcheck.THREAD_NAME, daemon=True)
+    t.start()
+    try:
+        assert formcheck._selfcheck_thread_alive() is True
+    finally:
+        stop.set()
+        t.join()
+    assert formcheck._selfcheck_thread_alive() is False

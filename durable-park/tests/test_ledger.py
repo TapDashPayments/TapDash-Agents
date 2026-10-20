@@ -210,3 +210,14 @@ def test_park_stores_the_models_arguments_unchanged_and_matches_gateway_style_ar
     gateway_args = {**PARAMS, "withhuman_scope": "default"}
     assert ledger.find_executing_match(row.tool, args_digest(gateway_args)).park_id == row.park_id
     assert ledger.find_executing_match(row.tool, args_digest({**PARAMS, "withhuman_scope": "other"})) is None
+
+
+
+def test_get_by_call(tmp_path):
+    from durable_park.ledger import Ledger
+    ledger = Ledger(str(tmp_path / "l.db"))
+    assert ledger.get_by_call("s", "c") is None
+    row = ledger.park(session_key="k", session_id="s", tool_call_id="c", tool="t", args={"a": 1},
+                      call_key="ck", server="park:x")
+    assert ledger.get_by_call("s", "c").park_id == row.park_id
+    assert ledger.get_by_call("s", "other") is None

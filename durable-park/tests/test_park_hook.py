@@ -431,3 +431,14 @@ def test_register_without_ledger_does_not_start_selfcheck(tmp_path, monkeypatch)
     monkeypatch.setattr("durable_park.formcheck.start_selfcheck", lambda *a: started.append(a) or True)
     register(FakeCtx(tmp_path, {"ledger_path": str(tmp_path)}))
     assert started == []
+
+
+
+def test_replay_of_an_already_parked_call_is_not_rechecked(env):
+    tool = "mcp__wh__quickbooks__create_payment"
+    first = call(checked_env(env, lambda tool: PAY_RULES), tool, args=GOOD_PAY)
+    assert first["message"].startswith("PARKED P-")
+    # rules vanish (MCP reconnect); the same call id replays: it must still say PARKED, never "not requested"
+    again = call(checked_env(env, lambda tool: None), tool, args=GOOD_PAY)
+    assert again == first
+    assert len(env.provider.requests) == 1
