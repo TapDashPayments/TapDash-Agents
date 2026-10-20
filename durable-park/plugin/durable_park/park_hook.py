@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from agentapprovalprotocol import Allow, Pending
 
+from .formcheck import FormChecker, FormCheckUnavailable
 from .gatecall import build_call
 from .ledger import Ledger, args_digest, call_key
 
@@ -38,6 +39,14 @@ ID_REUSED_MESSAGE = (
     "durable-park: this tool call id was already used for a different call; the call was not run"
 )
 NOT_PARKED_MESSAGE = "durable-park: {park_id} is already {status}; this call was not run again"
+INVALID_ARGS_MESSAGE = (
+    'durable-park: "{tool}" was NOT run and no approval was requested: its arguments break the tool\'s '
+    'rules ({problem}). Fix the arguments and call "{tool}" again.'
+)
+CHECK_UNAVAILABLE_MESSAGE = (
+    'durable-park: the arguments of "{tool}" could not be checked against the tool\'s rules; '
+    "the call was not run and no approval was requested"
+)
 
 _SLUG = re.compile(r"mcp__wh__(.+?)__")
 
@@ -62,8 +71,12 @@ def default_session_key() -> str:
 
 
 def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: list[re.Pattern],
-                       session_key_fn: Callable[[], str] | None = None) -> Callable[..., dict | None]:
-    """Build the hook. ``gate_factory`` is called per park so the token file is read lazily."""
+                       session_key_fn: Callable[[], str] | None = None,
+                       form_checker: FormChecker | None = None) -> Callable[..., dict | None]:
+    """Build the hook. ``gate_factory`` is called per park so the token file is read lazily.
+    ``form_checker`` validates a risky call's arguments against the tool's rules before anything is
+    parked or asked (default: the rules Hermes registered for the tool)."""
+    checker = form_checker if form_checker is not None else FormChecker()
 
     def is_risky(tool_name: str) -> bool:
         return any(p.fullmatch(tool_name) for p in risky)
@@ -95,6 +108,16 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
 
             if (busy := other_active()) is not None:
                 return _block(ALREADY_WAITING_MESSAGE.format(park_id=busy.park_id))
+
+            # Never ask a human to approve a call the server would reject: check the form first.
+            try:
+                problem = checker.check(tool, args)
+            except FormCheckUnavailable as exc:
+                log.error("form check unavailable for tool=%s: %s", tool, exc)
+                return _block(CHECK_UNAVAILABLE_MESSAGE.format(tool=tool))
+            if problem is not None:
+                log.info("refused tool=%s: arguments break its rules", tool)
+                return _block(INVALID_ARGS_MESSAGE.format(tool=tool, problem=problem))
 
             row = ledger.park(
                 session_key=session_key, session_id=session_id, tool_call_id=tool_call_id, tool=tool,

@@ -5,6 +5,8 @@
 * an ``approved`` row the chat was not told about    -> post a wake (the first injection failed)
 * a denied/expired/cancelled row with a request that the chat was not told about -> post a wake
 * an ``executing`` row older than 10 minutes         -> mark ``unknown`` and print one alert line
+* the gateway's form-check report (``formcheck_status.json`` next to the ledger) missing, older than
+  75 minutes or failing on two sweeps in a row        -> print one alert line (and one when it recovers)
 
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
@@ -16,7 +18,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
+import re
+import tempfile
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +33,11 @@ from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
 
 DEFAULT_SECRET_FILE = "/etc/durable-park/wake_secret"
 STALE_EXECUTING = timedelta(minutes=10)
+FORMCHECK_STATUS = "formcheck_status.json"
+FORMCHECK_STATE = "formcheck_alert_state.json"
+FORMCHECK_STALE = timedelta(minutes=75)  # the gateway re-checks every 30 minutes
+FORMCHECK_BAD_RUNS = 2  # one bad sweep may be a restart in progress
+_UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
@@ -93,6 +103,81 @@ def _read_secret(path: str) -> str | None:
         return None
 
 
+def _clean(text: str, limit: int = 400) -> str:
+    text = _UNPRINTABLE.sub(" ", str(text)).strip()
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
+def _formcheck_problem(status_path: str, now: datetime) -> str | None:
+    """What is wrong with the gateway's form-check report, or ``None`` when it is fresh and passing."""
+    try:
+        with open(status_path, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except FileNotFoundError:
+        return "no form-check report from the gateway (is it running with durable-park?)"
+    except (OSError, ValueError):
+        return "the form-check report is unreadable"
+    if not isinstance(report, dict):
+        return "the form-check report is unreadable"
+    try:
+        checked = datetime.strptime(str(report.get("checked_at")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "the form-check report is unreadable"
+    age = now - checked
+    if age > FORMCHECK_STALE:
+        return f"the gateway's form check last ran {int(age.total_seconds() // 60)} minutes ago (is the gateway running?)"
+    if report.get("ok") is not True:
+        problems = report.get("problems")
+        if isinstance(problems, list) and problems:
+            return "; ".join(_clean(p, 200) for p in problems[:3])
+        return "the form check failed"
+    return None
+
+
+def _load_state(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_state(path: str, state: dict) -> None:
+    fd, tmp = tempfile.mkstemp(prefix=".formcheck-alert-", dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(state, handle)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _formcheck_alert(ledger_path: str, now: datetime) -> None:
+    """Alert once when the form check stays broken for two sweeps, and once when it recovers."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    state_path = os.path.join(directory, FORMCHECK_STATE)
+    problem = _formcheck_problem(os.path.join(directory, FORMCHECK_STATUS), now)
+    state = _load_state(state_path)
+    bad_runs = state.get("bad_runs") if isinstance(state.get("bad_runs"), int) else 0
+    alerted = state.get("alerted") is True
+    if problem is not None:
+        bad_runs += 1
+        if bad_runs >= FORMCHECK_BAD_RUNS and not alerted:
+            print(f"durable-park ALERT: the form checker is not working \u2014 {_clean(problem)}. "
+                  "Risky actions will be refused until it is fixed.", flush=True)
+            alerted = True
+    else:
+        if alerted:
+            print("durable-park: the form checker is working again.", flush=True)
+        bad_runs, alerted = 0, False
+    _save_state(state_path, {"bad_runs": bad_runs, "alerted": alerted})
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -106,6 +191,10 @@ def main(argv=None) -> int:
     ledger = _load_ledger_module().Ledger(args.ledger)
 
     _mark_stale_executing(ledger, datetime.now(timezone.utc))
+    try:
+        _formcheck_alert(args.ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - the self-check alert must never stop the sweep
+        _err(f"form-check alert failed ({type(exc).__name__})")
     status = 0
     targets = _wake_targets(ledger)
     if targets:

@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from . import compat
+from . import formcheck
 from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor
 from .gatecall import make_gate
 from .ledger import Ledger
@@ -67,7 +68,12 @@ def register(ctx) -> None:
                                  inject=ctx.inject_message)
 
     ctx.register_hook("pre_gateway_dispatch", durable_park_wake)
-    ctx.register_hook("pre_tool_call", make_pre_tool_call(ledger, gate_factory, risky))
+    checker = formcheck.FormChecker()
+    ctx.register_hook("pre_tool_call", make_pre_tool_call(ledger, gate_factory, risky, form_checker=checker))
+    # Background self-check (Hermes processes only): proves the form check can read and use every risky
+    # tool's rules and writes the result next to the ledger, where the sweep raises an alert.
+    status_path = str(Path(ledger_path).expanduser().parent / formcheck.STATUS_FILENAME)
+    formcheck.start_selfcheck(checker, risky, status_path)
     # ctx.dispatch_tool -> registry.dispatch does not run pre_tool_call hooks, so the executor's own
     # dispatch cannot be blocked by the park hook.
     ctx.register_tool(

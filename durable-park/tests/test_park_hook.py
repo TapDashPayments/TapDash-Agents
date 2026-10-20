@@ -324,3 +324,110 @@ def test_register_passes_crash_flag_and_dispatch_to_executor(tmp_path, monkeypat
     register(ctx)
     assert seen["crash_after_consume"] is expected
     assert seen["dispatch"] == ctx.dispatch_tool
+
+
+# ---- form check before parking ---------------------------------------------------------------
+
+from durable_park.formcheck import FormChecker  # noqa: E402
+
+PAY_RULES = {"type": "object", "required": ["params"], "additionalProperties": False,
+             "properties": {"params": {"type": "object", "required": ["customer_ref", "total_amt"],
+                                       "properties": {"customer_ref": {"type": "string"},
+                                                      "total_amt": {"type": "number"}}}}}
+GOOD_PAY = {"params": {"customer_ref": "58", "total_amt": 5}}
+CHECK_UNAVAILABLE = ('durable-park: the arguments of "mcp__wh__quickbooks__create_payment" could not be '
+                     "checked against the tool's rules; the call was not run and no approval was requested")
+
+
+def checked_env(env, schema_fn):
+    hook = make_pre_tool_call(
+        env.ledger, lambda: make_gate(BASE_URL, TOKEN, client=env.provider.client(retry_budget=0.5)), RISKY,
+        lambda: SESSION_KEY, form_checker=FormChecker(schema_fn))
+    return hook
+
+
+def test_invalid_args_blocked_before_parking(env):
+    hook = checked_env(env, lambda tool: PAY_RULES)
+    tool = "mcp__wh__quickbooks__create_payment"
+    result = call(hook, tool, args={"params": {"customer_ref": "58"}})
+    assert result["action"] == "block"
+    msg = result["message"]
+    assert msg.startswith(f'durable-park: "{tool}" was NOT run and no approval was requested')
+    assert "total_amt" in msg and f'call "{tool}" again' in msg
+    assert env.ledger.list_by_status("parked", "cancelled") == []
+    assert env.provider.requests == {}
+
+
+def test_valid_args_park_as_before(env):
+    hook = checked_env(env, lambda tool: PAY_RULES)
+    tool = "mcp__wh__quickbooks__create_payment"
+    result = call(hook, tool, args=GOOD_PAY)
+    (row,) = env.ledger.list_by_status("parked")
+    assert result == {"action": "block", "message": park_message(row.park_id, tool)}
+    assert len(env.provider.requests) == 1
+
+
+def test_gateway_context_field_does_not_block(env):
+    hook = checked_env(env, lambda tool: PAY_RULES)
+    result = call(hook, "mcp__wh__quickbooks__create_payment",
+                  args={**GOOD_PAY, "withhuman_context": "paying invoice 1016"})
+    assert result["message"].startswith("PARKED P-")
+
+
+def test_rules_unavailable_fails_closed(env):
+    hook = checked_env(env, lambda tool: None)
+    result = call(hook, "mcp__wh__quickbooks__create_payment", args=GOOD_PAY)
+    assert result == {"action": "block", "message": CHECK_UNAVAILABLE}
+    assert env.ledger.list_by_status("parked", "cancelled") == []
+    assert env.provider.requests == {}
+
+
+def test_rules_lookup_crash_fails_closed(env):
+    def boom(tool):
+        raise RuntimeError("registry moved")
+    result = call(checked_env(env, boom), "mcp__wh__quickbooks__create_payment", args=GOOD_PAY)
+    assert result == {"action": "block", "message": CHECK_UNAVAILABLE}
+
+
+def test_non_risky_tools_are_not_checked(env):
+    def boom(tool):
+        raise AssertionError("non-risky tools must not be checked")
+    assert call(checked_env(env, boom), "mcp__wh__quickbooks__search_customers", args={}) is None
+
+
+def test_fixed_retry_after_invalid_parks_once(env):
+    hook = checked_env(env, lambda tool: PAY_RULES)
+    tool = "mcp__wh__quickbooks__create_payment"
+    first = call(hook, tool, args={"params": {"customer_ref": "58"}}, tool_call_id="c1")
+    assert "was NOT run" in first["message"]
+    second = call(hook, tool, args=GOOD_PAY, tool_call_id="c2")
+    assert second["message"].startswith("PARKED P-")
+    assert len(env.ledger.list_by_status("parked")) == 1 and len(env.provider.requests) == 1
+
+
+def test_register_checks_forms_with_the_registry_rules(tmp_path, monkeypatch):
+    monkeypatch.setattr("durable_park.formcheck.registry_schema", lambda tool: PAY_RULES)
+    monkeypatch.setattr("durable_park.park_hook.default_session_key", lambda: SESSION_KEY)
+    ctx = FakeCtx(tmp_path / "data")
+    register(ctx)
+    result = ctx.hooks["pre_tool_call"](tool_name="mcp__wh__quickbooks__create_payment",
+                                        args={"params": {}}, session_id="s", tool_call_id="c")
+    assert "was NOT run and no approval was requested" in result["message"]
+
+
+def test_register_starts_selfcheck_next_to_the_ledger(tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr("durable_park.formcheck.start_selfcheck",
+                        lambda checker, risky, path: started.append((checker, len(risky), path)) or True)
+    ctx = FakeCtx(tmp_path / "data")
+    register(ctx)
+    ((checker, n_risky, path),) = started
+    assert isinstance(checker, FormChecker) and n_risky == len(DEFAULT_RISKY_TOOLS)
+    assert path == str(tmp_path / "data" / "formcheck_status.json")
+
+
+def test_register_without_ledger_does_not_start_selfcheck(tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr("durable_park.formcheck.start_selfcheck", lambda *a: started.append(a) or True)
+    register(FakeCtx(tmp_path, {"ledger_path": str(tmp_path)}))
+    assert started == []

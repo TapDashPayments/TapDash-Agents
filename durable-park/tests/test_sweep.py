@@ -24,6 +24,10 @@ def stamp(minutes_ago):
 class World:
     def __init__(self, tmp_path):
         self.ledger = Ledger(str(tmp_path / "ledger.db"))
+        # a healthy gateway form-check report (tests of that alert replace it)
+        (tmp_path / "formcheck_status.json").write_text(
+            '{"ok": true, "tools_checked": 1, "problems": [], "checked_at": "%s"}'
+            % datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         self.secret_file = tmp_path / "wake_secret"
         self.secret_file.write_text("s3cr3t\n")
         self.posted = []
@@ -244,3 +248,83 @@ def test_sweep_runs_without_the_sdk_from_any_cwd_through_a_symlink(world, tmp_pa
     assert done.stdout == f"durable-park: {stale} outcome UNKNOWN — check {TOOL} in the sandbox before retrying\n"
     assert done.stderr == ""
     assert Ledger(world.ledger.path).get(stale).status == "unknown"
+
+
+# ---- form-check self-check alert -------------------------------------------------------------
+
+import json  # noqa: E402
+
+ALERT = "durable-park ALERT: the form checker is not working"
+RECOVERED = "durable-park: the form checker is working again."
+
+
+def write_report(tmp_path, *, ok=True, problems=(), minutes_ago=0):
+    at = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (tmp_path / "formcheck_status.json").write_text(json.dumps(
+        {"ok": ok, "tools_checked": 1, "problems": list(problems), "checked_at": at}))
+
+
+def runs(world, monkeypatch, capsys, n):
+    outs = []
+    for _ in range(n):
+        assert world.main(monkeypatch) == 0
+        outs.append(capsys.readouterr().out)
+    return outs
+
+
+def test_formcheck_healthy_is_silent(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 3) == ["", "", ""]
+
+
+def test_formcheck_failure_alerts_once_after_two_sweeps(world, monkeypatch, capsys, tmp_path):
+    write_report(tmp_path, ok=False, problems=["mcp__wh__quickbooks__create_bill: no rules found for this tool"])
+    first, second, third = runs(world, monkeypatch, capsys, 3)
+    assert first == ""  # one bad sweep may be a restart in progress
+    assert second.startswith(ALERT) and "create_bill: no rules found" in second
+    assert third == ""  # not repeated every 5 minutes
+
+
+def test_formcheck_missing_report_alerts(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "formcheck_status.json").unlink()
+    _, second = runs(world, monkeypatch, capsys, 2)
+    assert second.startswith(ALERT) and "no form-check report" in second
+
+
+def test_formcheck_stale_report_alerts(world, monkeypatch, capsys, tmp_path):
+    write_report(tmp_path, minutes_ago=120)
+    _, second = runs(world, monkeypatch, capsys, 2)
+    assert second.startswith(ALERT) and "120 minutes ago" in second
+
+
+def test_formcheck_unreadable_report_alerts(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "formcheck_status.json").write_text("{not json")
+    _, second = runs(world, monkeypatch, capsys, 2)
+    assert second.startswith(ALERT) and "unreadable" in second
+
+
+def test_formcheck_recovery_is_announced_once(world, monkeypatch, capsys, tmp_path):
+    write_report(tmp_path, ok=False, problems=["x"])
+    runs(world, monkeypatch, capsys, 2)
+    write_report(tmp_path)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == RECOVERED and second == ""
+
+
+def test_formcheck_blip_then_healthy_never_alerts(world, monkeypatch, capsys, tmp_path):
+    write_report(tmp_path, ok=False, problems=["x"])
+    first = runs(world, monkeypatch, capsys, 1)
+    write_report(tmp_path)
+    assert first + runs(world, monkeypatch, capsys, 2) == ["", "", ""]
+
+
+def test_formcheck_problem_text_is_bounded(world, monkeypatch, capsys, tmp_path):
+    write_report(tmp_path, ok=False, problems=["p" * 5000, "\x1b[31mred"])
+    _, second = runs(world, monkeypatch, capsys, 2)
+    assert len(second) < 700 and "\x1b" not in second
+
+
+def test_formcheck_broken_state_file_does_not_stop_the_sweep(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "formcheck_alert_state.json").write_text("garbage")
+    world.row("approved")
+    assert world.main(monkeypatch) == 0
+    assert len(world.posted) == 1
