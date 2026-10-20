@@ -8,6 +8,7 @@ into two states.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import secrets
@@ -89,8 +90,31 @@ def canonical_json(args: Any) -> str:
     return json.dumps(args, sort_keys=True, separators=(",", ":"))
 
 
+# R22 (live finding): the withHuman gateway adds ``withhuman_scope: "default"`` to the arguments it delivers to
+# the pipeline (the model's call usually has none), and the server/pipeline never receive ``withhuman_context``
+# (the model may send it). Park-time and bridge-time digests both go through this one function.
+GATEWAY_SCOPE_KEY = "withhuman_scope"
+GATEWAY_CONTEXT_KEY = "withhuman_context"
+GATEWAY_DEFAULT_SCOPE = "default"
+
+
+def normalize_args(args: Any) -> Any:
+    """Arguments as the gateway's approval pipeline sees them, for digesting only (never for dispatch).
+
+    Deep copy; top-level ``withhuman_context`` dropped; top-level ``withhuman_scope`` defaulted to
+    ``"default"`` when absent (an explicit scope is kept, so the scope stays part of the match).
+    Non-object arguments are returned as a copy, unchanged.
+    """
+    normalized = copy.deepcopy(args)
+    if isinstance(normalized, dict):
+        normalized.pop(GATEWAY_CONTEXT_KEY, None)
+        normalized.setdefault(GATEWAY_SCOPE_KEY, GATEWAY_DEFAULT_SCOPE)
+    return normalized
+
+
 def args_digest(args: Any) -> str:
-    return hashlib.sha256(canonical_json(args).encode()).hexdigest()
+    """sha256 of the canonical JSON of the NORMALIZED arguments (see ``normalize_args``)."""
+    return hashlib.sha256(canonical_json(normalize_args(args)).encode()).hexdigest()
 
 
 def call_key(session_id: str, tool_call_id: str) -> str:

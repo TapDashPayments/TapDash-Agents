@@ -469,3 +469,18 @@ def test_parse_args_defaults_and_env(monkeypatch):
     monkeypatch.delenv("DURABLE_PARK_LEDGER")
     with pytest.raises(SystemExit):
         parse_args([])
+
+
+# ---- R22: model-style park vs gateway-style delivery ------------------------------------------
+
+def test_model_args_park_matches_gateway_delivery_with_default_scope(client, ledger):
+    params = {"params": {"CustomerRef": {"value": "58"}, "TotalAmt": 12.5}}
+    row = executing_park(ledger, args={**params, "withhuman_context": "paying invoice 42"})  # what the model sent
+    other = deliver(client, payload(arguments={**params, "withhuman_scope": "other"}, delivery_id="d-o",
+                                    idempotency_key="k-other"))
+    human(other)  # a different scope is a different call
+    assert ledger.get(row.park_id).gateway_passed_at is None
+    resp = deliver(client, payload(arguments={**params, "withhuman_scope": "default"}, delivery_id="d-g",
+                                   idempotency_key="k-gw"))  # what the gateway delivered
+    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
+    assert ledger.get(row.park_id).gateway_passed_at is not None

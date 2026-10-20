@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from durable_park.ledger import Ledger, ParkRow
+from durable_park.ledger import Ledger, ParkRow, args_digest, normalize_args
 
 
 def canonical(args):
@@ -40,7 +40,10 @@ def test_park_is_idempotent(tmp_path):
     assert again.args_json == first.args_json  # original frozen, not overwritten
     assert first.status == "parked"
     assert first.server == "park:quickbooks"
-    assert first.args_digest == hashlib.sha256(canonical({"amount": 5, "to": "x"}).encode()).hexdigest()
+    # R22: the digest is over the normalized arguments (gateway default scope added); args_json stays as given
+    assert first.args_digest == hashlib.sha256(
+        canonical({"amount": 5, "to": "x", "withhuman_scope": "default"}).encode()).hexdigest()
+    assert first.args_json == canonical({"amount": 5, "to": "x"})
     assert first.call_key == hashlib.sha256(b"s1:c1").hexdigest()
     assert len(ledger.list_by_status("parked")) == 1
     other = park(ledger, tool_call_id="c2")
@@ -129,7 +132,7 @@ def test_find_executing_match_and_gateway_pass_once(tmp_path):
     ledger = make_ledger(tmp_path)
     args = {"amount": 5, "to": "x"}
     row = park(ledger, args=args)
-    digest = hashlib.sha256(canonical(args).encode()).hexdigest()
+    digest = args_digest(args)  # R22: the same normalized digest the bridge computes
     # not executing yet -> no match
     assert ledger.find_executing_match(row.tool, digest) is None
     ledger.transition(row.park_id, "parked", "approved")
@@ -157,3 +160,53 @@ def test_ledger_uses_wal_and_unique_constraint(tmp_path):
             )
     finally:
         con.close()
+
+
+# ---- R22: gateway argument normalization ------------------------------------------------------
+
+PARAMS = {"params": {"CustomerRef": {"value": "58"}, "TotalAmt": 12.5}}
+
+
+def test_missing_scope_digests_like_the_gateway_default_scope():
+    assert args_digest(PARAMS) == args_digest({**PARAMS, "withhuman_scope": "default"})
+
+
+def test_an_explicit_other_scope_is_part_of_the_match():
+    assert args_digest({**PARAMS, "withhuman_scope": "other"}) != args_digest(PARAMS)
+    assert args_digest({**PARAMS, "withhuman_scope": "other"}) == args_digest({**PARAMS, "withhuman_scope": "other"})
+
+
+def test_withhuman_context_is_ignored():
+    assert args_digest({**PARAMS, "withhuman_context": "paying invoice 42"}) == args_digest(PARAMS)
+    assert args_digest({**PARAMS, "withhuman_context": "x", "withhuman_scope": "default"}) == args_digest(PARAMS)
+
+
+def test_only_top_level_keys_are_normalized():
+    nested = {"params": {"withhuman_context": "kept", "withhuman_scope": "kept"}}
+    assert normalize_args(nested) == {**nested, "withhuman_scope": "default"}
+    assert args_digest(nested) != args_digest({"params": {}})
+
+
+def test_normalize_args_never_mutates_its_input():
+    original = {"params": {"a": [1, 2]}, "withhuman_context": "c"}
+    snapshot = json.loads(json.dumps(original))
+    normalized = normalize_args(original)
+    normalized["params"]["a"].append(3)
+    assert original == snapshot
+    assert normalize_args({"x": 1}) == {"x": 1, "withhuman_scope": "default"}
+
+
+def test_non_dict_arguments_digest_as_before():
+    assert args_digest([1, 2]) == hashlib.sha256(canonical([1, 2]).encode()).hexdigest()
+
+
+def test_park_stores_the_models_arguments_unchanged_and_matches_gateway_style_arguments(tmp_path):
+    ledger = make_ledger(tmp_path)
+    model_args = {**PARAMS, "withhuman_context": "why"}
+    row = park(ledger, args=model_args)
+    assert json.loads(row.args_json) == model_args  # the executor still dispatches exactly these
+    assert ledger.transition(row.park_id, "parked", "approved")
+    assert ledger.transition(row.park_id, "approved", "executing", executing_at="2026-10-19T12:00:00.000000Z")
+    gateway_args = {**PARAMS, "withhuman_scope": "default"}
+    assert ledger.find_executing_match(row.tool, args_digest(gateway_args)).park_id == row.park_id
+    assert ledger.find_executing_match(row.tool, args_digest({**PARAMS, "withhuman_scope": "other"})) is None
