@@ -6,6 +6,7 @@ import logging
 import re
 from pathlib import Path
 
+from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor
 from .gatecall import make_gate
 from .ledger import Ledger
 from .park_hook import DEFAULT_RISKY_TOOLS, fail_closed_hook, make_pre_tool_call
@@ -33,7 +34,10 @@ def _compile_risky(patterns) -> list[re.Pattern]:
 
 
 def register(ctx) -> None:
-    """Hermes plugin entry point. Task 4 wires ``pre_tool_call``; the tool and gateway hook come later."""
+    """Hermes plugin entry point: the ``pre_tool_call`` park hook and the ``parked_action_execute`` tool.
+
+    The ``pre_gateway_dispatch`` hook comes later.
+    """
     risky = _compile_risky(ctx.get_config("risky_tools", list(DEFAULT_RISKY_TOOLS)))
     base_url = ctx.get_config("aap_base_url", DEFAULT_AAP_BASE_URL)
     token_file = ctx.get_config("token_file", DEFAULT_TOKEN_FILE)
@@ -52,3 +56,10 @@ def register(ctx) -> None:
         ctx.register_hook("pre_tool_call", fail_closed_hook(risky))
         return
     ctx.register_hook("pre_tool_call", make_pre_tool_call(ledger, gate_factory, risky))
+    # ctx.dispatch_tool -> registry.dispatch does not run pre_tool_call hooks, so the executor's own
+    # dispatch cannot be blocked by the park hook.
+    ctx.register_tool(
+        name=EXECUTE_SCHEMA["name"], toolset="durable_park", schema=EXECUTE_SCHEMA,
+        handler=make_executor(ledger, gate_factory, ctx.dispatch_tool,
+                              crash_after_consume=crash_after_consume_enabled()),
+        description=EXECUTE_SCHEMA["description"])

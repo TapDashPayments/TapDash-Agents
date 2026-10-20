@@ -7,6 +7,7 @@ import pytest
 from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
 from durable_park import register
+from durable_park.executor import EXECUTE_SCHEMA
 from durable_park.gatecall import build_call, bounded_http, make_gate
 from durable_park.ledger import Ledger, call_key
 from durable_park.park_hook import DEFAULT_RISKY_TOOLS, make_pre_tool_call
@@ -166,6 +167,7 @@ class FakeCtx:
         self.config = config or {}
         self.state = SimpleNamespace(data_dir=data_dir)
         self.hooks = {}
+        self.tools = {}
         self.asked = []
 
     def get_config(self, key, default=None):
@@ -175,11 +177,20 @@ class FakeCtx:
     def register_hook(self, name, callback):
         self.hooks[name] = callback
 
+    def register_tool(self, name, toolset, schema, handler, **kwargs):
+        self.tools[name] = SimpleNamespace(toolset=toolset, schema=schema, handler=handler, **kwargs)
+
+    def dispatch_tool(self, tool_name, args, **kwargs):
+        raise AssertionError("not expected in registration tests")
+
 
 def test_register_wires_pre_tool_call_with_default_settings(tmp_path):
     ctx = FakeCtx(tmp_path / "data")
     register(ctx)
     assert set(ctx.hooks) == {"pre_tool_call"}
+    assert set(ctx.tools) == {"parked_action_execute"}
+    tool = ctx.tools["parked_action_execute"]
+    assert tool.toolset == "durable_park" and tool.schema == EXECUTE_SCHEMA and callable(tool.handler)
     assert {"risky_tools", "aap_base_url", "token_file", "ledger_path"} <= set(ctx.asked)
     assert (tmp_path / "data" / "ledger.db").exists()  # default ledger_path under state.data_dir
     # defaults classify risky tools; non-risky ones pass without touching the network or token file
@@ -213,6 +224,7 @@ def test_register_fails_closed_when_ledger_cannot_open(tmp_path):
     result = hook(tool_name="mcp__wh__quickbooks__create_payment", args={}, session_id="s", tool_call_id="c")
     assert result == {"action": "block", "message": COULD_NOT_OPEN}
     assert hook(tool_name="mcp__wh__quickbooks__search_customers", args={}, session_id="s", tool_call_id="c") is None
+    assert ctx.tools == {}  # without a ledger there is nothing to execute
 
 
 REUSED = "durable-park: this tool call id was already used for a different call; the call was not run"
@@ -293,3 +305,22 @@ def test_bounded_http_clamps_per_request_timeouts():
     assert all(v == 10.0 for v in seen[0].values())
     assert all(v == 10.0 for v in seen[1].values())
     assert all(v == 3.0 for v in seen[2].values())
+
+
+@pytest.mark.parametrize("env_value, expected", [("1", True), ("0", False), (None, False)])
+def test_register_passes_crash_flag_and_dispatch_to_executor(tmp_path, monkeypatch, env_value, expected):
+    if env_value is None:
+        monkeypatch.delenv("DURABLE_PARK_CRASH_AFTER_CONSUME", raising=False)
+    else:
+        monkeypatch.setenv("DURABLE_PARK_CRASH_AFTER_CONSUME", env_value)
+    seen = {}
+
+    def spy(ledger, gate_factory, dispatch, **kwargs):
+        seen.update(dispatch=dispatch, **kwargs)
+        return lambda args, **kw: "{}"
+
+    monkeypatch.setattr("durable_park.make_executor", spy)
+    ctx = FakeCtx(tmp_path)
+    register(ctx)
+    assert seen["crash_after_consume"] is expected
+    assert seen["dispatch"] == ctx.dispatch_tool
