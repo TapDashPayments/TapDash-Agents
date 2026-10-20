@@ -7,6 +7,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 - [Deploy a change](#deploy-a-change)
 - [Alerts and what to do](#alerts-and-what-to-do)
 - [Troubleshooting](#troubleshooting)
+- [Add a new risky tool](#add-a-new-risky-tool)
 - [Rotate secrets before production](#rotate-secrets-before-production)
 - [Rollback](#rollback)
 
@@ -61,17 +62,22 @@ PY
 
 1. **Change, test, document, push** (in the clone, as `hermes`):
 
+   The gateway and the sweep load code straight from the live clone, so never edit there. Work in a worktree,
+   then fast-forward the live clone:
+
    ```sh
-   cd /home/hermes/tapdash-agents
-   git pull --ff-only
-   # edit code AND the docs it affects (see CONTRIBUTING.md)
-   cd durable-park && .venv/bin/pytest -q -W error && cd ..
+   cd /home/hermes/tapdash-agents && git pull --ff-only
+   git worktree add ../wt-myfix -b myfix && cd ../wt-myfix
+   # edit code AND the docs it affects (see CONTRIBUTING.md); tests use the live clone's venv:
+   (cd durable-park && /home/hermes/tapdash-agents/durable-park/.venv/bin/pytest -q -W error)
    git add -A && git commit
-   git push        # the pre-push hook refuses code changes without their docs
+   cd /home/hermes/tapdash-agents && git merge --ff-only myfix && git push   # the hook checks the docs
+   git worktree remove ../wt-myfix && git branch -d myfix
    ```
 
    `git push` uses the VM's deploy key for this repo (`~/.ssh/tapdash_agents_deploy`, set in the clone's
-   `core.sshCommand`). One-time per clone: `git config core.hooksPath .githooks`.
+   `core.sshCommand`). One-time per clone: `git config core.hooksPath .githooks`. Bigger changes go through a
+   pull request and an independent review instead (`CONTRIBUTING.md`).
 
 2. **Make it live**, only when nothing is waiting or running (check [waiting rows](#health-check) first).
 
@@ -79,8 +85,8 @@ PY
    |---|---|
    | `plugin/` (park hook, form check, wake, executor, ledger) | `systemctl --user restart hermes-gateway` (as hermes) |
    | `plugin/durable_park/ledger.py` | also the bridge's copy (root, Yaakov): `sudo install -m 0644 -o root -g root /home/hermes/durable-park/plugin/durable_park/ledger.py /opt/durable-park/plugin/durable_park/ledger.py && sudo systemctl restart durable-park-bridge` |
-   | `bridge/app.py` | root, Yaakov: `sudo install -m 0644 -o root -g root /home/hermes/durable-park/bridge/app.py /opt/durable-park/bridge/app.py && sudo systemctl restart durable-park-bridge` |
-   | `receiver/*.py` | root, Yaakov: copy the changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
+   | any file in `bridge/` | root, Yaakov: copy each changed file, e.g. `sudo install -m 0644 -o root -g root /home/hermes/durable-park/bridge/app.py /opt/durable-park/bridge/app.py`, then `sudo systemctl restart durable-park-bridge` |
+   | any file in `receiver/` | root, Yaakov: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
    | `deploy/` (units, policy, Hermes config) | `sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh` (idempotent; restarts the gateway) |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
@@ -135,6 +141,11 @@ print(D.execute("select outcome, park_id, name, substr(args_digest,1,16) from de
 PY
 ```
 
+The bridge's own log says why it answered `human`: `journalctl -u durable-park-bridge -n 20` (root), tag
+`why=`: `no-park` (no matching executing park), `replay` (repeat of an earlier answer), `replay-mismatch` (same
+delivery key, different call), `agent`, `preview`, `type` (not a real block delivery). Argument values are never
+logged.
+
 - **Name differs** (e.g. `create-bill` vs `create_bill`): the bridge must build names the way Hermes does
   (`bridge/app.py: hermes_tool_name`). Was the bridge's `/opt` copy updated?
 - **Digest differs**: the gateway rewrote the arguments (seen so far: added `withhuman_scope`, `2.0` sent as `2`).
@@ -161,6 +172,24 @@ PY
 The sweep re-posts the wake every 5 minutes. If it still does not arrive: health check (gateway up? webhook route
 `/health`?), then `journalctl -u durable-park-receiver -n 20` for wake errors.
 
+## Add a new risky tool
+
+Example: make DocuSign `createEnvelope` need approval. Every place that has to agree:
+
+1. **withHuman**: register the server (e.g. slug `docusign`) and grant it to agent `proto-agents`
+   ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add it to pipeline
+   **rule 2**, so the bridge decides its replays ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
+2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
+   other `mcp__wh__` tool registers. Allow the new server there.
+3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*`. Allow the new prefix.
+4. **Risky list**: the plugin parks tools matching `risky_tools` (Hermes setting
+   `plugins.entries.durable-park.settings.risky_tools`, default `DEFAULT_RISKY_TOOLS` in
+   `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in the default.
+5. **Docs**: the pipeline table and system map in [architecture.md](architecture.md), this runbook, the setup guide.
+6. **Test**: unit tests for the new pattern, then one live park, approve and run.
+
+The form check needs nothing: it reads each tool's rules from Hermes automatically.
+
 ## Rotate secrets before production
 
 Several secrets were pasted into chat during testing (approved for testing only). Before any real books:
@@ -173,12 +202,13 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - [ ] Rotate the `durable-park-bridge` webhook endpoint secret and re-store `bridge_secret`
 - [ ] Regenerate `wake_secret`
 - [ ] Revoke any GitHub token shared in chat; keep only the VM's deploy key for this repo
-- [ ] Fix the v2 Important items still open in [acceptance-2026-10-20.md](acceptance-2026-10-20.md) and decide the
-      write-tool scope
+- [ ] Then the rest of the [backlog's "Before real books" list](backlog.md#before-real-books)
 
 ## Rollback
 
 - **Code**: `git revert <commit>` in the clone, push, then make it live as in [Deploy a change](#deploy-a-change).
+  For the bridge and receiver that includes copying the reverted files to `/opt/durable-park` again: the root
+  copies do not change by themselves.
 - **The October 2026 move to the GitHub clone**: the previous standalone repo is kept at
   `/home/hermes/durable-park.pre-github`. To go back: `rm /home/hermes/durable-park` (the link), move
   `.venv` and `.superpowers` back from `tapdash-agents/durable-park/`, rename `durable-park.pre-github` to

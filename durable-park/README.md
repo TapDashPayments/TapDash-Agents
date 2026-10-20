@@ -63,7 +63,8 @@ Live checks against the sandbox run only on the VM: `DURABLE_PARK_LIVE=1 .venv/b
 | [form-check.md](docs/form-check.md) | Understand the check that runs before anyone is asked |
 | [gateway-setup.md](docs/gateway-setup.md) | Set up QuickBooks behind the withHuman gateway, the bridge and the pipeline rules |
 | [receiver-setup.md](docs/receiver-setup.md) | Set up the receiver, provisioning and the agent's tool lockdown |
-| [acceptance-2026-10-20.md](docs/acceptance-2026-10-20.md) | See what was tested for v1 and the v2 backlog |
+| [backlog.md](docs/backlog.md) | See what is still open, and what must be done before real books |
+| [acceptance-2026-10-20.md](docs/acceptance-2026-10-20.md) | See what was tested for v1 (the record) |
 | [plans/](docs/plans/) | The original build plan (historical) |
 
 Changing code? Update the docs and diagrams it affects in the same change - see [CONTRIBUTING.md](../CONTRIBUTING.md).

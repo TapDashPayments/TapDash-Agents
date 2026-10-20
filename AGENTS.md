@@ -18,7 +18,8 @@ optional, and the tooling enforces it (pre-push hook, CI). Before you finish:
 - Re-read the diagram or table that describes what you changed, and confirm it is still true. The check only
   knows *which* doc to touch, not whether you got it right.
 - A new file goes into [`.github/docs-map.json`](.github/docs-map.json).
-- Use `Docs-Not-Needed: <reason>` only for real no-op changes, and say so in your summary to the user.
+- Use `Docs-Not-Needed: <reason>` only when behaviour and interfaces do not change (a typo, a comment, a local
+  rename), and say so in your summary to the user.
 
 Details: [CONTRIBUTING.md](CONTRIBUTING.md).
 

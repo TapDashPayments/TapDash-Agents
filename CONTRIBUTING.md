@@ -9,7 +9,8 @@ cd durable-park && python3 -m venv .venv && .venv/bin/pip install -r requirement
 
 ## Making a change
 
-1. Branch (or, for operations work on the VM, commit on `main` in `/home/hermes/tapdash-agents`).
+1. Work on a branch. On the VM, use a git worktree, never the live clone's working tree: the gateway and the
+   sweep load code from it ([runbook](durable-park/docs/runbook.md#deploy-a-change)).
 2. Change the code **and the docs it affects** (next section).
 3. Run the tests: `cd durable-park && .venv/bin/pytest -q -W error`. New behaviour needs a test.
 4. Push. Open a pull request for anything beyond operations fixes; the template has the checklist.
@@ -35,7 +36,8 @@ What counts as affected:
 ### How it is enforced
 
 [`.github/docs-map.json`](.github/docs-map.json) maps code to the docs that describe it. For every rule, a change
-to its code must also change at least one of its docs.
+to its code must also change at least one of its docs. That is the **minimum** the tooling can check. You still
+update every doc that is affected, and you check that what it now says is true.
 
 | Where | What runs |
 |---|---|
@@ -49,7 +51,8 @@ See the rules: `python3 tools/docs_check/check_docs.py --explain`.
 **Adding a file?** Add it to a rule in `docs-map.json` (or to `exempt` if it is a test or a doc). CI fails until
 you do.
 
-**Really no doc change needed** (a pure refactor, a typo)? Add a trailer line to a commit message with the reason:
+**Really no doc change needed** (no change in behaviour or interface: a typo, a comment, a local rename)? Add a
+trailer line to a commit message with the reason:
 
 ```
 Docs-Not-Needed: renamed a local variable, no behaviour change

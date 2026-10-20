@@ -12,6 +12,7 @@ state or a threshold, update the matching diagram or table here in the same chan
 - [6. Where everything runs](#6-where-everything-runs)
 - [7. Secrets and who can read them](#7-secrets-and-who-can-read-them)
 - [8. Numbers that matter](#8-numbers-that-matter)
+- [Glossary](#glossary)
 
 ## The three guarantees
 
@@ -20,6 +21,11 @@ state or a threshold, update the matching diagram or table here in the same chan
 2. **An approved call runs at most once, exactly as approved.** The approval is consumed once; the bridge's pass is
    used once; arguments must match the saved ones.
 3. **A crash never causes a silent retry.** If the outcome is unclear the row becomes `unknown` and a person checks.
+
+How strong is the first guarantee today? The plugin, the bridge and the ledger all trust the user `hermes`, which
+is also the user the agent runs as. What stops the agent from writing a fake "approved" row is that it has **no
+file or terminal tools at all** (the tool lockdown, `deploy/hermes_tool_policy.py`). That is a configuration guard,
+not a permission boundary; making it one is on the [backlog](backlog.md).
 
 ## 1. System map
 
@@ -102,13 +108,20 @@ flowchart LR
 | sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, alerts when the form checker is broken. |
 | tunnel | `deploy/tunnel/` | Runs Intuit's QuickBooks MCP server behind the withHuman gateway (sandbox). |
 
-**The withHuman entry pipeline** (configured in the withHuman app, not in this repo; live revision 8):
+**The withHuman entry pipeline** (configured in the withHuman app, not in this repo; as of October 2026,
+revision 8):
 
 | Order | When | Then |
 |---|---|---|
 | 1 | Agent `proto-agents` and (server starts with `park:` or tool starts with `mcp__wh__`) - a park request | Ask Yaakov |
 | 2 | Server `quickbooks` and the tool is one of the 12 money types (create/update/delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Webhook block `durable-park-bridge`: answers approve or human (human asks Yaakov) |
 | 3 | Everything else (reads and other writes) | Approve |
+
+**Who approves:** Yaakov only, through the escalation path `notify-yaakov-yehuda` in withHuman. Adding a backup
+approver is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
+request shows the tool as `mcp__wh__quickbooks__...` (server `park:quickbooks`) - that is the one to approve. A
+request with the plain tool name (`create_payment`, server `quickbooks`) means the bridge did not recognise a
+replay, so this is a second ask for the same action ([runbook](runbook.md#yaakov-was-asked-twice-for-one-action)).
 
 Setup steps for the pipeline: [gateway-setup.md](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline).
 
@@ -164,7 +177,9 @@ Notes:
   the replay is not parked again.
 - Step 18: the bridge matches on the Hermes tool name (built the way Hermes builds it, `bridge.app.hermes_tool_name`)
   and a digest of the arguments (`ledger.normalize_args`: ignores `withhuman_context`, defaults `withhuman_scope`,
-  treats `2.0` as `2`). Anything that does not match goes to a person - never auto-approved.
+  treats `2.0` as `2`). Anything that does not match goes to a person - never auto-approved. If withHuman
+  retries the **same** delivery (same idempotency key), the bridge repeats its earlier answer; that is the same
+  request, not a second run.
 
 ## 3. Ledger states
 
@@ -235,9 +250,9 @@ tool's rules work, and writes `formcheck_status.json`. The sweep alerts once if 
 | Bad form (missing required field, wrong type) | Blocked before parking; the model is told the exact problem. | Nobody (the model fixes it) |
 | Form checker cannot run | Risky calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Ledger cannot be opened at start | Every risky call is blocked; wakes are dropped; no executor tool. | Fix the ledger file |
-| Another park is still waiting in the chat | New risky call blocked: "already waiting". | Decide the waiting one |
+| Another park is still waiting in the chat | New risky call blocked: "already waiting". A park can wait up to 168 h, and the chat cannot start another risky action until it is decided. | Decide the waiting one |
 
-Known gaps (v2 backlog, see [acceptance-2026-10-20.md](acceptance-2026-10-20.md)): an inject Hermes accepted but
+Known gaps (see the [backlog](backlog.md)): an inject Hermes accepted but
 dropped is never retried; a `parked` row without a request id blocks its chat until handled by hand; the bridge's
 replay store is not tied to the withHuman request id.
 
@@ -290,3 +305,20 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | 300 s | Allowed clock difference on the bridge signature | `bridge/app.py` |
 | 60 s | Hermes waits this long for the park hook | `plugins.hook_callback_timeout` |
 | 3 failures / 60 s | Hermes pauses an MCP server after 3 failed calls (blocked calls never reach it) | Hermes `tools/mcp_tool.py` |
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| Hermes | Hermes Agent (Nous Research): the agent runtime. Its **gateway** connects the model to chat apps and tools. |
+| withHuman | The approval service. Holds approval requests, the MCP gateway and the pipeline rules. |
+| AAP | Agent Approval Protocol: withHuman's API for approval requests (open, read, consume once). |
+| MCP | Model Context Protocol: how Hermes calls tools. QuickBooks tools arrive through withHuman's **MCP gateway**. |
+| park | Stopping a risky call before it runs and saving it in the ledger, with an open approval request. |
+| wake | A small signed message telling the plugin "look at this park again". It carries only the park id. |
+| gateway pass | The one-time "yes" the bridge gives for one approved park. Used once, then gone. |
+| digest | A fingerprint (sha256) of a call's arguments, used to check a replay is the exact approved call. |
+| sweep | The 5-minute cron script that catches anything missed and sends alerts. |
+| tunnel | withHuman's container that runs a tool server (here QuickBooks) on the VM and dials out to withHuman. |
+| Funnel | Tailscale Funnel: exposes two local paths of the VM to the internet so withHuman can reach them. |
+| jump host | The production Hermes server Claude's connector runs on; it reaches the VM over SSH. Never changed. |

@@ -14,8 +14,8 @@ runs once, and the assistant reports back in the same chat. If he denies it, not
 can't lose a request or make it run twice. If anything is unclear, it stops and asks a person instead of guessing.
 
 **Where it stands:** working and tested on a test server with a QuickBooks **sandbox** (fake books) since
-October 2026. It is not connected to real books yet. That needs the security steps in the
-[runbook](durable-park/docs/runbook.md#rotate-secrets-before-production) first.
+October 2026. It is not connected to real books yet. First the secrets need rotating, and a short list of
+safety items needs finishing: [what is left](durable-park/docs/backlog.md#before-real-books).
 
 ## What is in this repo
 
