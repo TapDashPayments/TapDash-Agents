@@ -4,10 +4,10 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from agentapprovalprotocol.testing import FakeProvider
+from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
 from durable_park import register
-from durable_park.gatecall import build_call
+from durable_park.gatecall import build_call, bounded_http, make_gate
 from durable_park.ledger import Ledger, call_key
 from durable_park.park_hook import DEFAULT_RISKY_TOOLS, make_pre_tool_call
 
@@ -26,11 +26,8 @@ def park_message(park_id, tool):
 def env(tmp_path):
     ledger = Ledger(str(tmp_path / "ledger.db"))
     provider = FakeProvider(auto=None)
-    from durable_park.gatecall import make_gate
-    from agentapprovalprotocol.testing import BASE_URL, TOKEN
-
     hook = make_pre_tool_call(
-        ledger, lambda: make_gate(BASE_URL, TOKEN, client=provider.client()), RISKY, lambda: SESSION_KEY)
+        ledger, lambda: make_gate(BASE_URL, TOKEN, client=provider.client(retry_budget=0.5)), RISKY, lambda: SESSION_KEY)
     return SimpleNamespace(ledger=ledger, provider=provider, hook=hook, tmp_path=tmp_path)
 
 
@@ -94,9 +91,6 @@ def test_second_risky_call_blocked_while_parked(env):
 
 
 def test_no_session_key_blocks(env):
-    from durable_park.gatecall import make_gate
-    from agentapprovalprotocol.testing import BASE_URL, TOKEN
-
     hook = make_pre_tool_call(
         env.ledger, lambda: make_gate(BASE_URL, TOKEN, client=env.provider.client()), RISKY, lambda: "")
     result = call(hook, "mcp__wh__quickbooks__create_payment")
@@ -156,9 +150,6 @@ def test_concurrent_loser_is_cancelled(env):
                 return []  # the pre-check ran just before the other call parked
             return super().active_for_session(session_key)
 
-    from durable_park.gatecall import make_gate
-    from agentapprovalprotocol.testing import BASE_URL, TOKEN
-
     ledger = Racy(str(env.tmp_path / "racy.db"))
     hook = make_pre_tool_call(
         ledger, lambda: make_gate(BASE_URL, TOKEN, client=env.provider.client()), RISKY, lambda: SESSION_KEY)
@@ -196,19 +187,23 @@ def test_register_wires_pre_tool_call_with_default_settings(tmp_path):
                                       session_id="s", tool_call_id="c") is None
 
 
-def test_register_honours_settings_and_fails_closed_without_token(tmp_path):
+def test_register_honours_settings_and_fails_closed_without_token(tmp_path, monkeypatch):
     ctx = FakeCtx(tmp_path, {
         "ledger_path": str(tmp_path / "custom.db"),
         "token_file": str(tmp_path / "no-such-token"),
         "risky_tools": [r"mcp__wh__custom__do_it"],
     })
+    monkeypatch.setattr("durable_park.park_hook.default_session_key", lambda: SESSION_KEY)
     register(ctx)
     assert (tmp_path / "custom.db").exists()
     hook = ctx.hooks["pre_tool_call"]
+    # the custom list replaces the defaults
     assert hook(tool_name="mcp__wh__quickbooks__create_payment", args={}, session_id="s", tool_call_id="c") is None
-    # custom risky pattern is active; the missing token file makes it fail closed (and it needs a chat session)
+    # custom pattern is risky and has a chat session; only the unreadable token file can stop it
     result = hook(tool_name="mcp__wh__custom__do_it", args={}, session_id="s", tool_call_id="c")
-    assert result["action"] == "block"
+    assert result == {"action": "block", "message": COULD_NOT_OPEN}
+    (row,) = Ledger(str(tmp_path / "custom.db")).list_by_status("cancelled")
+    assert row.tool == "mcp__wh__custom__do_it"
 
 
 def test_register_fails_closed_when_ledger_cannot_open(tmp_path):
@@ -218,3 +213,83 @@ def test_register_fails_closed_when_ledger_cannot_open(tmp_path):
     result = hook(tool_name="mcp__wh__quickbooks__create_payment", args={}, session_id="s", tool_call_id="c")
     assert result == {"action": "block", "message": COULD_NOT_OPEN}
     assert hook(tool_name="mcp__wh__quickbooks__search_customers", args={}, session_id="s", tool_call_id="c") is None
+
+
+REUSED = "durable-park: this tool call id was already used for a different call; the call was not run"
+
+
+def test_replay_of_decided_row_is_blocked_without_new_request(env):
+    tool = "mcp__wh__quickbooks__create_payment"
+    call(env.hook, tool)
+    (row,) = env.ledger.list_by_status("parked")
+    assert env.ledger.transition(row.park_id, "parked", "denied")
+    result = call(env.hook, tool)
+    assert result["action"] == "block"
+    assert row.park_id in result["message"] and "denied" in result["message"]
+    assert not result["message"].startswith("PARKED")
+    assert len(env.provider.requests) == 1
+    assert len(env.ledger.list_by_status("parked", "denied", "cancelled")) == 1
+
+
+def test_same_id_different_args_is_refused(env):
+    tool = "mcp__wh__quickbooks__create_payment"
+    first = call(env.hook, tool, {"amount": 5})
+    (row,) = env.ledger.list_by_status("parked")
+    result = call(env.hook, tool, {"amount": 9999})
+    assert result == {"action": "block", "message": REUSED}
+    assert first["message"].startswith("PARKED ")
+    assert len(env.provider.requests) == 1
+    assert env.ledger.get(row.park_id).status == "parked"
+    assert len(env.ledger.list_by_status("parked")) == 1
+
+
+def test_same_id_different_tool_is_refused(env):
+    call(env.hook, "mcp__wh__quickbooks__create_payment")
+    result = call(env.hook, "mcp__wh__quickbooks__create_bill")
+    assert result == {"action": "block", "message": REUSED}
+    assert len(env.provider.requests) == 1
+    assert len(env.ledger.list_by_status("parked")) == 1
+
+
+def test_same_id_same_args_replay_keeps_parked_message(env):
+    first = call(env.hook, "mcp__wh__quickbooks__create_payment", {"b": 2, "a": 1})
+    again = call(env.hook, "mcp__wh__quickbooks__create_payment", {"a": 1, "b": 2})
+    assert again == first
+    assert len(env.provider.requests) == 1
+
+
+def test_transport_error_blocks_and_cancels(env):
+    def boom(request):
+        raise httpx.ConnectError("network down")
+
+    env.provider.intercept = boom
+    result = call(env.hook, "mcp__wh__quickbooks__create_payment")
+    assert result == {"action": "block", "message": COULD_NOT_OPEN}
+    assert env.ledger.list_by_status("parked") == []
+    (row,) = env.ledger.list_by_status("cancelled")
+    assert row.request_id is None
+
+
+def test_make_gate_bounds_network_waits():
+    gate = make_gate(BASE_URL, TOKEN)
+    client = gate.client
+    assert client.retry_budget == 8
+    assert client._http.timeout == httpx.Timeout(10)
+    assert client._http.follow_redirects is False
+
+
+def test_bounded_http_clamps_per_request_timeouts():
+    seen = []
+
+    class Recorder(httpx.BaseTransport):
+        def handle_request(self, request):
+            seen.append(dict(request.extensions["timeout"]))
+            return httpx.Response(200, json={})
+
+    http = bounded_http(Recorder())
+    http.request("GET", "https://example.test/a", timeout=40.0)          # SDK default per attempt
+    http.request("GET", "https://example.test/b", timeout=35.0)          # SDK poll: wait(25) + 10
+    http.request("GET", "https://example.test/c", timeout=3.0)           # smaller values are kept
+    assert all(v == 10.0 for v in seen[0].values())
+    assert all(v == 10.0 for v in seen[1].values())
+    assert all(v == 3.0 for v in seen[2].values())

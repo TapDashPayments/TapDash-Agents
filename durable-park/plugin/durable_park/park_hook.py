@@ -9,7 +9,7 @@ from typing import Any, Callable
 from agentapprovalprotocol import Allow, Pending
 
 from .gatecall import build_call
-from .ledger import Ledger, call_key
+from .ledger import Ledger, args_digest, call_key
 
 log = logging.getLogger("durable_park")
 
@@ -33,6 +33,9 @@ COULD_NOT_OPEN_MESSAGE = "durable-park: could not open an approval request; the 
 ALREADY_WAITING_MESSAGE = (
     "durable-park: {park_id} is already waiting for approval in this chat; "
     "this call was not run. Do not retry it; wait until {park_id} is decided."
+)
+ID_REUSED_MESSAGE = (
+    "durable-park: this tool call id was already used for a different call; the call was not run"
 )
 NOT_PARKED_MESSAGE = "durable-park: {park_id} is already {status}; this call was not run again"
 
@@ -59,7 +62,7 @@ def default_session_key() -> str:
 
 
 def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: list[re.Pattern],
-                       session_key_fn: Callable[[], str] = default_session_key) -> Callable[..., dict | None]:
+                       session_key_fn: Callable[[], str] | None = None) -> Callable[..., dict | None]:
     """Build the hook. ``gate_factory`` is called per park so the token file is read lazily."""
 
     def is_risky(tool_name: str) -> bool:
@@ -72,7 +75,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
         park_id: str | None = None
         request_opened = False
         try:
-            session_key = session_key_fn() or ""
+            session_key = (session_key_fn or default_session_key)() or ""
             if not session_key:
                 return _block(NO_SESSION_MESSAGE)
             session_id = str(kw.get("session_id") or "")
@@ -97,6 +100,11 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
                 session_key=session_key, session_id=session_id, tool_call_id=tool_call_id, tool=tool,
                 args=args, call_key=call_key(session_id, tool_call_id), server="park:" + gateway_slug(tool))
             park_id = row.park_id
+            if row.tool != tool or row.args_digest != args_digest(args):
+                # Providers may reuse a tool_call_id; never answer for a different call with the old park.
+                log.warning("tool call id reused for a different call: %s tool=%s", row.park_id, tool)
+                park_id = None  # the existing row belongs to the earlier call; leave it alone
+                return _block(ID_REUSED_MESSAGE)
             if row.status != "parked":
                 return _block(NOT_PARKED_MESSAGE.format(park_id=row.park_id, status=row.status))
             if row.request_id:
