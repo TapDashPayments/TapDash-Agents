@@ -37,8 +37,12 @@ answering non-2xx (e.g. 401 before provisioning).
 | `~hermes/.hermes/scripts/durable_park_sweep.sh` | hermes 0750 | configure_hermes.sh | cron wrapper: `exec /usr/bin/python3 -I <repo>/scripts/durable_park_sweep.py --ledger <ledger> --wake-secret-file /etc/durable-park/wake_secret` |
 
 The webhook route's secret in `config.yaml` is the reference `${env:DURABLE_PARK_WAKE_SECRET}`. Hermes's
-`command` secret source (`secrets.command.command`: `sed -n 's/^/DURABLE_PARK_WAKE_SECRET=/p' /etc/durable-park/wake_secret`)
-supplies the value at every Hermes start, so the secret exists at rest only in `/etc/durable-park/wake_secret`.
+`command` secret source (`secrets.command.command: /opt/durable-park/libexec/hermes-secrets`, a root-owned
+helper written by configure_hermes.sh) supplies the value at every Hermes start, so the secret exists at rest
+only in `/etc/durable-park/wake_secret`. Once `instance_token` exists the same helper also prints
+`DURABLE_PARK_WH_TOKEN` for the `wh` MCP server (deploy/hermes_mcp.sh). These variables are in the gateway's
+environment and Hermes does not strip custom names from terminal-tool children; that exposes nothing new on
+this VM (the agent's terminal runs as `hermes`, which can read both files anyway).
 Side effect: every `hermes` CLI command prints `Command helper: applied 1 secret` and a harmless
 `Config ref '${env:DURABLE_PARK_WAKE_SECRET}' ... is not set` line (the CLI reads config before the
 secret source runs; the gateway gets the real value, verified with a signed test wake).

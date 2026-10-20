@@ -340,5 +340,44 @@ If the bridge is down, answers `401` or times out, the webhook block fails and t
   example by agent or tool name) and update this section.
 - UI names (Webhook endpoints menu location, Branch vs Delegate block, "Entry pipeline") are from the docs, not
   seen on the live tenant. Whether the endpoint **test** accepts a `human` answer for a non-block delivery type.
-- `/opt/durable-park/venv` as the service's Python and `dpwake` as an existing group are assumptions in the unit
-  file; the deploy step creates them.
+- Deploy: `deploy/configure_hermes.sh` installs the bridge (Python `/opt/durable-park/bin/python`, the
+  receiver's venv; code copied to `/opt/durable-park/bridge` and `/opt/durable-park/plugin`), enables and starts
+  the unit and adds the Funnel path `/wh/bridge`. Until `bridge_secret` exists every delivery gets `401`.
+
+## Hermes → gateway connection (MCP server `wh`, Task 3)
+
+Hermes talks to the gateway directly over Streamable HTTP. It does not use the `withhuman mcp` stdio relay
+that production uses. Hermes's `mcp_servers` accepts `url` + `headers` (reference:
+`website/docs/reference/mcp-config-reference.md`), and `${env:VAR}` in `url`/`headers` is resolved when the
+server connects (`tools/mcp_tool_config.py:533-563`). An unresolved reference fails closed instead of sending
+the literal text.
+
+`deploy/hermes_mcp.sh` (as root or hermes, after provisioning; it refuses while
+`/etc/durable-park/instance_token` is missing) writes this entry with `hermes config set`:
+
+```yaml
+mcp_servers:
+  wh:
+    url: https://app.withhuman.ai/gateway/mcp
+    headers:
+      Authorization: Bearer ${env:DURABLE_PARK_WH_TOKEN}
+    trust: full                # untrusted blocks the plugin's dispatch_tool replay (dispatch-probe-report)
+    tools: {include: ["quickbooks__*"], resources: false, prompts: false}   # v1: QuickBooks only
+    enabled: true
+```
+
+The token never goes into `config.yaml` or `.env`. `/opt/durable-park/libexec/hermes-secrets` (Hermes's
+`command` secret source) prints `DURABLE_PARK_WH_TOKEN` from `instance_token` at each Hermes start. The script
+then restarts `hermes-gateway` and waits until `mcp__wh__quickbooks__get_company_info` is registered.
+
+The `include` filter also keeps the gateway's built-in `withhuman__*` management tools away from the model.
+Hermes tool names are `mcp__wh__<slug>__<tool>`, so they match the plugin's risky patterns and the bridge's
+`mcp__wh__<server>__<tool>`.
+
+Live check (manual): `DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py`. The pipeline
+must let the read-only `get_company_info` call through.
+
+Known risk: Hermes's docs say that when a Streamable-HTTP session expires while idle, the first call to an
+unannotated (write-capable) tool returns `outcome_uncertain` instead of being retried. The executor treats that
+as `unknown`. So an approved replay after a long idle period can come back as UNKNOWN. Check whether the gateway
+expires idle sessions during Task 8.

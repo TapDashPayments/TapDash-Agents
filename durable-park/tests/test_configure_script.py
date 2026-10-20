@@ -31,7 +31,8 @@ def _code_lines():
 
 def test_never_creates_the_bridge_secret_and_never_echoes_secret_files():
     for line in _code_lines():
-        assert "bridge_secret" not in line, line  # Task 7 owns it
+        if "bridge_secret" in line:  # Yaakov stores it; the script may only check for it
+            assert line.startswith('[[ -e "$ETC/bridge_secret" ]] ||'), line
         # the only reader of the wake secret is the secret-source helper, whose stdout goes to Hermes
         if "wake_secret" in line and ("cat " in line or "echo " in line):
             raise AssertionError(line)
@@ -47,6 +48,9 @@ def test_never_creates_the_bridge_secret_and_never_echoes_secret_files():
     "tailscale funnel --bg --set-path=\"$FUNNEL_PATH\" \"$RECEIVER_LOCAL\"",
     "agentapprovalprotocol==0.3.3", "cron create \"every 5m\" --no-agent", "--deliver telegram",
     "hermes_cli plugins enable", "systemctl enable --quiet \"$UNIT\"",
+    "BRIDGE_FUNNEL_PATH=/wh/bridge", "BRIDGE_LOCAL=http://127.0.0.1:8791/wh/bridge",
+    "tailscale funnel --bg --set-path=\"$BRIDGE_FUNNEL_PATH\" \"$BRIDGE_LOCAL\"",
+    "systemctl enable --quiet \"$BRIDGE_UNIT\"", "set_cfg secrets.command.command \"$SECRETS_HELPER\"",
 ])
 def test_plan_values(needle):
     assert needle in SCRIPT.read_text()
@@ -58,3 +62,33 @@ def test_no_pipe_into_grep_q_under_pipefail():
     assert "set -euo pipefail" in SCRIPT.read_text()
     for line in _code_lines():
         assert not re.search(r"\|\s*grep\b[^|]*-[a-zA-Z]*q", line), line
+
+
+def test_bridge_unit_uses_the_deployed_venv_and_ledger():
+    unit = (SCRIPT.parent / "durable-park-bridge.service").read_text()
+    assert "ExecStart=/opt/durable-park/bin/python -B -m bridge.app --host 127.0.0.1 --port 8791" in unit
+    assert "Environment=DURABLE_PARK_LEDGER=/home/hermes/.hermes/plugin-data/durable-park/ledger.db" in unit
+    assert "User=hermes" in unit and "SupplementaryGroups=dpwake" in unit
+    assert 'LEDGER="$HERMES_HOME/plugin-data/durable-park/ledger.db"' in SCRIPT.read_text()
+
+
+MCP_SCRIPT = SCRIPT.parent / "hermes_mcp.sh"
+
+
+def test_hermes_mcp_script_syntax_and_shellcheck():
+    subprocess.run(["bash", "-n", str(MCP_SCRIPT)], check=True)
+    if _shellcheck() is not None:
+        result = subprocess.run([_shellcheck(), str(MCP_SCRIPT)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_hermes_mcp_script_values_and_guards():
+    text = MCP_SCRIPT.read_text()
+    for needle in ("GATEWAY_URL=https://app.withhuman.ai/gateway/mcp", "set_cfg \"mcp_servers.$SERVER.trust\" full",
+                   "'Bearer ${env:DURABLE_PARK_WH_TOKEN}'", "TOKEN_FILE=/etc/durable-park/instance_token",
+                   "does not exist: provision the instance first", "TOOL_INCLUDE='[\"quickbooks__*\"]'"):
+        assert needle in text, needle
+    code = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    for line in code:
+        assert not ("instance_token" in line and ("cat " in line or "echo " in line)), line
+        assert "untrusted" not in line, line

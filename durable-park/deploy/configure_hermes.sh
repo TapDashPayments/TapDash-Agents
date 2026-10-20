@@ -8,14 +8,19 @@
 #   2. /etc/durable-park/wake_secret: generated once (0640 root:dpwake); never printed. No bridge_secret.
 #   3. receiver venv /opt/durable-park (agentapprovalprotocol + uvicorn + starlette, pinned) and a root-owned
 #      copy of receiver/*.py; system unit durable-park-receiver (enabled + started: it answers 401 to every
-#      event until provision.py has written /etc/durable-park/receiver.json)
+#      event until provision.py has written /etc/durable-park/receiver.json); the Hermes secret-source helper
+#      /opt/durable-park/libexec/hermes-secrets
 #   4. Hermes (as user hermes, through Hermes's own CLI): plugin symlink; `hermes plugins enable` (PM
 #      admission installs the plugin.yaml python_dependencies into Hermes's environment); plugin settings;
 #      plugins.hook_callback_timeout 60; the local webhook platform (127.0.0.1:8644, route durable-park-wake,
 #      deliver log, rate_limit 120) whose secret is ${env:DURABLE_PARK_WAKE_SECRET}, supplied at startup by
-#      the `command` secret source from the wake_secret file (no copy of the secret in config.yaml/.env)
+#      the `command` secret source (the helper above reads wake_secret, and instance_token once it exists, for
+#      deploy/hermes_mcp.sh); no copy of a secret in config.yaml/.env
+#   4b. gateway bridge: root-owned copy of bridge/ + plugin/durable_park under /opt/durable-park, system unit
+#      durable-park-bridge (User=hermes, 127.0.0.1:8791); it answers 401 until Yaakov stores
+#      /etc/durable-park/bridge_secret (never created here), and human while the ledger file is missing
 #   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (every 5m, --no-agent, telegram)
-#   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events
+#   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events and /wh/bridge -> 127.0.0.1:8791/wh/bridge
 #   7. restart: the hermes user manager when the gateway does not carry the dpwake group yet, else the
 #      hermes-gateway user unit; then wait for the plugin's "durable-park loaded" log line
 #
@@ -39,6 +44,12 @@ CRON_NAME=durable-park-sweep
 AAP_BASE_URL=https://app.withhuman.ai/api/aap
 FUNNEL_PATH=/aap/events
 RECEIVER_LOCAL=http://127.0.0.1:8790/aap/events
+BRIDGE_UNIT=durable-park-bridge
+BRIDGE_FUNNEL_PATH=/wh/bridge
+BRIDGE_LOCAL=http://127.0.0.1:8791/wh/bridge
+SECRETS_HELPER="$VENV/libexec/hermes-secrets"
+# Earlier value of secrets.command.command (inline sed); migrated to SECRETS_HELPER.
+OLD_SECRET_COMMAND="sed -n 's/^/DURABLE_PARK_WAKE_SECRET=/p' $ETC/wake_secret"
 # Receiver venv pins: what the repo's tests run against.
 RECEIVER_PACKAGES=("agentapprovalprotocol==0.3.3" "uvicorn==0.54.0" "starlette==1.9.0")
 
@@ -65,6 +76,21 @@ log_since() { awk -v s="$1" 'substr($0, 1, 19) >= s' "$HERMES_HOME/logs/agent.lo
 # grep a captured string, never a pipe: under pipefail, `cmd | grep -q` can report the writer's SIGPIPE
 # (grep exits at the first match) as "not found". Usage: has TEXT GREP-ARGS...
 has() { local text=$1; shift; grep -q "$@" <<<"$text"; }
+# install SRC as DST (root:root, MODE) only when content, mode or owner differ; then sets CHANGED=1
+install_root() {
+    local src=$1 dst=$2 mode=$3
+    if ! cmp -s "$src" "$dst" || [[ "$(stat -c '%a %U:%G' "$dst" 2>/dev/null)" != "${mode#0} root:root" ]]; then
+        install -m "$mode" -o root -g root "$src" "$dst"
+        CHANGED=1
+    fi
+}
+# restart a system unit when CHANGED=1 or it is not running
+restart_if_needed() {
+    if [[ $CHANGED == 1 ]] || ! systemctl is-active --quiet "$1"; then
+        systemctl restart "$1"
+        log "restarted $1"
+    fi
+}
 
 # --- 1. users, groups, directory --------------------------------------------------------------------------
 getent group dpwake >/dev/null || { groupadd --system dpwake; log "created group dpwake"; }
@@ -102,15 +128,32 @@ if [[ ! -x "$VENV/bin/python" ]]; then
     log "created venv $VENV"
 fi
 "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check --no-input "${RECEIVER_PACKAGES[@]}"
-install -d -m 0755 -o root -g root "$VENV/receiver"
+install -d -m 0755 -o root -g root "$VENV/receiver" "$VENV/libexec"
+CHANGED=0
 for f in app.py wake_post.py provision.py; do
-    install -m 0644 -o root -g root "$REPO/receiver/$f" "$VENV/receiver/$f"
+    install_root "$REPO/receiver/$f" "$VENV/receiver/$f" 0644
 done
-install -m 0644 -o root -g root "$REPO/deploy/$UNIT.service" "/etc/systemd/system/$UNIT.service"
-systemctl daemon-reload
+install_root "$REPO/deploy/$UNIT.service" "/etc/systemd/system/$UNIT.service" 0644
+[[ $CHANGED == 1 ]] && systemctl daemon-reload
 systemctl enable --quiet "$UNIT"
-systemctl restart "$UNIT"   # stateless: picks up new code and the current receiver.json
+restart_if_needed "$UNIT"   # stateless; provision.py restarts it itself after writing receiver.json
 log "receiver unit: $(systemctl is-active "$UNIT")"
+
+# Hermes `command` secret source helper: KEY=VALUE lines on stdout, read by Hermes at every start (as hermes;
+# Hermes discards the helper's stderr). The instance token line appears only once provisioning wrote the file.
+helper=$(mktemp)
+cat >"$helper" <<HELPER
+#!/bin/sh
+# durable-park secrets for Hermes (secrets.command). Written by deploy/configure_hermes.sh; edits are overwritten.
+/usr/bin/sed -n '1s/^/DURABLE_PARK_WAKE_SECRET=/p' $ETC/wake_secret || exit 1
+if [ -r $ETC/instance_token ]; then
+    /usr/bin/sed -n '1s/^/DURABLE_PARK_WH_TOKEN=/p' $ETC/instance_token || exit 1
+fi
+exit 0
+HELPER
+CHANGED=0
+install_root "$helper" "$SECRETS_HELPER" 0755
+rm -f "$helper"
 
 # --- 4. Hermes configuration (Hermes's own CLI, as hermes) -------------------------------------------------
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -138,12 +181,12 @@ if ! hermes_cli --run-module agentapprovalprotocol._wire >/dev/null 2>&1; then
 fi
 log "Hermes runtime imports agentapprovalprotocol"
 
-# The secret source runs this at every Hermes start: it reads the wake secret (group dpwake) and hands
-# DURABLE_PARK_WAKE_SECRET=<value> to Hermes over a pipe. Never replace someone else's command source.
-SECRET_COMMAND="sed -n 's/^/DURABLE_PARK_WAKE_SECRET=/p' $ETC/wake_secret"
+# The secret source runs the helper at every Hermes start. Never replace someone else's command source
+# (our own earlier inline sed value is migrated).
 current_command=$(hermes_cli config get secrets.command.command 2>/dev/null || true)
-if [[ -n "$current_command" && "$current_command" != "Config key not set"* && "$current_command" != "$SECRET_COMMAND" ]]; then
-    die "secrets.command.command is already set to another helper; merge it with: $SECRET_COMMAND"
+if [[ -n "$current_command" && "$current_command" != "Config key not set"* \
+      && "$current_command" != "$SECRETS_HELPER" && "$current_command" != "$OLD_SECRET_COMMAND" ]]; then
+    die "secrets.command.command is already set to another helper; merge it with $SECRETS_HELPER"
 fi
 
 set_cfg() { hermes_cli config set "$1" "$2" >/dev/null; }
@@ -153,7 +196,7 @@ set_cfg "plugins.entries.$PLUGIN_ID.settings.aap_base_url" "$AAP_BASE_URL"
 set_cfg "plugins.entries.$PLUGIN_ID.settings.token_file" "$ETC/instance_token"
 set_cfg "plugins.entries.$PLUGIN_ID.settings.ledger_path" "$LEDGER"
 set_cfg secrets.command.enabled true
-set_cfg secrets.command.command "$SECRET_COMMAND"
+set_cfg secrets.command.command "$SECRETS_HELPER"
 set_cfg platforms.webhook.enabled true
 set_cfg platforms.webhook.extra.host 127.0.0.1
 set_cfg platforms.webhook.extra.port 8644
@@ -166,7 +209,24 @@ set_cfg "platforms.webhook.extra.routes.$ROUTE.prompt" \
     "durable-park wake event. The durable-park plugin handles it; if you see this, reply only: ignored."
 log "Hermes config set (plugin settings, hook timeout, webhook route $ROUTE, secret source)"
 
-as_hermes install -d -m 0750 "$(dirname "$LEDGER")"
+as_hermes install -d -m 0750 "$(dirname "$LEDGER")"   # also the bridge unit's ReadWritePaths: must exist
+
+# --- 4b. gateway bridge ------------------------------------------------------------------------------------
+CHANGED=0
+install -d -m 0755 -o root -g root "$VENV/bridge" "$VENV/plugin" "$VENV/plugin/durable_park"
+for f in "$REPO"/bridge/*.py; do
+    install_root "$f" "$VENV/bridge/$(basename "$f")" 0644
+done
+for f in "$REPO"/plugin/durable_park/*.py; do   # the bridge imports durable_park.ledger
+    install_root "$f" "$VENV/plugin/durable_park/$(basename "$f")" 0644
+done
+install_root "$REPO/deploy/$BRIDGE_UNIT.service" "/etc/systemd/system/$BRIDGE_UNIT.service" 0644
+[[ $CHANGED == 1 ]] && systemctl daemon-reload
+systemctl enable --quiet "$BRIDGE_UNIT"
+restart_if_needed "$BRIDGE_UNIT"   # it reads its secret only at start: restart it by hand after storing one
+[[ -e "$ETC/bridge_secret" ]] || log "no $ETC/bridge_secret yet: the bridge answers 401 (Yaakov stores it)"
+[[ -f "$LEDGER" ]] || log "ledger $LEDGER does not exist yet: the bridge answers human until the plugin creates it"
+log "bridge unit: $(systemctl is-active "$BRIDGE_UNIT")"
 
 # --- 5. sweep wrapper + cron -------------------------------------------------------------------------------
 as_hermes install -d -m 0700 "$HERMES_HOME/scripts"
@@ -193,6 +253,9 @@ fi
 funnel_status=$(tailscale funnel status 2>/dev/null || true)
 if ! has "$funnel_status" -F -- "$FUNNEL_PATH"; then
     tailscale funnel --bg --set-path="$FUNNEL_PATH" "$RECEIVER_LOCAL"
+fi
+if ! has "$funnel_status" -F -- "$BRIDGE_FUNNEL_PATH"; then
+    tailscale funnel --bg --set-path="$BRIDGE_FUNNEL_PATH" "$BRIDGE_LOCAL"
 fi
 
 # --- 7. restart Hermes -------------------------------------------------------------------------------------
