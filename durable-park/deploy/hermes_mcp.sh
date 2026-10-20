@@ -52,6 +52,17 @@ else
     die "run as root (sudo) or as $HERMES_USER"
 fi
 hermes_cli() { as_hermes "$HERMES_BIN" "$@"; }
+REPO=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/.." && pwd)
+# deploy/hermes_tool_policy.py in Hermes's own Python (environment path from its facts.json)
+tool_policy() {
+    local py
+    py=$(as_hermes /usr/bin/python3 -I -c 'import glob, json, sys
+facts = glob.glob(sys.argv[1] + "/installs/*/facts.json")
+if len(facts) != 1:
+    sys.exit("expected one Hermes install, found %d" % len(facts))
+print(json.load(open(facts[0]))["packages"]["venv"]["environment"] + "/bin/python")' "$HERMES_HOME") || return 1
+    as_hermes "$py" -I "$REPO/deploy/hermes_tool_policy.py" "$1"
+}
 log_since() { awk -v s="$1" 'substr($0, 1, 19) >= s' "$HERMES_HOME/logs/agent.log" 2>/dev/null || true; }
 
 # --- preconditions -----------------------------------------------------------------------------------------
@@ -81,6 +92,8 @@ set_cfg "mcp_servers.$SERVER.tools.include" "$TOOL_INCLUDE"
 set_cfg "mcp_servers.$SERVER.tools.resources" false
 set_cfg "mcp_servers.$SERVER.tools.prompts" false
 set_cfg "mcp_servers.$SERVER.enabled" true
+# The agent tool policy now names `wh` in every platform list (an MCP allowlist) instead of `no_mcp`.
+tool_policy apply || die "could not apply the agent tool policy"
 if as_hermes cmp -s "$HERMES_HOME/config.yaml" "$HERMES_HOME/config.yaml.bak-hermes-mcp-$stamp"; then
     as_hermes rm -f "$HERMES_HOME/config.yaml.bak-hermes-mcp-$stamp"
     log "config.yaml already had mcp_servers.$SERVER (no change, backup removed)"
@@ -108,4 +121,8 @@ log "${registered#*INFO }"
 has "$registered" -F -- "$EXPECTED_TOOL" \
     || die "$EXPECTED_TOOL is not registered: is the QuickBooks server granted to agent proto-agents in withHuman?"
 has "$(log_since "$since")" -F "durable-park loaded" || log "WARNING: no 'durable-park loaded' line yet after the restart"
+# The agent may still have only durable_park, clarify and mcp__wh__* tools (deploy/hermes_tool_policy.py).
+policy_report=$(tool_policy check) \
+    || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed after adding $SERVER"; }
+log "tool policy ok: $(grep -E '^cli:' <<<"$policy_report")"
 log "done: $EXPECTED_TOOL available. Live check: DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py"

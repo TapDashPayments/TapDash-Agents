@@ -19,6 +19,9 @@
 #   4b. gateway bridge: root-owned copy of bridge/ + plugin/durable_park under /opt/durable-park, system unit
 #      durable-park-bridge (User=hermes, 127.0.0.1:8791); it answers 401 until Yaakov stores
 #      /etc/durable-park/bridge_secret (never created here), and human while the ledger file is missing
+#   4c. agent tool policy (deploy/hermes_tool_policy.py, run in Hermes's own Python): every platform gets only
+#      durable_park + clarify + MCP server wh; every toolset with local file/command/code access is disabled
+#      (closes the ledger bypass: the agent's tools run as hermes, which owns the ledger)
 #   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (every 5m, --no-agent, telegram)
 #   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events and /wh/bridge -> 127.0.0.1:8791/wh/bridge
 #   7. restart: the hermes user manager when the gateway does not carry the dpwake group yet, else the
@@ -72,6 +75,15 @@ as_hermes() {
 hermes_cli() { as_hermes "$HERMES_BIN" "$@"; }
 user_systemctl() { as_hermes systemctl --user "$@"; }
 # agent.log lines written since a "YYYY-MM-DD HH:MM:SS" timestamp
+# Hermes's own Python environment (PM-managed; can change after `hermes pm repair`), read from its facts.json
+hermes_python() {
+    as_hermes /usr/bin/python3 -I -c 'import glob, json, sys
+facts = glob.glob(sys.argv[1] + "/installs/*/facts.json")
+if len(facts) != 1:
+    sys.exit("expected one Hermes install, found %d" % len(facts))
+print(json.load(open(facts[0]))["packages"]["venv"]["environment"] + "/bin/python")' "$HERMES_HOME"
+}
+tool_policy() { as_hermes "$(hermes_python)" -I "$REPO/deploy/hermes_tool_policy.py" "$1"; }
 log_since() { awk -v s="$1" 'substr($0, 1, 19) >= s' "$HERMES_HOME/logs/agent.log" 2>/dev/null || true; }
 # grep a captured string, never a pipe: under pipefail, `cmd | grep -q` can report the writer's SIGPIPE
 # (grep exits at the first match) as "not found". Usage: has TEXT GREP-ARGS...
@@ -211,6 +223,9 @@ log "Hermes config set (plugin settings, hook timeout, webhook route $ROUTE, sec
 
 as_hermes install -d -m 0750 "$(dirname "$LEDGER")"   # also the bridge unit's ReadWritePaths: must exist
 
+# --- 4c. agent tool policy ---------------------------------------------------------------------------------
+tool_policy apply || die "could not apply the agent tool policy"
+
 # --- 4b. gateway bridge ------------------------------------------------------------------------------------
 CHANGED=0
 install -d -m 0755 -o root -g root "$VENV/bridge" "$VENV/plugin" "$VENV/plugin/durable_park"
@@ -284,5 +299,7 @@ if has "$(log_since "$since")" -F "Failed to load plugin '$PLUGIN_ID'"; then
     die "a Hermes process failed to load $PLUGIN_ID after the restart (see $HERMES_HOME/logs/agent.log)"
 fi
 log "gateway: $(user_systemctl is-active hermes-gateway), durable-park loaded"
+policy_report=$(tool_policy check) || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed"; }
+log "agent tools per platform: $(grep -E '^(cli|telegram|cron|webhook|api_server):' <<<"$policy_report" | tr '\n' ';')"
 log "hermes-gateway unit $(user_systemctl show -p Restart hermes-gateway)"
 log "done. Next (human): docs/receiver-setup.md (provisioner token, then provision.py)"

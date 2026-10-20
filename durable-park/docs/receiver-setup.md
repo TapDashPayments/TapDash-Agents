@@ -113,3 +113,49 @@ The plugin reads `instance_token` lazily on each risky call, so no Hermes restar
 
 The cron job delivers to Telegram's **home channel**. Hermes on this VM has no Telegram home channel
 yet, so alert lines would not be delivered. Fix: in the Telegram DM with the bot, send `/sethome`.
+
+## Agent tool policy (v1 fix for the ledger bypass)
+
+The agent's tools run as the `hermes` user. That user owns the ledger and can read `instance_token`. So
+an agent with a terminal or file tool, for example one hijacked by a prompt injection, could write an
+`executing` row and get the bridge to approve a gateway call no human approved.
+
+v1 closes this by giving the model no local file, command, code, browser or scheduling tools at all.
+`deploy/hermes_tool_policy.py` (applied and then checked by `configure_hermes.sh` and `hermes_mcp.sh`)
+sets the following:
+
+- `platform_toolsets.<every platform>` = `[durable_park, clarify, wh]`. Until the `wh` MCP server
+  exists, the list holds `no_mcp` instead of `wh`.
+- `known_plugin_toolsets.<every platform>` = all plugin toolsets.
+- `agent.disabled_toolsets` = every other toolset (terminal, file, code_execution, delegation, cronjob,
+  skills, browser*, computer_use, memory, session_search, kanban, vision, web, …).
+- `tools.tool_search.enabled: off`.
+
+After every deploy, `check` prints each platform's effective tools. The deploy fails if anything other
+than `parked_action_execute`, `clarify` and `mcp__wh__*` is reachable, or if `parked_action_execute` is
+missing. The sweep is a no-agent cron script, so the policy does not affect it.
+
+## v2: separate ledger owner
+
+The v1 tool policy is a configuration guard. A Hermes upgrade, a new plugin toolset or a hand edit could
+re-open the bypass. v2 makes it a privilege boundary instead:
+
+- The ledger and the bridge's delivery records belong to a dedicated system user `dpledger`
+  (`/var/lib/durable-park`, 0700). `hermes` can no longer open the SQLite files.
+- A small ledger service runs as `dpledger` and listens on a unix socket
+  (`/run/durable-park/ledger.sock`, 0660 `dpledger:dpledger-clients`). It exposes only the operations the
+  plugin, sweep and bridge need: park, set_request_id, transition along the allowed edges,
+  mark_notified, list, find_executing_match and mark_gateway_passed.
+- The service checks each caller with `SO_PEERCRED`:
+  - the Hermes gateway uid may park, read, and move rows only along plugin-owned edges;
+  - only the bridge uid may call find_executing_match and mark_gateway_passed;
+  - only the sweep may use the stale-executing → unknown edge.
+- The `parked → approved` and `approved → executing` edges are allowed only after the service itself
+  re-reads the decision from withHuman. So the instance token is readable only by `dpledger`, and the
+  plugin asks the service to open and consume approvals instead of holding the token itself.
+- The bridge runs as its own user and reads through the socket. A forged row is then impossible without
+  code execution as `dpledger`. Even with full terminal access as `hermes`, the agent can only ask the
+  service for transitions it would accept anyway.
+- The gateway's `wh` MCP credential would still need a separate per-instance credential, or a
+  service-side proxy, so that `hermes` cannot call the gateway directly. That is a withHuman-side
+  question for v2.
