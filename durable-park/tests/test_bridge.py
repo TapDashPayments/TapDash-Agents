@@ -523,3 +523,19 @@ def test_bridge_clamps_long_names_like_hermes(client, ledger):
     row = executing_park(ledger, tool=clamped)
     resp = deliver(client, payload(tool=wire_tool, idempotency_key="k-long"))
     assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
+
+
+def test_bridge_hyphenated_bill_tool_approves_only_once(client, ledger):
+    executing_park(ledger, tool="mcp__wh__quickbooks__create_bill")
+    approves(client, "k-bill-1", body_obj=payload(tool="create-bill", idempotency_key="k-bill-1"))
+    human(deliver(client, payload(tool="create-bill", idempotency_key="k-bill-2")))
+
+
+def test_bridge_name_of_exactly_64_chars_is_not_clamped(client, ledger):
+    prefix = "mcp__wh__quickbooks__"
+    wire_tool = "c-" + "x" * (64 - len(prefix) - 2)
+    name = prefix + "c_" + "x" * (64 - len(prefix) - 2)
+    assert len(name) == 64
+    row = executing_park(ledger, tool=name)
+    resp = deliver(client, payload(tool=wire_tool, idempotency_key="k-64"))
+    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
