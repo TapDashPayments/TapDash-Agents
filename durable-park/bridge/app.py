@@ -58,6 +58,25 @@ DELIVERIES_FILENAME = "bridge_deliveries.db"
 _SIGNATURE_HEX = re.compile(r"[0-9a-fA-F]{64}")
 _UNSAFE_LOG_CHARS = re.compile(r"[^\w.:@/+-]")
 
+# Hermes MCP tool naming (hermes-agent tools/mcp_tool_schema.py, v0.22.2): every char outside
+# [A-Za-z0-9_] becomes "_" and names over 64 chars get a deterministic 8-hex sha256 suffix.
+# withHuman sends the downstream server's own tool name (e.g. "create-bill"), so the bridge must
+# build the name exactly the way Hermes registered it, or a parked call never matches.
+HERMES_MCP_SERVER = "wh"
+_HERMES_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
+_HERMES_NAME_MAX = 64
+_HERMES_NAME_HASH = 8
+
+
+def hermes_tool_name(server: str, tool: str) -> str:
+    """The name Hermes registers for gateway tool <server>__<tool> under MCP server `wh`."""
+    full = (f"mcp__{HERMES_MCP_SERVER}__{_HERMES_NAME_UNSAFE.sub('_', server)}"
+            f"__{_HERMES_NAME_UNSAFE.sub('_', tool)}")
+    if len(full) <= _HERMES_NAME_MAX:
+        return full
+    suffix = "_" + hashlib.sha256(full.encode("utf-8")).hexdigest()[:_HERMES_NAME_HASH]
+    return full[:_HERMES_NAME_MAX - len(suffix)] + suffix
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
     idempotency_key TEXT PRIMARY KEY,
@@ -259,7 +278,7 @@ class Bridge:
         body_key = payload.get("idempotency_key")
         if body_key is not None and body_key != header_key:
             return "human", None, "idempotency-mismatch"
-        name = f"mcp__wh__{server}__{tool}"
+        name = hermes_tool_name(server, tool)
         digest = info["digest"]
         self._get_ledger()  # raises LedgerMissing before anything is recorded
         outcome, park_id, how = self._deliveries.decide_once(

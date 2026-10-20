@@ -484,3 +484,42 @@ def test_model_args_park_matches_gateway_delivery_with_default_scope(client, led
                                    idempotency_key="k-gw"))  # what the gateway delivered
     assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
     assert ledger.get(row.park_id).gateway_passed_at is not None
+
+
+# ---- v2 Important #1: tool names are matched the way Hermes registers them ------------------
+# withHuman sends the downstream server's own tool name (e.g. "create-bill"); Hermes registers it as
+# mcp__<server>__<tool> with every char outside [A-Za-z0-9_] turned into "_" and names over 64 chars
+# clamped with an 8-hex sha256 suffix (hermes-agent tools/mcp_tool_schema.py, v0.22.2).
+
+@pytest.mark.parametrize("wire_tool, hermes_tool", [
+    ("create-bill", "mcp__wh__quickbooks__create_bill"),
+    ("update-bill", "mcp__wh__quickbooks__update_bill"),
+    ("delete-bill", "mcp__wh__quickbooks__delete_bill"),
+])
+def test_bridge_hyphenated_bill_tool_matches_hermes_name(client, ledger, wire_tool, hermes_tool):
+    row = executing_park(ledger, tool=hermes_tool)
+    resp = deliver(client, payload(tool=wire_tool, idempotency_key=f"k-{wire_tool}"))
+    assert resp.status_code == 200
+    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
+    assert ledger.get(row.park_id).gateway_passed_at is not None
+
+
+@pytest.mark.parametrize("wire_tool", ["create-bill", "update-bill", "delete-bill"])
+def test_bridge_hyphenated_bill_tool_without_park_goes_to_human(client, ledger, wire_tool):
+    human(deliver(client, payload(tool=wire_tool, idempotency_key=f"k-none-{wire_tool}")))
+
+
+def test_bridge_sanitizes_server_and_other_characters(client, ledger):
+    row = executing_park(ledger, tool="mcp__wh__quick_books__create_pay_ment_v2")
+    resp = deliver(client, payload(server="quick-books", tool="create.pay ment-v2", idempotency_key="k-chars"))
+    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
+
+
+def test_bridge_clamps_long_names_like_hermes(client, ledger):
+    wire_tool = "create-" + "x" * 70
+    natural = "mcp__wh__quickbooks__create_" + "x" * 70
+    clamped = natural[:64 - 9] + "_" + hashlib.sha256(natural.encode()).hexdigest()[:8]
+    assert len(clamped) == 64
+    row = executing_park(ledger, tool=clamped)
+    resp = deliver(client, payload(tool=wire_tool, idempotency_key="k-long"))
+    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
