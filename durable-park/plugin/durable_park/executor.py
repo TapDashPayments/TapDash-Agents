@@ -1,10 +1,14 @@
 """The ``parked_action_execute`` tool: run a parked call once, after a human approved it in withHuman.
 
 The approval is single use: ``gate.check`` on the saved call *consumes* it. Everything after the consume
-is decided by the ledger row (``approved -> executing -> executed|failed|expired``), never by the model.
+is decided by the ledger row (``approved -> executing -> executed|failed|expired|unknown``), never by the model.
 
 ``ctx.dispatch_tool`` goes straight to ``registry.dispatch`` and does not run ``pre_tool_call`` hooks
 (hermes_cli/plugins.py:674-684, tools/registry.py:893-921), so the park hook cannot block this dispatch.
+
+A result is ``unknown`` (never ``failed``) whenever the tool may have run: dispatch raised, an ambiguous transport
+error came back (see ``_UNKNOWN_ERROR_PREFIXES``), or the ledger write failed after dispatch. ``failed`` means
+the call definitely did not run, or the remote tool itself answered with an error.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ NOT_APPROVED_MESSAGE = "durable-park: {park_id} is {status}, not approved; it ca
 LOST_CAS_MESSAGE = "durable-park: {park_id} is already running or done"
 FAILED_MESSAGE = "durable-park: {park_id} failed: {note}"
 INTERNAL_MESSAGE = "durable-park: could not run {park_id}; see the gateway log"
+UNKNOWN_MESSAGE = "durable-park: {park_id} outcome UNKNOWN \u2014 check {tool} in the sandbox before retrying"
 CHECK_FAILED_NOTE = "approval check failed; nothing ran"
 CRASH_EXIT_CODE = 70
 _NOTE_LIMIT = 200
@@ -84,13 +89,43 @@ def _decode(result: Any) -> Any:
     return result
 
 
-def _tool_error(payload: Any) -> str | None:
-    """Hermes tools report failure as a JSON object with an ``error`` key (tools/registry.py:1022
-    ``tool_error``, tools/mcp_tool_handlers.py:142 ``_result_is_error``). An empty/null value is no error."""
-    if isinstance(payload, dict) and payload.get("error") not in (None, "", False, [], {}):
-        error = payload["error"]
-        return _one_line(error if isinstance(error, str) else json.dumps(error, default=str))
-    return None
+# R15: an error result is ``unknown`` (the call may have reached the remote server and may have taken effect) only
+# when it carries the transport-error signature below; everything else is ``failed`` (a definite non-run, or the
+# remote tool's own answer). Hermes v0.22.2, ~/.hermes/hermes-agent:
+#   unknown (error text starts with):
+#     "MCP call failed"        tools/mcp_tool_handlers.py:350 (``_dispatch`` generic error, text from
+#                              tools/mcp_tool_errors.py:170-174 ``MCP call failed: <Type>: ...``): timeouts
+#                              (TimeoutError), transport errors, and the reconnect-teardown RuntimeError raised at
+#                              :375 ("...may already have been dispatched..."), which arrives with this prefix.
+#                              Also ``MCP call failed after respawning ...`` (:321-324, the retry's own failure).
+#     "MCP call interrupted"   :342-343 user sent a new message while the request was in flight.
+#     "Tool execution failed"  tools/registry.py:911-921: the handler itself raised (equivalent to dispatch raising).
+#                              model_tools._sanitize_tool_error prefixes "[TOOL_ERROR] ", which is stripped first.
+#   unknown (structured): payload ``outcome_uncertain: true`` (:252 session expired mid-write; :303 and :317 stdio
+#                              subprocess died mid-call).
+#   failed (nothing reached the server, or the server answered with an error):
+#     trust-gate block :78,84, circuit breaker open :101,104, server not connected :114-124 and :620, transport
+#     down / reconnect requested :137, stdio never respawned :306 / died again :319 (both pre-dispatch),
+#     re-auth needed :214 (401 is always pre-dispatch), unknown tool registry.py:899, and errors returned by the
+#     remote tool (MCP isError -> tool_error(text) :537-538).
+#   An unrecognised error text is ``failed``; only the prefixes above are ``unknown``.
+_UNKNOWN_ERROR_PREFIXES = ("MCP call failed", "MCP call interrupted", "Tool execution failed")
+_TOOL_ERROR_TAG = "[TOOL_ERROR] "
+
+
+def _tool_error(payload: Any) -> tuple[str, bool] | None:
+    """``(one-line error text, outcome_unknown)`` when a Hermes tool result is an error, else None.
+
+    Hermes tools report failure as a JSON object with an ``error`` key (tools/registry.py:1022 ``tool_error``,
+    tools/mcp_tool_handlers.py:142 ``_result_is_error``). An empty/null value is no error.
+    """
+    if not isinstance(payload, dict) or payload.get("error") in (None, "", False, [], {}):
+        return None
+    error = payload["error"]
+    text = error if isinstance(error, str) else json.dumps(error, default=str)
+    bare = text.removeprefix(_TOOL_ERROR_TAG).lstrip()
+    unknown = payload.get("outcome_uncertain") is True or bare.startswith(_UNKNOWN_ERROR_PREFIXES)
+    return _one_line(text), unknown
 
 
 def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Callable[..., Any],
@@ -103,18 +138,28 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
         log.warning("failed %s tool=%s: %s", row.park_id, row.tool, note)
         return _reply("failed", row.park_id, message=FAILED_MESSAGE.format(park_id=row.park_id, note=note))
 
-    def execute(park_id: str) -> str:
+    def unknown(row: ParkRow, note: str, **fields: Any) -> str:
+        """The call may have run: never ``failed`` (the model would offer a retry), never retried automatically."""
+        ledger.transition(row.park_id, "executing", "unknown", note=note, **fields)
+        log.warning("outcome unknown %s tool=%s: %s", row.park_id, row.tool, note)
+        return _reply("unknown", row.park_id, message=UNKNOWN_MESSAGE.format(park_id=row.park_id, tool=row.tool))
+
+    def execute(park_id: str, state: dict[str, Any]) -> str:
+        """``state`` is per call (the handler can run on several threads): the claimed row, and whether the
+        tool has been called, for the handler's catch-all."""
         row = ledger.get(park_id) if park_id else None
         if row is None:
             return _refused(park_id, NO_SUCH_MESSAGE)
-        if row.session_key != ((session_key_fn or default_session_key)() or ""):
+        current = (session_key_fn or default_session_key)() or ""
+        if not current or row.session_key != current:  # an empty key never matches, even an empty stored one
             return _refused(park_id, NOT_YOURS_MESSAGE)
         if row.status != "approved":
             return _refused(park_id, NOT_APPROVED_MESSAGE.format(park_id=park_id, status=row.status))
         if not ledger.transition(park_id, "approved", "executing", executing_at=_now()):
             return _refused(park_id, LOST_CAS_MESSAGE.format(park_id=park_id))
 
-        # From here the row is ``executing``: every path below must leave it executed/failed/expired.
+        # From here the row is ``executing``: every path below must leave it executed/failed/expired/unknown.
+        state["row"] = row
         try:
             verdict = gate_factory().check(build_call(row))
         except Exception as exc:  # noqa: BLE001 - nothing ran; fail closed
@@ -135,13 +180,17 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
         if crash_after_consume:
             (exit_fn or _hard_exit)(CRASH_EXIT_CODE)
         try:
+            state["dispatched"] = True  # from here on the call may have reached the remote server
             result = dispatch(row.tool, json.loads(row.args_json))
         except Exception as exc:  # noqa: BLE001 - never put exception text (it may echo args) in notes
-            return fail(row, f"dispatch raised {type(exc).__name__}")
+            return unknown(row, f"dispatch raised {type(exc).__name__}")
         payload = _decode(result)
         raw = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-        error = _tool_error(payload)
-        if error is not None:
+        classified = _tool_error(payload)
+        if classified is not None:
+            error, outcome_unknown = classified
+            if outcome_unknown:
+                return unknown(row, f"tool error: {error}", result_json=raw)
             ledger.transition(park_id, "executing", "failed", note=f"tool error: {error}", result_json=raw)
             log.warning("tool error for %s tool=%s", park_id, row.tool)
             return _reply("failed", park_id, message=FAILED_MESSAGE.format(
@@ -153,10 +202,19 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
 
     def handler(args: Any = None, **_kw: Any) -> str:
         park_id = str(args.get("park_id") or "").strip() if isinstance(args, dict) else ""
+        state: dict[str, Any] = {"row": None, "dispatched": False}
         try:
-            return execute(park_id)
+            return execute(park_id, state)
         except Exception as exc:  # noqa: BLE001 - e.g. ledger I/O error; never raise into the agent loop
             log.error("executor failed for %s: %s", park_id or "?", type(exc).__name__)
+            row = state["row"]
+            if state["dispatched"] and row is not None:
+                # The tool was already called, so it may have run: report UNKNOWN, never "could not run".
+                try:
+                    ledger.transition(park_id, "executing", "unknown", note=f"executor error after dispatch: {type(exc).__name__}")
+                except Exception:  # noqa: BLE001 - the row stays executing; the reply is still correct
+                    pass
+                return _reply("unknown", park_id, message=UNKNOWN_MESSAGE.format(park_id=park_id, tool=row.tool))
             try:  # a claimed row must not stay executing because of our own bug
                 ledger.transition(park_id, "executing", "failed", note=f"executor error: {type(exc).__name__}")
             except Exception:  # noqa: BLE001

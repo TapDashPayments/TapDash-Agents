@@ -1,5 +1,6 @@
 import json
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -154,14 +155,130 @@ def test_tool_error_marks_failed(env):
     assert len(env.dispatched) == 1
 
 
-def test_dispatch_exception_marks_failed_without_leaking_text(env):
+def unknown_message(row):
+    return f"durable-park: {row.park_id} outcome UNKNOWN \u2014 check {row.tool} in the sandbox before retrying"
+
+
+def test_dispatch_exception_marks_unknown_without_leaking_text(env):
     row = env.approve()
     env.box.raises = RuntimeError("secret-token-123 exploded")
     out = run(env.build(), row.park_id)
-    assert out == {"status": "failed", "park_id": row.park_id,
-                   "message": f"durable-park: {row.park_id} failed: dispatch raised RuntimeError"}
-    assert "secret-token" not in json.dumps(out) and "secret-token" not in env.ledger.get(row.park_id).note
-    assert env.ledger.get(row.park_id).status == "failed"
+    assert out == {"status": "unknown", "park_id": row.park_id, "message": unknown_message(row)}
+    after = env.ledger.get(row.park_id)
+    assert after.status == "unknown" and after.note == "dispatch raised RuntimeError"
+    assert "secret-token" not in json.dumps(out) and "secret-token" not in after.note
+    assert len(env.dispatched) == 1
+    # never retried automatically: the row is no longer approved, so a second call is refused
+    assert run(env.build(), row.park_id)["status"] == "refused" and len(env.dispatched) == 1
+
+
+# Hermes' own error texts (tools/mcp_tool_handlers.py), as returned through registry.dispatch.
+UNKNOWN_ERRORS = {
+    "timeout": {"error": "MCP call failed: TimeoutError: tools/call create_payment timed out after 120s"},
+    "interrupt": {"error": "MCP call interrupted: user sent a new message"},
+    "teardown": {"error": "MCP call failed: RuntimeError: MCP tools/call create_payment on 'wh' was aborted by a "
+                          "reconnect teardown; the request may already have been dispatched, so verify its effect "
+                          "before re-invoking"},
+    "generic transport": {"error": "MCP call failed: ClosedResourceError: ClosedResourceError()"},
+    "retry after respawn": {"error": "MCP call failed after respawning the stdio subprocess for 'wh': OSError: x"},
+    "handler raised": {"error": "[TOOL_ERROR] Tool execution failed: KeyError: 'x'"},
+    "session expired mid-write": {"error": "The MCP transport session to 'wh' expired while this write-capable call "
+                                           "was in flight, so the outcome is UNKNOWN", "outcome_uncertain": True,
+                                  "server": "wh"},
+    "stdio died mid-call": {"error": "MCP server 'wh' lost its stdio subprocess after the tool call began.",
+                            "outcome_uncertain": True},
+}
+
+FAILED_ERRORS = {
+    "remote isError": {"error": "Customer C-1 not found"},
+    "circuit breaker (unreachable)": {"error": "MCP server 'wh' is unreachable after 5 consecutive failures. "
+                                                "Auto-retry available in ~30s. Do NOT retry this tool yet"},
+    "circuit breaker (rejected)": {"error": "MCP server 'wh' rejected the last 5 calls (it is reachable; see the "
+                                             "error text those calls returned). Paused for ~30s."},
+    "trust gate": {"error": "The user did not approve running write-capable MCP tool 'create_payment' on untrusted "
+                            "server 'wh'. The command was NOT run."},
+    "not connected": {"error": "MCP server 'wh' is not connected"},
+    "transport down": {"error": "MCP server 'wh' transport is down; reconnect requested. Do NOT retry this tool "
+                                "immediately"},
+    "unknown tool": {"error": "Unknown tool: mcp__wh__quickbooks__create_payment"},
+    "needs reauth": {"error": "MCP server 'wh' requires re-authentication.", "needs_reauth": True},
+    "unrecognised text": {"error": "something Hermes has not said before"},
+}
+
+
+@pytest.mark.parametrize("payload", list(UNKNOWN_ERRORS.values()), ids=list(UNKNOWN_ERRORS))
+def test_ambiguous_tool_errors_mark_unknown(env, payload):
+    row = env.approve()
+    env.box.result = json.dumps(payload)
+    out = run(env.build(), row.park_id)
+    assert out == {"status": "unknown", "park_id": row.park_id, "message": unknown_message(row)}
+    after = env.ledger.get(row.park_id)
+    assert after.status == "unknown" and after.note.startswith("tool error: ")
+    assert json.loads(after.result_json) == payload  # the raw result is kept for the human who verifies
+    assert len(env.dispatched) == 1
+    assert run(env.build(), row.park_id)["status"] == "refused" and len(env.dispatched) == 1
+
+
+@pytest.mark.parametrize("payload", list(FAILED_ERRORS.values()), ids=list(FAILED_ERRORS))
+def test_definite_non_runs_and_remote_errors_mark_failed(env, payload):
+    row = env.approve()
+    env.box.result = json.dumps(payload)
+    out = run(env.build(), row.park_id)
+    assert out["status"] == "failed" and out["park_id"] == row.park_id
+    assert out["message"] == f"durable-park: {row.park_id} failed: tool error: {payload['error'][:200]}"
+    after = env.ledger.get(row.park_id)
+    assert after.status == "failed" and json.loads(after.result_json) == payload
+
+
+def test_ledger_write_failure_after_dispatch_is_unknown_not_failed(env, monkeypatch):
+    row = env.approve()
+    real = env.ledger.transition
+
+    def flaky(park_id, from_status, to_status, **fields):
+        if to_status == "executed":
+            raise sqlite3.OperationalError("database is locked")
+        return real(park_id, from_status, to_status, **fields)
+
+    monkeypatch.setattr(env.ledger, "transition", flaky)
+    out = run(env.build(), row.park_id)
+    assert out == {"status": "unknown", "park_id": row.park_id, "message": unknown_message(row)}
+    assert "could not run" not in json.dumps(out)
+    after = env.ledger.get(row.park_id)
+    assert after.status == "unknown" and after.note == "executor error after dispatch: OperationalError"
+    assert len(env.dispatched) == 1
+
+
+def test_every_ledger_write_failing_after_dispatch_still_reports_unknown(env, monkeypatch):
+    row = env.approve()
+    real = env.ledger.transition
+
+    def broken(park_id, from_status, to_status, **fields):
+        if from_status == "executing":
+            raise sqlite3.OperationalError("disk full")
+        return real(park_id, from_status, to_status, **fields)
+
+    monkeypatch.setattr(env.ledger, "transition", broken)
+    out = run(env.build(), row.park_id)
+    assert out == {"status": "unknown", "park_id": row.park_id, "message": unknown_message(row)}
+    assert env.ledger.get(row.park_id).status == "executing"  # could not be moved; the reply is still truthful
+    assert len(env.dispatched) == 1
+
+
+def test_ledger_failure_before_dispatch_is_not_unknown(env, monkeypatch):
+    row = env.approve()
+    monkeypatch.setattr(env.ledger, "get", lambda park_id: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+    out = run(env.build(), row.park_id)
+    assert out["status"] == "refused" and "could not run" in out["message"] and env.dispatched == []
+
+
+def test_empty_session_key_is_never_your_session(env):
+    row = env.approve()
+    # the park hook always stores a key; force an empty-key row to prove the defence in depth
+    with env.ledger._connect() as con:
+        con.execute("UPDATE parks SET session_key='' WHERE park_id=?", (row.park_id,))
+    out = run(env.build(session_key_fn=lambda: ""), row.park_id)
+    assert out == {"status": "refused", "park_id": row.park_id, "message": "durable-park: not your session"}
+    assert env.dispatched == [] and env.ledger.get(row.park_id).status == "approved"
 
 
 def test_null_error_field_is_not_a_failure(env):
