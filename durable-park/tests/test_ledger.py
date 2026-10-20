@@ -221,3 +221,27 @@ def test_get_by_call(tmp_path):
                       call_key="ck", server="park:x")
     assert ledger.get_by_call("s", "c").park_id == row.park_id
     assert ledger.get_by_call("s", "other") is None
+
+
+# ---- whole-number decimals: the gateway re-encodes 2.0 as 2 (live P-4E21FF22 asked twice) ------------
+
+def test_digest_treats_whole_number_floats_as_ints():
+    from durable_park.ledger import args_digest
+    assert args_digest({"Amount": 2.0}) == args_digest({"Amount": 2})
+    nested = {"params": {"bill": {"Line": [{"Amount": 2.0}], "TotalAmt": 2.0}}}
+    assert args_digest(nested) == args_digest({"params": {"bill": {"Line": [{"Amount": 2}], "TotalAmt": 2}}})
+
+
+def test_digest_keeps_real_decimals_and_types_apart():
+    from durable_park.ledger import args_digest
+    assert args_digest({"a": 2.5}) != args_digest({"a": 2})
+    assert args_digest({"a": 2.5}) != args_digest({"a": 3})
+    assert args_digest({"a": True}) != args_digest({"a": 1})
+    assert args_digest({"a": "2"}) != args_digest({"a": 2})
+
+
+def test_digest_normalization_never_changes_the_saved_args():
+    from durable_park.ledger import normalize_args
+    original = {"Amount": 2.0, "withhuman_context": "c"}
+    normalize_args(original)
+    assert original == {"Amount": 2.0, "withhuman_context": "c"}

@@ -98,14 +98,25 @@ GATEWAY_CONTEXT_KEY = "withhuman_context"
 GATEWAY_DEFAULT_SCOPE = "default"
 
 
+def _whole_floats_to_ints(value: Any) -> Any:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _whole_floats_to_ints(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_whole_floats_to_ints(v) for v in value]
+    return value
+
+
 def normalize_args(args: Any) -> Any:
     """Arguments as the gateway's approval pipeline sees them, for digesting only (never for dispatch).
 
     Deep copy; top-level ``withhuman_context`` dropped; top-level ``withhuman_scope`` defaulted to
-    ``"default"`` when absent (an explicit scope is kept, so the scope stays part of the match).
-    Non-object arguments are returned as a copy, unchanged.
+    ``"default"`` when absent (an explicit scope is kept, so the scope stays part of the match); whole-number
+    floats become ints everywhere (live finding: the model sent ``2.0``, the gateway delivered ``2``, the
+    same number to the server). Non-object arguments are returned as a copy, otherwise unchanged.
     """
-    normalized = copy.deepcopy(args)
+    normalized = _whole_floats_to_ints(copy.deepcopy(args))
     if isinstance(normalized, dict):
         normalized.pop(GATEWAY_CONTEXT_KEY, None)
         normalized.setdefault(GATEWAY_SCOPE_KEY, GATEWAY_DEFAULT_SCOPE)

@@ -539,3 +539,15 @@ def test_bridge_name_of_exactly_64_chars_is_not_clamped(client, ledger):
     row = executing_park(ledger, tool=name)
     resp = deliver(client, payload(tool=wire_tool, idempotency_key="k-64"))
     assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
+
+
+def test_bridge_matches_when_gateway_rewrites_2_point_0_as_2(client, ledger):
+    model_args = {"params": {"bill": {"Line": [{"Amount": 2.0, "DetailType": "AccountBasedExpenseLineDetail"}],
+                                      "TotalAmt": 2.0, "VendorRef": {"value": "56"}}},
+                  "withhuman_context": "test bill"}
+    gateway_args = {"params": {"bill": {"Line": [{"Amount": 2, "DetailType": "AccountBasedExpenseLineDetail"}],
+                                        "TotalAmt": 2, "VendorRef": {"value": "56"}}},
+                    "withhuman_scope": "default"}
+    row = executing_park(ledger, tool="mcp__wh__quickbooks__create_bill", args=model_args)
+    resp = deliver(client, payload(tool="create-bill", arguments=gateway_args, idempotency_key="k-float"))
+    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
