@@ -83,6 +83,28 @@ credentials.
 Verified result (dummy credentials, 2026-10-19): `quickbooks: ok, 142 tools`
 (the server's README claims 145; `tools/list` over MCP returns 142).
 
+## Never run these (they print the secrets)
+
+`wh-tunnel` gets all five values from `/etc/durable-park/tunnel.env`, and these
+commands print them in plain text. Do not run them, and do not paste their output
+anywhere:
+
+- `docker compose config` (prints the resolved `env_file` values)
+- `docker inspect wh-tunnel` / `docker inspect <image>` on a running container
+  (the container's `Env` lists every value)
+- `docker exec wh-tunnel env` / `printenv` / `cat /proc/1/environ`
+- `docker compose run ... env`, `docker run --env-file ... env`
+- `sudo cat /etc/durable-park/tunnel.env`
+- `docker logs wh-tunnel` is probably safe, but this is **unverified** (the
+  tunnel's `run` mode has not been exercised with real values yet): skim it
+  yourself before sharing it.
+
+Note that `QUICKBOOKS_ENVIRONMENT` and `QUICKBOOKS_TOKEN_STORE_PATH` are set in
+`tunnel.yaml` (the QuickBooks child process env), not in the `wh-tunnel`
+container env, so checking them via `docker exec wh-tunnel env` will not show
+them (and must not be done). To check them, read `tunnel.yaml`; to prove the
+child works, use `docker compose run --rm check`.
+
 ## HUMAN STEP A (Task 2 Step 2): get the five values
 
 ### Intuit (about 10 minutes)
@@ -118,17 +140,58 @@ names may differ slightly.
 
 ### Enter all five into the VM
 
-Run this on the VM (SSH or the terminal you use for it). Nothing is echoed:
+The script needs an interactive terminal (it refuses to run without a tty), so
+open one on the VM over Tailscale SSH. Use a terminal that is not being
+screen-shared or recorded.
 
-```bash
-sudo bash /home/hermes/durable-park/deploy/tunnel/enter-secrets.sh
-```
+1. From any device on your tailnet run:
 
-Paste, in order: QuickBooks Client ID, Client Secret, Refresh token, Realm ID,
-withHuman tunnel token (Enter after each; you will not see the characters). It
-prints `saved 5 values` and writes `/etc/durable-park/tunnel.env` (0600 root).
-Then tell Claude; Claude runs `check` and starts the tunnel. The tunnel's page in
-withHuman should then show it **online**.
+   ```bash
+   tailscale ssh ubuntu@proto-agents
+   ```
+
+   (MagicDNS name `proto-agents.taila95862.ts.net`, Tailscale IP `100.99.171.75`.)
+   Tailscale SSH is enabled on the VM (`tailscale set --ssh`). Your tailnet policy
+   may open a browser to re-authenticate ("check" mode): follow it, then the
+   session continues. `ubuntu` has passwordless sudo.
+
+   If you get "permission denied" or the connection is refused by policy, your
+   tailnet ACL has no SSH rule allowing you to reach this device as `ubuntu`.
+   Add one in the Tailscale admin console: **Access controls** -> edit the policy
+   file -> add under `"ssh"`:
+
+   ```json
+   {
+     "action": "check",
+     "src":    ["autogroup:member"],
+     "dst":    ["proto-agents"],
+     "users":  ["ubuntu"]
+   }
+   ```
+
+   (`dst` may also be `autogroup:self` if the VM is registered to your own
+   user, or a tag such as `tag:proto` if the VM is tagged.) Save, then retry.
+   The exact policy syntax is **unverified** against your tailnet.
+
+2. In that session run (nothing you type is echoed):
+
+   ```bash
+   sudo bash /home/hermes/durable-park/deploy/tunnel/enter-secrets.sh
+   ```
+
+3. Paste, in order: QuickBooks Client ID, Client Secret, Refresh token, Realm ID,
+   withHuman tunnel token (Enter after each; you will not see the characters).
+   Empty input, or a value containing whitespace, quotes, `$`, `#`, a backslash,
+   a backtick or a control character, is refused and you are asked again. It
+   prints `saved 5 values` and writes `/etc/durable-park/tunnel.env` (0600 root).
+
+   If the script aborts or you make a mistake, just run it again. Keep the
+   withHuman tab with the tunnel token open until the script has saved: the
+   token stays on that page until you close it (withHuman's docs say it is shown
+   once, so if you already closed it, create a new token for the tunnel instead).
+
+4. Type `exit` to leave. Tell Claude; Claude runs `check` and starts the
+   tunnel. The tunnel's page in withHuman should then show it **online**.
 
 ## HUMAN STEP B (Task 2 Step 4): register the server
 

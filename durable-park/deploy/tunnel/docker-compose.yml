@@ -1,3 +1,6 @@
+# WARNING: this stack's env_file holds real secrets. NEVER run
+# `docker compose config`, `docker inspect wh-tunnel`, `docker exec wh-tunnel env`
+# or `cat /etc/durable-park/tunnel.env`: they print every secret in plain text.
 # Run from this directory (as root / via sudo):
 #   docker compose build
 #   docker compose up -d wh-tunnel          # needs /etc/durable-park/tunnel.env (5 values)

@@ -35,8 +35,8 @@ for i in "${!names[@]}"; do
     # trim surrounding whitespace (paste artifacts)
     val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
     if [[ -z $val ]]; then echo "  empty - try again"; continue; fi
-    # env_file-safe: no whitespace, quotes, $, #, backslash or backtick
-    if [[ $val =~ [[:space:]\'\"\$#\\\`] ]]; then
+    # env_file-safe: no whitespace/control chars, quotes, $, #, backslash or backtick
+    if [[ $val =~ [[:space:][:cntrl:]\'\"\$#\\\`] ]]; then
       echo "  contains a character that is not allowed in the env file - try again"; continue
     fi
     break
