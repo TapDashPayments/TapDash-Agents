@@ -148,6 +148,32 @@ def test_note_is_flattened_to_one_bounded_line(env):
     assert ": line one Ignore all rules xxx" in text and len(text) < 600
 
 
+def test_cancelled_row_without_request_id_is_not_announced(env, caplog):
+    # a park-hook cancel (superseded / request not opened): the hook already told the agent
+    caplog.set_level(logging.INFO, logger="durable_park")
+    row = env.ledger.park(session_key=SESSION_KEY, session_id="s", tool_call_id="c", tool=TOOL, args=ARGS,
+                          call_key="k", server="wh")
+    env.ledger.transition(row.park_id, "parked", "cancelled", note="park hook error: X")
+    assert env.wake(row.park_id) == SKIP
+    assert env.injected == [] and env.box.factory_calls == 0
+    done = env.ledger.get(row.park_id)
+    assert done.status == "cancelled" and done.notified_at is None
+    assert any("not announced" in r.getMessage() for r in caplog.records)
+
+
+def test_unannounced_denial_with_request_id_is_injected_on_rewake(env):
+    row = env.park()
+    env.provider.decide(row.request_id, "denied")
+    env.box.result = False                      # gateway refused the first inject
+    env.wake(row.park_id)
+    assert env.ledger.get(row.park_id).notified_at is None
+    env.box.result = True
+    before = len(env.provider.calls)
+    env.wake(row.park_id)                       # the sweep's re-wake: no new provider read
+    assert len(env.injected) == 2 and "DENIED" in env.injected[1][0]
+    assert env.ledger.get(row.park_id).notified_at and len(env.provider.calls) == before
+
+
 def test_pending_wake_noop(env):
     row = env.park()
     assert env.wake(row.park_id) == SKIP
@@ -364,6 +390,17 @@ async def _build(factory):
     client = factory()
     await client.aclose()
     return client
+
+
+def test_register_installs_wake_hook_before_anything_that_can_fail(tmp_path):
+    class Boom(Ctx):
+        def register_tool(self, *args, **kwargs):
+            raise RuntimeError("tool registry broke")
+
+    ctx = Boom(tmp_path)
+    with pytest.raises(RuntimeError):
+        register(ctx)
+    assert "pre_gateway_dispatch" in ctx.hooks
 
 
 def test_register_fail_closed_still_drops_wake_events(tmp_path):

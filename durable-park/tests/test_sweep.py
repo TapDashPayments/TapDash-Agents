@@ -72,14 +72,26 @@ def test_sweep_rewakes_unnotified_approved(world, monkeypatch, capsys):
     parked_no_request = world.row("parked", request_id=None)
     approved = world.row("approved")
     approved_notified = world.row("approved", notified=True)
-    world.row("denied")          # terminal: the sweep does not re-wake these
-    world.row("expired")
+    world.row("denied", notified=True)   # decided and already announced: nothing to do
+    world.row("expired", notified=True)
     world.row("executed")
     world.row("executing", executing_minutes_ago=1)
     assert world.main(monkeypatch) == 0
     assert world.posted == [(parked, "s3cr3t", DEFAULT_URL), (approved, "s3cr3t", DEFAULT_URL)]
     assert parked_no_request not in [p[0] for p in world.posted]
     assert approved_notified not in [p[0] for p in world.posted]
+    out = capsys.readouterr()
+    assert out.out == "" and out.err == ""
+
+
+def test_sweep_rewakes_unnotified_decisions_that_have_a_request(world, monkeypatch, capsys):
+    denied = world.row("denied")
+    expired = world.row("expired")
+    cancelled = world.row("cancelled")
+    world.row("cancelled", request_id=None)               # park-hook cancel: never a withHuman decision
+    world.row("denied", notified=True)
+    assert world.main(monkeypatch) == 0
+    assert [p[0] for p in world.posted] == [denied, expired, cancelled]
     out = capsys.readouterr()
     assert out.out == "" and out.err == ""
 
@@ -125,10 +137,42 @@ def test_sweep_stale_check_falls_back_to_updated_at_when_executing_at_missing(wo
     assert f"durable-park: {pid} outcome UNKNOWN" in capsys.readouterr().out
 
 
+def test_unknown_alert_is_printed_even_if_the_wake_phase_fails(world, monkeypatch, capsys):
+    stale = world.row("executing", executing_minutes_ago=15)
+    world.row("parked")
+
+    def boom(ledger):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(sweep, "_wake_targets", boom)
+    with pytest.raises(RuntimeError):
+        world.main(monkeypatch)
+    assert capsys.readouterr().out == (
+        f"durable-park: {stale} outcome UNKNOWN \u2014 check {TOOL} in the sandbox before retrying\n")
+    assert world.ledger.get(stale).status == "unknown"
+
+
+def test_unknown_alerts_are_printed_before_any_wake_is_posted(world, monkeypatch, capsys):
+    stale = world.row("executing", executing_minutes_ago=15)
+    world.row("parked")
+    order = []
+    real_print = print
+
+    def spy_print(*args, **kwargs):
+        order.append("print")
+        real_print(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.print", spy_print)
+    monkeypatch.setattr(sweep, "post_wake", lambda *a, **k: order.append("post") or 202)
+    sweep.main(["--ledger", world.ledger.path, "--wake-secret-file", str(world.secret_file)])
+    assert order == ["print", "post"] and stale
+
+
 def test_sweep_silent_when_nothing_to_do(world, monkeypatch, capsys):
     world.secret_file.unlink()   # nothing to wake, so the secret is never needed
     assert world.main(monkeypatch) == 0
-    world.row("denied")
+    world.row("denied", notified=True)
+    world.row("cancelled", request_id=None)
     world.row("executed")
     world.row("executing", executing_minutes_ago=2)
     world.row("approved", notified=True)

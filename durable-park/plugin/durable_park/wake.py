@@ -126,6 +126,10 @@ async def _process(event: Any, ledger: Ledger, async_client_factory: Callable[[]
     # overlapping wakes for one park inject once.
     if row.status not in _DECIDED or row.notified_at is not None:
         return
+    if row.status != "approved" and not row.request_id:
+        # a park-hook cancel (superseded / request not opened) was already told to the agent by the hook
+        log.info("durable-park wake: %s is %s without an approval request; not announced", row.park_id, row.status)
+        return
     if inject(inject_text(row), session_key=row.session_key):
         ledger.mark_notified(row.park_id)
     else:

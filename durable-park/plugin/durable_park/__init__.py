@@ -55,14 +55,7 @@ def register(ctx) -> None:
         ctx.register_hook("pre_tool_call", fail_closed_hook(risky))
         ctx.register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         return
-    ctx.register_hook("pre_tool_call", make_pre_tool_call(ledger, gate_factory, risky))
-    # ctx.dispatch_tool -> registry.dispatch does not run pre_tool_call hooks, so the executor's own
-    # dispatch cannot be blocked by the park hook.
-    ctx.register_tool(
-        name=EXECUTE_SCHEMA["name"], toolset="durable_park", schema=EXECUTE_SCHEMA,
-        handler=make_executor(ledger, gate_factory, ctx.dispatch_tool,
-                              crash_after_consume=crash_after_consume_enabled()),
-        description=EXECUTE_SCHEMA["description"])
+    # Register the wake hook first so a later registration failure can never leave wakes reaching the agent.
     wake_client_factory = make_async_client_factory(base_url, token_file)
 
     async def durable_park_wake(event=None, **_kw):
@@ -72,3 +65,11 @@ def register(ctx) -> None:
                                  inject=ctx.inject_message)
 
     ctx.register_hook("pre_gateway_dispatch", durable_park_wake)
+    ctx.register_hook("pre_tool_call", make_pre_tool_call(ledger, gate_factory, risky))
+    # ctx.dispatch_tool -> registry.dispatch does not run pre_tool_call hooks, so the executor's own
+    # dispatch cannot be blocked by the park hook.
+    ctx.register_tool(
+        name=EXECUTE_SCHEMA["name"], toolset="durable_park", schema=EXECUTE_SCHEMA,
+        handler=make_executor(ledger, gate_factory, ctx.dispatch_tool,
+                              crash_after_consume=crash_after_consume_enabled()),
+        description=EXECUTE_SCHEMA["description"])

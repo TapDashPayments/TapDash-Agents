@@ -3,6 +3,7 @@
 
 * a ``parked`` row with an approval request          -> post a wake (a decision may have been missed)
 * an ``approved`` row the chat was not told about    -> post a wake (the first injection failed)
+* a denied/expired/cancelled row with a request that the chat was not told about -> post a wake
 * an ``executing`` row older than 10 minutes         -> mark ``unknown`` and print one alert line
 
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
@@ -61,23 +62,27 @@ def _age_start(row) -> datetime | None:
     return None
 
 
-def _mark_stale_executing(ledger, now: datetime) -> list[str]:
-    lines = []
+def _mark_stale_executing(ledger, now: datetime) -> None:
+    """Mark stale executing rows unknown and print one alert line each, flushed right after the winning
+    CAS: the row never returns to ``executing``, so a line lost to a later failure would be lost for good."""
     for row in ledger.list_by_status("executing"):
         started = _age_start(row)
         if started is None or now - started <= STALE_EXECUTING:
             continue
         # CAS: only the sweep that wins the transition alerts, so the line is printed once.
         if ledger.transition(row.park_id, "executing", "unknown", note="no result recorded after 10 minutes"):
-            lines.append(f"durable-park: {row.park_id} outcome UNKNOWN — check {row.tool} in the sandbox "
-                         "before retrying")
-    return lines
+            print(f"durable-park: {row.park_id} outcome UNKNOWN \u2014 check {row.tool} in the sandbox "
+                  "before retrying", flush=True)
 
 
 def _wake_targets(ledger) -> list[str]:
     parked = [r.park_id for r in ledger.list_by_status("parked") if r.request_id]
     approved = [r.park_id for r in ledger.list_by_status("approved") if r.notified_at is None]
-    return parked + approved
+    # A decision the wake recorded but could not announce (inject refused): only rows that have a request
+    # (a park-hook cancel without one was never a withHuman decision and is not announced).
+    decided = [r.park_id for r in ledger.list_by_status("denied", "expired", "cancelled")
+               if r.notified_at is None and r.request_id]
+    return parked + approved + decided
 
 
 def _read_secret(path: str) -> str | None:
@@ -100,7 +105,7 @@ def main(argv=None) -> int:
         return 1
     ledger = _load_ledger_module().Ledger(args.ledger)
 
-    lines = _mark_stale_executing(ledger, datetime.now(timezone.utc))
+    _mark_stale_executing(ledger, datetime.now(timezone.utc))
     status = 0
     targets = _wake_targets(ledger)
     if targets:
@@ -117,8 +122,6 @@ def main(argv=None) -> int:
                     continue
                 if not 200 <= code < 300:
                     _err(f"wake {park_id} returned HTTP {code}")
-    for line in lines:
-        print(line)
     return status
 
 
