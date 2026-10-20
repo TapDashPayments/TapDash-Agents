@@ -93,6 +93,11 @@ def args_digest(args: Any) -> str:
     return hashlib.sha256(canonical_json(args).encode()).hexdigest()
 
 
+def call_key(session_id: str, tool_call_id: str) -> str:
+    """Stable key of one tool call: sha256 hex of ``"<session_id>:<tool_call_id>"``."""
+    return hashlib.sha256(f"{session_id}:{tool_call_id}".encode()).hexdigest()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 

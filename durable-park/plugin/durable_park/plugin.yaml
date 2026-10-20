@@ -1,0 +1,5 @@
+name: durable-park
+version: "0.2.0"
+description: Durable park/resume of risky tool calls via withHuman (prototype)
+provides_tools: [parked_action_execute]
+provides_hooks: [pre_tool_call, pre_gateway_dispatch]
