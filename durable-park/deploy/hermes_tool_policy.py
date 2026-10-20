@@ -6,8 +6,10 @@ approve a call. v1 closes this by giving the model only:
 
 * ``durable_park``  - ``parked_action_execute`` (runs an approved, parked call; the point of the plugin)
 * ``clarify``       - asks the user a question in the chat; no local access (tools/clarify_tool.py:111-130)
-* MCP server ``wh`` - the withHuman gateway tools (QuickBooks only, deploy/hermes_mcp.sh); every call goes
-                      through the approval pipeline
+* MCP server ``wh`` - the withHuman gateway's QuickBooks tools only (``mcp__wh__quickbooks__*``,
+                      deploy/hermes_mcp.sh); every call goes through the approval pipeline
+
+and the gateway delivers model-named files (``MEDIA:`` paths) only from the Hermes caches: see 5. below.
 
 Run inside Hermes's own Python environment, as the hermes user (deploy/configure_hermes.sh does that):
 
@@ -15,8 +17,8 @@ Run inside Hermes's own Python environment, as the hermes user (deploy/configure
     <hermes env python> -I deploy/hermes_tool_policy.py check    # print each platform's tools; exit 1 on a leak
 
 Policy, three layers (Hermes v0.22.2, ~/.hermes/hermes-agent):
-1. ``platform_toolsets.<platform> = [durable_park, clarify, wh]`` for EVERY platform Hermes knows
-   (hermes_cli/tools_config.py:63 PLATFORMS): an explicit saved list replaces the full ``hermes-*``
+1. ``platform_toolsets.<platform> = [durable_park, clarify, wh]`` for EVERY platform key an agent can run
+   under (see ``_platforms``): an explicit saved list replaces the full ``hermes-*``
    composites (toolsets.py ``_HERMES_CORE_TOOLS``), and naming ``wh`` makes the MCP server list an
    allowlist (tools_config.py:682-694 ``_merge_mcp_servers``). Until ``mcp_servers.wh`` exists
    (deploy/hermes_mcp.sh) the list carries the ``no_mcp`` sentinel instead: no MCP server at all.
@@ -31,6 +33,11 @@ The model can only call names in its tool list (agent/turn_tool_round.py:107-127
    ``mcp__wh__*``) behind the tool_search/tool_describe/tool_call bridge whenever any are deferrable
    (tools/tool_search.py:198-201, 335-370), so the model would not see ``parked_action_execute`` by the name
    the wake message tells it to call. With only a handful of tools there is nothing to save.
+5. ``gateway.strict: true`` + ``gateway.trust_recent_files: false``: the gateway uploads a file the model names
+   in its reply (``MEDIA:/path``) without any tool. Non-strict, anything outside a small denylist goes out,
+   e.g. the ledger (gateway/platforms/base.py:1165-1201); strict without recency trust = only the Hermes
+   caches and ``media_delivery_allow_dirs`` (base.py:816-821, 909-927; hermes_cli/config_defaults.py:2213-2231;
+   bridged to env by gateway/media_policy.py:21,98 at gateway start, gateway/run.py:2089-2096).
 """
 
 from __future__ import annotations
@@ -46,7 +53,7 @@ HERMES_AGENT = os.path.expanduser("~hermes/.hermes/hermes-agent")
 ALLOWED_TOOLSETS = ["durable_park", "clarify"]
 MCP_SERVER = "wh"
 ALLOWED_TOOL_NAMES = {"parked_action_execute", "clarify"}
-ALLOWED_TOOL_PREFIXES = (f"mcp__{MCP_SERVER}__",)
+ALLOWED_TOOL_PREFIXES = (f"mcp__{MCP_SERVER}__quickbooks__",)
 REQUIRED_TOOL = "parked_action_execute"
 
 # Toolsets that give local file / command / code / process access (or reach other machines/agents).
@@ -82,10 +89,39 @@ def _bootstrap() -> None:
     logging.disable(logging.WARNING)
 
 
-def _platforms() -> list[str]:
-    from hermes_cli.tools_config import PLATFORMS
+# Session platforms whose config key is ``cli`` (tui_gateway/server.py:2048-2086, agent_callbacks.py:414) or
+# that exist only for client-surface toolsets (toolsets.py:146-153); listed too, so nothing depends on that.
+_EXTRA_PLATFORM_KEYS = ("acp", "tui", "desktop")
 
-    return sorted(PLATFORMS)
+
+def _platforms() -> list[str]:
+    """Every platform key ``_get_platform_tools`` can be called with in Hermes v0.22.2:
+
+    * the built-in table (hermes_cli/platforms.py PLATFORMS, used by tools_config.py:63), incl. ``cron``;
+    * every gateway ``Platform`` (gateway/config.py:217-242; ``local`` runs under ``cli``, gateway/run.py:2849-2851;
+      the gateway resolves tools by that key, gateway/run_turn.py:2437, 2946, 2386-2402);
+    * every bundled platform plugin and its manifest alias (gateway/config.py:279-300) and every
+      runtime-registered platform (gateway/platform_registry.py:373), e.g. teams, google_chat, irc, line;
+    * ``acp`` (acp_adapter/session.py:521), ``tui`` / ``desktop`` (see ``_EXTRA_PLATFORM_KEYS``);
+    * any key already present in ``platform_toolsets`` / ``known_plugin_toolsets`` (stale or hand-written).
+    """
+    from gateway.config import Platform
+    from hermes_cli.config import load_config
+    from hermes_cli.platforms import PLATFORMS
+
+    keys = set(PLATFORMS) | set(_EXTRA_PLATFORM_KEYS)
+    keys |= {"cli" if p is Platform.LOCAL else p.value for p in Platform}
+    names, aliases = Platform._scan_bundled_plugin_platforms()
+    keys |= set(names) | set(aliases)
+    try:
+        from gateway.platform_registry import platform_registry
+        keys |= set(platform_registry.registered_names())
+    except Exception:  # noqa: BLE001 - the bundled scan above already covers the shipped plugins
+        pass
+    config = load_config()
+    for section in ("platform_toolsets", "known_plugin_toolsets"):
+        keys |= {str(k) for k in (config.get(section) or {})}
+    return sorted(keys)
 
 
 def _plugin_toolsets() -> list[str]:
@@ -106,7 +142,8 @@ def _wh_configured() -> bool:
 def desired_settings() -> dict:
     plugin_toolsets = _plugin_toolsets()
     mcp = MCP_SERVER if _wh_configured() else "no_mcp"
-    settings: dict = {"agent.disabled_toolsets": FORBIDDEN_TOOLSETS, "tools.tool_search.enabled": "off"}
+    settings: dict = {"agent.disabled_toolsets": FORBIDDEN_TOOLSETS, "tools.tool_search.enabled": "off",
+                      "gateway.strict": True, "gateway.trust_recent_files": False}
     for platform in _platforms():
         settings[f"platform_toolsets.{platform}"] = [*ALLOWED_TOOLSETS, mcp]
         settings[f"known_plugin_toolsets.{platform}"] = plugin_toolsets
@@ -144,18 +181,37 @@ def apply() -> int:
     return 0
 
 
-def effective_tools(platform: str) -> list[str]:
-    """The tool names a session on *platform* gets, through the same calls the gateway / CLI make:
-    gateway/run_turn.py:2404-2409 -> agent/agent_init.py:1114-1121 (session gating, definitions, drops)."""
-    import model_tools
+# Sessions that do NOT take their toolsets from platform_toolsets: a code-workspace TUI session gets the
+# ``coding`` posture (tui_gateway/server.py:2057-2062), an operator pin (HERMES_TUI_TOOLSETS) or a caller may
+# pass any list, ACP expands ``hermes-acp`` (acp_adapter/session.py:103-107), and ``None`` means every toolset
+# (model_tools.py:327-331). agent.disabled_toolsets must strip the forbidden tools from all of them.
+POSTURES = {
+    "all-toolsets": None,
+    "coding-posture": ["coding", "desktop_ui", "project", "catalog"],
+    "acp-default": ["hermes-acp"],
+    "cli-composite": ["hermes-cli"],
+}
+
+
+def _disabled(config: dict):
     from agent.skill_utils import parse_config_string_list
+
+    return parse_config_string_list((config.get("agent") or {}).get("disabled_toolsets")) or None
+
+
+def effective_tools(platform: str, enabled: list[str] | None | str = "config") -> list[str]:
+    """The tool names a session on *platform* gets, through the same calls the gateway / CLI make:
+    gateway/run_turn.py:2404-2409 -> agent/agent_init.py:1114-1121 (session gating, definitions, drops).
+    ``enabled="config"`` resolves the platform's configured toolsets; anything else is used as given."""
+    import model_tools
     from hermes_cli.config import load_config
     from hermes_cli.tools_config import _get_platform_tools
     from toolsets import session_disabled_toolsets, session_platform_tool_drops
 
     config = load_config()
-    enabled = sorted(_get_platform_tools(config, platform))
-    disabled = parse_config_string_list((config.get("agent") or {}).get("disabled_toolsets")) or None
+    if enabled == "config":
+        enabled = sorted(_get_platform_tools(config, platform))
+    disabled = _disabled(config)
     disabled = session_disabled_toolsets(disabled, platform)
     defs = model_tools.get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=True)
     drops = session_platform_tool_drops(platform)
@@ -164,6 +220,33 @@ def effective_tools(platform: str) -> list[str]:
 
 def is_allowed(name: str) -> bool:
     return name in ALLOWED_TOOL_NAMES or name.startswith(ALLOWED_TOOL_PREFIXES)
+
+
+def media_check() -> list[str]:
+    """Problems with model-named file delivery (empty = ok): config values, then the real validator."""
+    import tempfile
+
+    from gateway.media_policy import apply_media_policy_env
+    from gateway.platforms.base import validate_media_delivery_path
+    from hermes_cli.config import load_config
+
+    config = load_config()
+    gateway_cfg = config.get("gateway") or {}
+    problems = [f"gateway.{k} is {gateway_cfg.get(k)!r}, want {v!r}"
+                for k, v in (("strict", True), ("trust_recent_files", False)) if gateway_cfg.get(k) is not v]
+    for name in ("HERMES_MEDIA_DELIVERY_STRICT", "HERMES_MEDIA_TRUST_RECENT_FILES"):
+        os.environ.pop(name, None)  # judge the config, as a fresh gateway start would
+    apply_media_policy_env(config)
+    with tempfile.NamedTemporaryFile(dir=os.path.expanduser("~"), prefix=".dp-media-", delete=True) as fresh:
+        for path in ("/etc/durable-park/wake_secret", config_ledger_path(config), fresh.name):
+            if path and validate_media_delivery_path(path):
+                problems.append(f"the gateway would upload {path} if the model named it")
+    return problems
+
+
+def config_ledger_path(config: dict) -> str | None:
+    entry = ((config.get("plugins") or {}).get("entries") or {}).get("durable-park") or {}
+    return (entry.get("settings") or {}).get("ledger_path")
 
 
 def check() -> int:
@@ -176,11 +259,26 @@ def check() -> int:
         bad += len(leaks) + len(missing)
         print(f"{platform}: {', '.join(names) or '(none)'}" + (f"  LEAK: {', '.join(leaks)}" if leaks else "")
               + (f"  MISSING: {REQUIRED_TOOL}" if missing else ""))
+    for posture, enabled in POSTURES.items():
+        for platform in ("cli", "tui", "desktop", "acp", "telegram"):
+            leaks = [n for n in effective_tools(platform, enabled) if not is_allowed(n)]
+            bad += len(leaks)
+            if leaks:
+                print(f"{posture}@{platform}: LEAK: {', '.join(leaks)}")
+    print(f"postures ({', '.join(POSTURES)}) on cli/tui/desktop/acp/telegram: "
+          + ("ok" if not bad else "see LEAK lines"))
+    media = media_check()
+    for problem in media:
+        print(f"media: {problem}")
+    bad += len(media)
+    if not media:
+        print("media: ok (strict, no recency trust; wake_secret, ledger and a fresh file are not deliverable)")
     if bad:
-        print(f"tool policy: FAILED, {bad} problem(s): forbidden tool reachable or {REQUIRED_TOOL} missing",
-              file=sys.stderr)
+        print(f"tool policy: FAILED, {bad} problem(s): forbidden tool reachable, {REQUIRED_TOOL} missing "
+              "or media delivery open", file=sys.stderr)
         return 1
-    print("tool policy: ok (only durable_park, clarify and mcp__wh__* tools)")
+    print(f"tool policy: ok on {len(_platforms())} platform keys (only durable_park, clarify and "
+          "mcp__wh__quickbooks__* tools)")
     return 0
 
 

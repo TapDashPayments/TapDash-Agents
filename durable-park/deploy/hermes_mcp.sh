@@ -34,6 +34,7 @@ SERVER=wh
 GATEWAY_URL=https://app.withhuman.ai/gateway/mcp
 TOOL_INCLUDE='["quickbooks__*"]'
 EXPECTED_TOOL=mcp__wh__quickbooks__get_company_info
+ALLOWED_PREFIX=mcp__wh__quickbooks__   # v1: QuickBooks only (also deploy/hermes_tool_policy.py)
 
 log() { printf 'hermes_mcp: %s\n' "$*"; }
 die() { printf 'hermes_mcp: ERROR: %s\n' "$*" >&2; exit 1; }
@@ -94,6 +95,8 @@ set_cfg "mcp_servers.$SERVER.tools.prompts" false
 set_cfg "mcp_servers.$SERVER.enabled" true
 # The agent tool policy now names `wh` in every platform list (an MCP allowlist) instead of `no_mcp`.
 tool_policy apply || die "could not apply the agent tool policy"
+policy_report=$(tool_policy check) \
+    || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed (nothing restarted)"; }
 if as_hermes cmp -s "$HERMES_HOME/config.yaml" "$HERMES_HOME/config.yaml.bak-hermes-mcp-$stamp"; then
     as_hermes rm -f "$HERMES_HOME/config.yaml.bak-hermes-mcp-$stamp"
     log "config.yaml already had mcp_servers.$SERVER (no change, backup removed)"
@@ -120,6 +123,17 @@ done
 log "${registered#*INFO }"
 has "$registered" -F -- "$EXPECTED_TOOL" \
     || die "$EXPECTED_TOOL is not registered: is the QuickBooks server granted to agent proto-agents in withHuman?"
+# Every registered wh tool must be a QuickBooks tool ("registered N tool(s): a, b, ..."; Hermes v0.22.2
+# tools/mcp_tool_discovery.py:354). Anything else (another gateway server, withhuman__*) fails the deploy.
+wh_tools=$(grep -oE 'mcp__wh__[A-Za-z0-9_]+' <<<"${registered#*tool(s):}" | sort -u || true)
+[[ -n "$wh_tools" ]] || die "could not read the registered tool names from: ${registered#*INFO }"
+other_tools=$(grep -v -- "^${ALLOWED_PREFIX}" <<<"$wh_tools" || true)
+if [[ -n "$other_tools" ]]; then
+    as_hermes systemctl --user stop hermes-gateway
+    die "MCP server '$SERVER' registered tools outside ${ALLOWED_PREFIX}*: $(tr '\n' ' ' <<<"$other_tools")" \
+        "(hermes-gateway STOPPED; narrow mcp_servers.$SERVER.tools.include or the withHuman grants, then re-run)"
+fi
+log "all $(wc -l <<<"$wh_tools") registered $SERVER tools match ${ALLOWED_PREFIX}*"
 has "$(log_since "$since")" -F "durable-park loaded" || log "WARNING: no 'durable-park loaded' line yet after the restart"
 # The agent may still have only durable_park, clarify and mcp__wh__* tools (deploy/hermes_tool_policy.py).
 policy_report=$(tool_policy check) \

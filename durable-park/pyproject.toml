@@ -1,5 +1,3 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "plugin", "receiver", "scripts"]
-# starlette's TestClient warns at import that httpx2 is preferred; third-party notice, not ours
-filterwarnings = ["ignore:Using .httpx. with .starlette.testclient. is deprecated"]

@@ -372,7 +372,8 @@ then restarts `hermes-gateway` and waits until `mcp__wh__quickbooks__get_company
 
 The `include` filter also keeps the gateway's built-in `withhuman__*` management tools away from the model.
 Hermes tool names are `mcp__wh__<slug>__<tool>`, so they match the plugin's risky patterns and the bridge's
-`mcp__wh__<server>__<tool>`.
+`mcp__wh__<server>__<tool>`. The agent tool policy only admits `mcp__wh__quickbooks__*`, and `hermes_mcp.sh`
+fails (stopping the gateway) if any other `mcp__wh__` tool registers.
 
 Live check (manual): `DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py`. The pipeline
 must let the read-only `get_company_info` call through.

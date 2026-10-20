@@ -121,19 +121,30 @@ an agent with a terminal or file tool, for example one hijacked by a prompt inje
 `executing` row and get the bridge to approve a gateway call no human approved.
 
 v1 closes this by giving the model no local file, command, code, browser or scheduling tools at all.
-`deploy/hermes_tool_policy.py` (applied and then checked by `configure_hermes.sh` and `hermes_mcp.sh`)
-sets the following:
+`deploy/hermes_tool_policy.py` (applied by `configure_hermes.sh` and `hermes_mcp.sh`, then checked before
+and after the gateway restart; a failed pre-restart check aborts without restarting anything) sets:
 
-- `platform_toolsets.<every platform>` = `[durable_park, clarify, wh]`. Until the `wh` MCP server
-  exists, the list holds `no_mcp` instead of `wh`.
-- `known_plugin_toolsets.<every platform>` = all plugin toolsets.
+- `platform_toolsets.<key>` = `[durable_park, clarify, wh]` (until the `wh` MCP server exists: `no_mcp`)
+  for every platform key an agent can run under in Hermes v0.22.2, derived from the source at deploy
+  time: the built-in table (incl. `cron`), every gateway `Platform` (incl. `local`→`cli`,
+  `msgraph_webhook`, `relay`, `sms`), every bundled platform plugin and its manifest alias (e.g. `teams`,
+  `google_chat`, `irc`, `teams-platform`), every runtime-registered platform, `acp`, `tui`, `desktop`, and
+  any key already in the config (58 keys on the VM today);
+- `known_plugin_toolsets.<key>` = all plugin toolsets (so none switches itself on);
 - `agent.disabled_toolsets` = every other toolset (terminal, file, code_execution, delegation, cronjob,
-  skills, browser*, computer_use, memory, session_search, kanban, vision, web, …).
-- `tools.tool_search.enabled: off`.
+  skills, browser*, computer_use, memory, session_search, kanban, vision, web, …). Hermes subtracts it last
+  at tool granularity, so it also covers sessions that do not use `platform_toolsets` (TUI coding posture,
+  ACP, `HERMES_TUI_TOOLSETS`, cron jobs, subagents); `check` verifies those postures too;
+- `tools.tool_search.enabled: off`;
+- `gateway.strict: true`, `gateway.trust_recent_files: false`: a model can make the gateway upload a file
+  just by naming it (`MEDIA:/path`) - no tool needed. Non-strict, the ledger was deliverable. Now only the
+  Hermes media caches are.
 
-After every deploy, `check` prints each platform's effective tools. The deploy fails if anything other
-than `parked_action_execute`, `clarify` and `mcp__wh__*` is reachable, or if `parked_action_execute` is
-missing. The sweep is a no-agent cron script, so the policy does not affect it.
+`check` fails (and the deploy with it) if any tool other than `parked_action_execute`, `clarify` and
+`mcp__wh__quickbooks__*` is reachable on any key or posture, if `parked_action_execute` is missing, or if
+the wake secret, the ledger or a freshly written file would be deliverable. `hermes_mcp.sh` also fails if
+the gateway registers any `mcp__wh__` tool outside `mcp__wh__quickbooks__*` (it then stops the gateway). The
+sweep is a no-agent cron script and is not affected.
 
 ## v2: separate ledger owner
 

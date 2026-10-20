@@ -19,9 +19,11 @@
 #   4b. gateway bridge: root-owned copy of bridge/ + plugin/durable_park under /opt/durable-park, system unit
 #      durable-park-bridge (User=hermes, 127.0.0.1:8791); it answers 401 until Yaakov stores
 #      /etc/durable-park/bridge_secret (never created here), and human while the ledger file is missing
-#   4c. agent tool policy (deploy/hermes_tool_policy.py, run in Hermes's own Python): every platform gets only
-#      durable_park + clarify + MCP server wh; every toolset with local file/command/code access is disabled
-#      (closes the ledger bypass: the agent's tools run as hermes, which owns the ledger)
+#   4c. agent tool policy (deploy/hermes_tool_policy.py, run in Hermes's own Python): every platform key an
+#      agent can run under gets only durable_park + clarify + MCP server wh (QuickBooks tools); every toolset
+#      with local file/command/code access is disabled; model-named file delivery is limited to the Hermes
+#      caches (closes the ledger bypass: the agent's tools run as hermes, which owns the ledger). Checked
+#      before AND after the gateway restart; a failed pre-restart check aborts without restarting anything.
 #   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (every 5m, --no-agent, telegram)
 #   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events and /wh/bridge -> 127.0.0.1:8791/wh/bridge
 #   7. restart: the hermes user manager when the gateway does not carry the dpwake group yet, else the
@@ -225,6 +227,10 @@ as_hermes install -d -m 0750 "$(dirname "$LEDGER")"   # also the bridge unit's R
 
 # --- 4c. agent tool policy ---------------------------------------------------------------------------------
 tool_policy apply || die "could not apply the agent tool policy"
+# Check BEFORE any restart: a failed check stops here and the running gateway keeps its old process.
+policy_report=$(tool_policy check) \
+    || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed (nothing restarted)"; }
+log "agent tool policy ok before restart"
 
 # --- 4b. gateway bridge ------------------------------------------------------------------------------------
 CHANGED=0

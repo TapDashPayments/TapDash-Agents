@@ -5,8 +5,19 @@ import logging
 import sqlite3
 import threading
 
+import warnings
+
 import pytest
-from starlette.testclient import TestClient
+
+with warnings.catch_warnings():
+    # starlette 1.9 warns at import that its TestClient prefers httpx2 (a third-party notice, raised while the
+    # module is collected, so a filterwarnings mark cannot reach it). Ignore exactly that warning here so
+    # `pytest -W error` still fails on every other warning.
+    from starlette.exceptions import StarletteDeprecationWarning
+
+    warnings.filterwarnings("ignore", category=StarletteDeprecationWarning,
+                            message=r"Using `httpx` with `starlette\.testclient` is deprecated")
+    from starlette.testclient import TestClient
 
 from bridge.app import (BLOCK_TYPE, DEFAULT_SECRET_FILE, NO_PARK_REASON, _DeliveryStore, create_app,
                         load_secret, parse_args, verify_signature)
