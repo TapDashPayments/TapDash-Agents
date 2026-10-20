@@ -2,8 +2,8 @@
 
 A [Hermes Agent](https://hermes-agent.nousresearch.com) plugin, plus two small services, that make an AI agent
 **ask a person before it does anything risky**. When the agent tries to move money in QuickBooks, the call is
-stopped and saved, Yaakov approves or denies it in [withHuman](https://withhuman.ai) - minutes or days later - and
-then the exact saved call runs once, in the same chat. It survives restarts and never retries on its own.
+stopped and saved, an approver approves or denies it in [withHuman](https://withhuman.ai) - minutes or days
+later - and then the exact saved call runs once, in the same chat. It survives restarts and never retries on its own.
 
 Status: **v1 accepted on 2026-10-20**, QuickBooks **sandbox** only, on the test VM `proto-agents`
 ([acceptance results](docs/acceptance-2026-10-20.md)).
@@ -14,7 +14,7 @@ Status: **v1 accepted on 2026-10-20**, QuickBooks **sandbox** only, on the test 
 flowchart LR
   agent["Agent"] -->|"risky call"| plugin["durable-park plugin<br/>stops it, checks the form,<br/>saves it"]
   plugin -->|"asks"| wh["withHuman"]
-  wh -->|"Yaakov approves"| plugin
+  wh -->|"approver approves"| plugin
   plugin -->|"runs the saved call once"| gw["withHuman gateway"]
   gw -->|"is this the approved call?"| bridge["bridge"]
   bridge -->|"yes, once"| gw
@@ -24,12 +24,14 @@ flowchart LR
 1. The agent calls a risky tool (create, update or delete of 12 money types in QuickBooks).
 2. The plugin checks the call against the tool's rules, saves it in a ledger and opens an approval request.
    The agent is told it is waiting.
-3. Yaakov approves in withHuman. A signed webhook wakes the plugin, which tells the original chat.
+3. An approver approves in withHuman. A signed webhook wakes the plugin, which tells the original chat.
 4. The agent runs `parked_action_execute`; the plugin uses the approval once and replays the saved call.
 5. The withHuman gateway asks the bridge whether this exact call was approved; the bridge says yes once.
 6. QuickBooks gets the call. The ledger records the result.
 
 The full picture - every component, arrow, state and failure path: **[docs/architecture.md](docs/architecture.md)**.
+The open-source and third-party pieces it is built on (versions, licenses, links):
+[Built on](../README.md#built-on).
 
 ## Folder layout
 

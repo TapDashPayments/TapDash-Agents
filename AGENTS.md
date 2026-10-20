@@ -35,9 +35,9 @@ When in doubt, fail closed (block, or ask a person). Never auto-approve.
 - The test VM `proto-agents` is the only place to experiment. **Never change the production Hermes host** (the
   jump host the connector runs on).
 - Through the connector, every heredoc gets a **unique** delimiter, never reused inside the script.
-- **Never print, paste or commit a secret.** Secrets live in `/etc/durable-park/` and are typed in by Yaakov with
+- **Never print, paste or commit a secret.** Secrets live in `/etc/durable-park/` and are typed in by an admin with
   `read -rs`. If a user pastes one into chat, don't use it; ask them to revoke it.
-- Root steps (copying into `/opt`, restarting system units) are Yaakov's. Give him the exact one-line command.
+- Root steps (copying into `/opt`, restarting system units) are an admin's. Give them the exact one-line command.
 - Before restarting the gateway or the bridge, make sure no row is `parked`, `approved` or `executing`
   ([runbook](durable-park/docs/runbook.md#health-check)).
 - Work on a git worktree or branch, not in the live clone's working tree. The gateway and the 5-minute sweep load

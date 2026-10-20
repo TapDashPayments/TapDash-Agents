@@ -29,11 +29,11 @@ answering non-2xx (e.g. 401 before provisioning).
 | Path | Owner / mode | Written by | Holds |
 |---|---|---|---|
 | `/etc/durable-park/wake_secret` | root:dpwake 0640 | configure_hermes.sh (once) | HMAC secret for the local wake route (members of dpwake: hermes, aaprecv) |
-| `/etc/durable-park/provisioner_token` | root:root 0600 | Yaakov (Step 6) | `whp_` provisioner token; delete after provisioning |
+| `/etc/durable-park/provisioner_token` | root:root 0600 | an admin (Step 6) | `whp_` provisioner token; delete after provisioning |
 | `/etc/durable-park/receiver.json` | aaprecv:aaprecv 0600 | provision.py | signing secret, registration id, idempotency key, instance id, the receiver's own copy of the instance token |
 | `/etc/durable-park/instance_token` | root:hermes 0640 | provision.py | `whc_` instance credential (plugin gate + gateway) |
-| `/etc/durable-park/bridge_secret` | root:dpwake 0640 | Yaakov | the `durable-park-bridge` webhook endpoint's signing secret (bridge) |
-| `/etc/durable-park/tunnel.env` | root:root 0600 | Yaakov (`enter-secrets.sh`) | QuickBooks app keys, refresh token, realm id, withHuman tunnel token |
+| `/etc/durable-park/bridge_secret` | root:dpwake 0640 | an admin | the `durable-park-bridge` webhook endpoint's signing secret (bridge) |
+| `/etc/durable-park/tunnel.env` | root:root 0600 | an admin (`enter-secrets.sh`) | QuickBooks app keys, refresh token, realm id, withHuman tunnel token |
 | `/opt/durable-park/` | root 0755 | configure_hermes.sh | the receiver/bridge venv (`agentapprovalprotocol==0.3.3`, `uvicorn==0.54.0`, `starlette==1.9.0`); root-owned copies of `receiver/{app,wake_post,provision}.py`, `bridge/*.py` and `plugin/durable_park/*.py` (the bridge uses `ledger.py`); `libexec/hermes-secrets` |
 | `~hermes/.hermes/plugin-data/durable-park/ledger.db` | hermes | the plugin | the ledger (`plugins.entries.durable-park.settings.ledger_path`; the sweep and the bridge use the same path) |
 | `~hermes/.hermes/plugin-data/durable-park/bridge_deliveries.db` | hermes | the bridge | per-delivery answers, for withHuman's retries |
@@ -51,7 +51,7 @@ Side effect: every `hermes` CLI command prints `Command helper: applied 1 secret
 `Config ref '${env:DURABLE_PARK_WAKE_SECRET}' ... is not set` line (the CLI reads config before the
 secret source runs; the gateway gets the real value, verified with a signed test wake).
 
-## Deploy (Step 5, done by Claude, re-runnable)
+## Deploy (Step 5, admin or AI agent, re-runnable)
 
 ```sh
 sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh
@@ -72,7 +72,7 @@ hermes cron list                                                   # durable-par
 ~/.hermes/scripts/durable_park_sweep.sh                            # prints nothing when all is well
 ```
 
-## Step 6 — Yaakov: provisioner token, then provision (human step)
+## Step 6 — Admin: provisioner token, then provision (human step)
 
 1. In withHuman: **Agents** → select the service agent **`proto-agents`** → open the menu beside
    **New instance** → **Issue provisioner token**. Copy the `whp_…` token (it is shown once).
@@ -115,7 +115,7 @@ The plugin reads `instance_token` lazily on each risky call, so no Hermes restar
 
 ## Alerts from the sweep
 
-The cron job delivers to Telegram's **home channel**, set to Yaakov's DM with `@TapDashAgentsBot` (`/sethome`
+The cron job delivers to Telegram's **home channel**, set to the admin's DM with `@TapDashAgentsBot` (`/sethome`
 in that DM changes it). Moving alerts to Microsoft Teams is planned: configure Hermes's Teams platform, then
 change the `durable-park-sweep` cron job's delivery target.
 

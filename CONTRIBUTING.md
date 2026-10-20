@@ -32,6 +32,7 @@ What counts as affected:
 - A setup step changes -> the setup guide ([gateway](durable-park/docs/gateway-setup.md),
   [receiver](durable-park/docs/receiver-setup.md)).
 - What the project is or how to start changes -> the READMEs.
+- A third-party piece is added, removed or changes version -> the [Built on](README.md#built-on) table.
 
 ### How it is enforced
 

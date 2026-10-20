@@ -3,6 +3,8 @@
 How a risky tool call is stopped, approved once by a person, and then run exactly once, even across restarts.
 This is the reference for how the pieces connect. **If you change a component, an arrow, a port, a path, a
 state or a threshold, update the matching diagram or table here in the same change** (see `CONTRIBUTING.md`).
+Versions and licenses of the third-party pieces (Hermes, withHuman, AAP, the QuickBooks MCP server, ...) are in
+the root README's [Built on](../../README.md#built-on) table.
 
 - [1. System map](#1-system-map)
 - [2. The approval journey, step by step](#2-the-approval-journey-step-by-step)
@@ -34,8 +36,8 @@ QuickBooks is reached only through the withHuman MCP gateway and its tunnel.
 
 ```mermaid
 flowchart LR
-  chat(["Yaakov in Telegram"])
-  approver(["Yaakov in the withHuman app"])
+  chat(["User in Telegram"])
+  approver(["Approver in the withHuman app"])
   qbo[("QuickBooks Online<br/>sandbox company")]
 
   subgraph WH["withHuman cloud"]
@@ -113,26 +115,27 @@ revision 8):
 
 | Order | When | Then |
 |---|---|---|
-| 1 | Agent `proto-agents` and (server starts with `park:` or tool starts with `mcp__wh__`) - a park request | Ask Yaakov |
-| 2 | Server `quickbooks` and the tool is one of the 12 money types (create/update/delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Webhook block `durable-park-bridge`: answers approve or human (human asks Yaakov) |
+| 1 | Agent `proto-agents` and (server starts with `park:` or tool starts with `mcp__wh__`) - a park request | Ask an approver |
+| 2 | Server `quickbooks` and the tool is one of the 12 money types (create/update/delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Webhook block `durable-park-bridge`: answers approve or human (human asks an approver) |
 | 3 | Everything else (reads and other writes) | Approve |
 
-**Who approves:** Yaakov only, through the escalation path `notify-yaakov-yehuda` in withHuman. Adding a backup
-approver is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
+**Who approves:** the people on the approvers' escalation path in withHuman (today `notify-yaakov-yehuda`, one
+approver). Adding or changing approvers is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
 request shows the tool as `mcp__wh__quickbooks__...` (server `park:quickbooks`) - that is the one to approve. A
 request with the plain tool name (`create_payment`, server `quickbooks`) means the bridge did not recognise a
-replay, so this is a second ask for the same action ([runbook](runbook.md#yaakov-was-asked-twice-for-one-action)).
+replay, so this is a second ask for the same action ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)).
 
 Setup steps for the pipeline: [gateway-setup.md](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline).
 
 ## 2. The approval journey, step by step
 
-One QuickBooks payment, from the model's first try to the payment existing. Yaakov approves exactly once (step 7).
+One QuickBooks payment, from the model's first try to the payment existing. The approver approves exactly once
+(step 7).
 
 ```mermaid
 sequenceDiagram
   autonumber
-  actor Y as Yaakov
+  actor Y as Approver
   participant A as Agent (LLM)
   participant H as park hook
   participant L as ledger.db
@@ -215,7 +218,7 @@ stateDiagram-v2
 ## 4. Form check before parking
 
 Before parking, the hook checks the call against the rules Hermes registered for that tool (the same rules the
-model was shown). A broken call is sent back to the model to fix, so Yaakov is never asked about a call QuickBooks
+model was shown). A broken call is sent back to the model to fix, so no approver is asked about a call QuickBooks
 would reject. Details and safety choices: [form-check.md](form-check.md).
 
 ```mermaid
@@ -246,7 +249,7 @@ tool's rules work, and writes `formcheck_status.json`. The sweep alerts once if 
 | Tool returns an unclear error (session expired, interrupted) | `unknown`, same as above. | Check QuickBooks |
 | Tool returns a clear error | `failed`, error stored; nothing to check. | Fix and ask again |
 | A decision's wake is lost (Hermes down, wake refused) | The sweep re-posts wakes every 5 minutes until the chat is told. | Nobody |
-| Bridge cannot match the gateway call (args changed, bridge down, bad signature) | withHuman asks a person instead. Never auto-approves. | Yaakov decides |
+| Bridge cannot match the gateway call (args changed, bridge down, bad signature) | withHuman asks a person instead. Never auto-approves. | An approver decides |
 | Bad form (missing required field, wrong type) | Blocked before parking; the model is told the exact problem. | Nobody (the model fixes it) |
 | Form checker cannot run | Risky calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Ledger cannot be opened at start | Every risky call is blocked; wakes are dropped; no executor tool. | Fix the ledger file |
@@ -278,7 +281,7 @@ replay store is not tied to the withHuman request id.
 
 ## 7. Secrets and who can read them
 
-All secrets live in `/etc/durable-park/` on the VM. They are typed in by Yaakov (never pasted into chat, never in
+All secrets live in `/etc/durable-park/` on the VM. They are typed in by an admin (never pasted into chat, never in
 the repo) and never printed by any script.
 
 | File | Mode | Read by | Used for |
@@ -321,4 +324,6 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | sweep | The 5-minute cron script that catches anything missed and sends alerts. |
 | tunnel | withHuman's container that runs a tool server (here QuickBooks) on the VM and dials out to withHuman. |
 | Funnel | Tailscale Funnel: exposes two local paths of the VM to the internet so withHuman can reach them. |
-| jump host | The production Hermes server Claude's connector runs on; it reaches the VM over SSH. Never changed. |
+| jump host | The production Hermes server the AI agents' connector runs on; it reaches the VM over SSH. Never changed. |
+| approver | A person on withHuman's approvers' escalation path; decides approval requests in the withHuman app. |
+| admin | A person with root on the VM and admin rights in withHuman; enters secrets and does the root steps. |

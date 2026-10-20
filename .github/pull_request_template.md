@@ -17,4 +17,4 @@
 
 ## Deploy and rollback
 
-<!-- What has to happen on the VM (restart the gateway? copy to /opt? Yaakov step?) and how to undo it. -->
+<!-- What has to happen on the VM (restart the gateway? copy to /opt? an admin's root step?) and how to undo it. -->

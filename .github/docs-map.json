@@ -93,6 +93,18 @@
       "docs": ["durable-park/README.md"]
     },
     {
+      "name": "Third-party versions (the Built on table)",
+      "code": [
+        "durable-park/requirements-dev.txt",
+        "durable-park/pyproject.toml",
+        "durable-park/deploy/tunnel/Dockerfile",
+        "durable-park/deploy/tunnel/docker-compose.yml",
+        "durable-park/plugin/durable_park/_vendor/**",
+        "tools/diagrams/package.json"
+      ],
+      "docs": ["README.md"]
+    },
+    {
       "name": "Repo tooling (checks, hooks, CI)",
       "code": [
         ".github/docs-map.json",

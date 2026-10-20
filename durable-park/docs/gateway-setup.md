@@ -190,8 +190,8 @@ screen-shared or recorded.
    token stays on that page until you close it (withHuman's docs say it is shown
    once, so if you already closed it, create a new token for the tunnel instead).
 
-4. Type `exit` to leave. Tell Claude; Claude runs `check` and starts the
-   tunnel. The tunnel's page in withHuman should then show it **online**.
+4. Type `exit` to leave. Tell whoever is running the deploy (an admin or an AI agent); they run `check` and
+   start the tunnel. The tunnel's page in withHuman should then show it **online**.
 
 ## HUMAN STEP B (Task 2 Step 4): register the server
 
@@ -221,7 +221,7 @@ the wizard layout is **unverified** on the live tenant.
 ## Gateway bridge + approval pipeline (Task 7)
 
 One human approval per action. The model's first call to a risky tool is parked (a withHuman AAP request on
-the pseudo-server `park:<slug>` that Yaakov approves). When the model then runs the approved park with
+the pseudo-server `park:<slug>` that an approver approves). When the model then runs the approved park with
 `parked_action_execute`, the real call goes through the gateway, and the pipeline's **webhook block** asks the
 **gateway bridge** whether this exact call is an approved, now-executing park. The bridge answers `approve`
 exactly once for a matching call and `human` for everything else, so nothing that was not parked is ever
@@ -267,7 +267,7 @@ secret are never logged.
 
 ### HUMAN STEP C (Task 7 Step 5): endpoint, secret, pipeline
 
-Do this after Claude has deployed and started the bridge service and the Funnel path. Labels come from the
+Do this after the bridge service and the Funnel path are deployed and started. Labels come from the
 withHuman docs (`webhook-endpoints`, `webhook-blocks`, `conditions`, `escalation-paths`); the exact screen layout
 is **unverified** on the live tenant.
 
@@ -294,18 +294,18 @@ is **unverified** on the live tenant.
    It creates the file empty with mode 0640 root:dpwake first, then writes the secret into it, so the value is
    never in a wider-permission file. A `whsec_...` secret is about 49 bytes; a very different number means a bad paste,
    run it again.
-3. Tell Claude. The bridge reads the secret only at startup, so Claude restarts it
-   (`sudo systemctl restart durable-park-bridge`).
+3. The bridge reads the secret only at startup, so restart it (root):
+   `sudo systemctl restart durable-park-bridge`.
 4. Close the withHuman secret tab. Type `exit` to leave the VM.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline), in this order**
 
-1. **Rule 1: parked calls ask Yaakov.** Condition, exactly as live (revision 8): **All** of
+1. **Rule 1: parked calls ask an approver.** Condition, exactly as live (revision 8): **All** of
    (**Agent slug** *equals* `proto-agents`, **Any** of (**MCP server** *starts with* `park:`, **Tool name**
    *starts with* `mcp__wh__`)). A park request's tool is the Hermes name (`mcp__wh__quickbooks__...`), so the
    tool condition catches it even if the server condition does not match. Do **not** use the server condition
    alone: if it does not match, park requests fall through to rule 3 and are auto-approved. Action: **Ask a
-   human**, with an escalation path whose **Notify** step names Yaakov (create the path under Escalation paths
+   human**, with an escalation path whose **Notify** step names the approvers (create the path under Escalation paths
    if none exists).
 2. **Rule 2: risky QuickBooks calls go to the bridge.** Add a **Branch** block with one **All** group. Tool
    names are the gateway's own, without the `mcp__wh__<slug>__` prefix; use the anchored regex:
@@ -320,7 +320,7 @@ is **unverified** on the live tenant.
    - Allowed outcomes: **Approve** and **Ask a human** only (untick Continue and Deny).
    - Attempt timeout `5s`; max attempts `2`.
    - Include: leave agent reasoning, context and previous metadata **off** (not needed; less data leaves).
-   - Escalation path: the same Yaakov path as rule 1, so a `human` answer asks Yaakov. Leave "agent's owner" off.
+   - Escalation path: the same approvers' path as rule 1, so a `human` answer asks an approver. Leave "agent's owner" off.
    - Reason text, for example: `Approve only a call that matches an approved durable-park park`.
 3. **Rule 3: everything else is approved.** A final rule/default: **Approve**. Make sure the order is 1, 2, 3
    (nothing above rule 1; rule 3 last).

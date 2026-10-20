@@ -15,20 +15,20 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 
 | What | How |
 |---|---|
-| VM | `proto-agents` (OVH VPS, Ubuntu 26.04, Hermes v0.22.2). Yaakov: `tailscale ssh ubuntu@proto-agents`. |
-| Claude | Through the Hermes Server connector, piping scripts into `/tmp/dp-tools/vm` (runs as `hermes`) or `/tmp/dp-tools/vmroot` (root) on the jump host. |
+| VM | `proto-agents` (OVH VPS, Ubuntu 26.04, Hermes v0.22.2). Admins: `tailscale ssh ubuntu@proto-agents` (passwordless sudo). |
+| AI agents (e.g. Claude) | Through the Hermes Server connector, piping scripts into `/tmp/dp-tools/vm` (runs as `hermes`) or `/tmp/dp-tools/vmroot` (root) on the jump host. |
 | Repo on the VM | `/home/hermes/tapdash-agents` (a clone of this repo). `/home/hermes/durable-park` links to its `durable-park/` folder. |
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
-| Telegram test bot | `@TapDashAgentsBot`, home channel = Yaakov's DM (where alerts go). |
+| Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where alerts go). |
 
 Rules:
 
 - **Never change the production Hermes host.** The jump host is production; only the VM is for testing.
 - When piping scripts through the connector, give every heredoc a **unique** delimiter (e.g. `<<'XEOF_7'`) and
   never reuse it inside. A reused `EOF` once ran the tail of a script on the production host.
-- **Never print a secret.** Secrets are typed in by Yaakov with `read -rs` (never pasted into chat).
-- Root steps (copying into `/opt`, restarting system units) are done by Yaakov in his own terminal. Claude's
-  safety check blocks them for Claude.
+- **Never print a secret.** Secrets are typed in by an admin with `read -rs` (never pasted into chat).
+- Root steps (copying into `/opt`, restarting system units) are done by an admin in their own terminal. AI agents
+  are blocked from them by design.
 - QuickBooks is a **sandbox** company. Never connect real books before the [rotation](#rotate-secrets-before-production)
   and the open v2 items are done.
 
@@ -84,9 +84,9 @@ PY
    | You changed | Make it live with |
    |---|---|
    | `plugin/` (park hook, form check, wake, executor, ledger) | `systemctl --user restart hermes-gateway` (as hermes) |
-   | `plugin/durable_park/ledger.py` | also the bridge's copy (root, Yaakov): `sudo install -m 0644 -o root -g root /home/hermes/durable-park/plugin/durable_park/ledger.py /opt/durable-park/plugin/durable_park/ledger.py && sudo systemctl restart durable-park-bridge` |
-   | any file in `bridge/` | root, Yaakov: copy each changed file, e.g. `sudo install -m 0644 -o root -g root /home/hermes/durable-park/bridge/app.py /opt/durable-park/bridge/app.py`, then `sudo systemctl restart durable-park-bridge` |
-   | any file in `receiver/` | root, Yaakov: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
+   | `plugin/durable_park/ledger.py` | also the bridge's copy (root, admin): `sudo install -m 0644 -o root -g root /home/hermes/durable-park/plugin/durable_park/ledger.py /opt/durable-park/plugin/durable_park/ledger.py && sudo systemctl restart durable-park-bridge` |
+   | any file in `bridge/` | root, admin: copy each changed file, e.g. `sudo install -m 0644 -o root -g root /home/hermes/durable-park/bridge/app.py /opt/durable-park/bridge/app.py`, then `sudo systemctl restart durable-park-bridge` |
+   | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
    | `deploy/` (units, policy, Hermes config) | `sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh` (idempotent; restarts the gateway) |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
@@ -126,7 +126,7 @@ A second line `durable-park: the form checker is working again.` follows when it
 
 ## Troubleshooting
 
-### Yaakov was asked twice for one action
+### An approver was asked twice for one action
 
 The park was approved, but the bridge did not match the gateway call, so withHuman asked a person again. Find
 what differed:
@@ -195,7 +195,7 @@ The form check needs nothing: it reads each tool's rules from Hermes automatical
 Several secrets were pasted into chat during testing (approved for testing only). Before any real books:
 
 - [ ] Revoke the withHuman provisioner token; re-provision the agent instance (new `instance_token` and receiver
-      secret): [receiver-setup.md](receiver-setup.md#step-6--yaakov-provisioner-token-then-provision-human-step)
+      secret): [receiver-setup.md](receiver-setup.md#step-6--admin-provisioner-token-then-provision-human-step)
 - [ ] Rotate the Intuit app client secret and refresh token; re-run OAuth; wipe the `durable-park-qbo-data`
       volume: [gateway-setup.md](gateway-setup.md#environment-variables)
 - [ ] Issue a new withHuman tunnel token
