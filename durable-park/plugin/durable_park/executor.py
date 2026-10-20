@@ -102,12 +102,15 @@ def _decode(result: Any) -> Any:
 #     "Tool execution failed"  tools/registry.py:911-921: the handler itself raised (equivalent to dispatch raising).
 #                              model_tools._sanitize_tool_error prefixes "[TOOL_ERROR] ", which is stripped first.
 #   unknown (structured): payload ``outcome_uncertain: true`` (:252 session expired mid-write; :303 and :317 stdio
-#                              subprocess died mid-call).
+#                              subprocess died mid-call), or ``needs_reauth: true`` (:214): after a recovered 401
+#                              ``_retry_once`` re-dispatches the write (:182-184, :205-211) and, if that retry raises,
+#                              the same needs_reauth error comes back although the write may have landed. A
+#                              first-attempt 401 is also reported unknown (the safe direction).
 #   failed (nothing reached the server, or the server answered with an error):
 #     trust-gate block :78,84, circuit breaker open :101,104, server not connected :114-124 and :620, transport
 #     down / reconnect requested :137, stdio never respawned :306 / died again :319 (both pre-dispatch),
-#     re-auth needed :214 (401 is always pre-dispatch), unknown tool registry.py:899, and errors returned by the
-#     remote tool (MCP isError -> tool_error(text) :537-538).
+#     unknown tool registry.py:899, and errors returned by the remote tool (MCP isError -> tool_error(text)
+#     :537-538).
 #   An unrecognised error text is ``failed``; only the prefixes above are ``unknown``.
 _UNKNOWN_ERROR_PREFIXES = ("MCP call failed", "MCP call interrupted", "Tool execution failed")
 _TOOL_ERROR_TAG = "[TOOL_ERROR] "
@@ -124,7 +127,8 @@ def _tool_error(payload: Any) -> tuple[str, bool] | None:
     error = payload["error"]
     text = error if isinstance(error, str) else json.dumps(error, default=str)
     bare = text.removeprefix(_TOOL_ERROR_TAG).lstrip()
-    unknown = payload.get("outcome_uncertain") is True or bare.startswith(_UNKNOWN_ERROR_PREFIXES)
+    unknown = (payload.get("outcome_uncertain") is True or payload.get("needs_reauth") is True
+               or bare.startswith(_UNKNOWN_ERROR_PREFIXES))
     return _one_line(text), unknown
 
 
@@ -160,6 +164,10 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
 
         # From here the row is ``executing``: every path below must leave it executed/failed/expired/unknown.
         state["row"] = row
+        try:  # before the gate: corrupt saved arguments must not burn the approval
+            call_args = json.loads(row.args_json)
+        except ValueError:
+            return fail(row, "saved arguments unreadable; nothing ran")
         try:
             verdict = gate_factory().check(build_call(row))
         except Exception as exc:  # noqa: BLE001 - nothing ran; fail closed
@@ -181,7 +189,7 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
             (exit_fn or _hard_exit)(CRASH_EXIT_CODE)
         try:
             state["dispatched"] = True  # from here on the call may have reached the remote server
-            result = dispatch(row.tool, json.loads(row.args_json))
+            result = dispatch(row.tool, call_args)
         except Exception as exc:  # noqa: BLE001 - never put exception text (it may echo args) in notes
             return unknown(row, f"dispatch raised {type(exc).__name__}")
         payload = _decode(result)

@@ -185,6 +185,9 @@ UNKNOWN_ERRORS = {
     "session expired mid-write": {"error": "The MCP transport session to 'wh' expired while this write-capable call "
                                            "was in flight, so the outcome is UNKNOWN", "outcome_uncertain": True,
                                   "server": "wh"},
+    # a 401 that handle_401 recovered is re-dispatched; if that retry raises, the same error comes back (:182-214)
+    "needs reauth after retry": {"error": "MCP server 'wh' requires re-authentication. Do NOT retry this tool",
+                                 "needs_reauth": True, "server": "wh"},
     "stdio died mid-call": {"error": "MCP server 'wh' lost its stdio subprocess after the tool call began.",
                             "outcome_uncertain": True},
 }
@@ -201,7 +204,6 @@ FAILED_ERRORS = {
     "transport down": {"error": "MCP server 'wh' transport is down; reconnect requested. Do NOT retry this tool "
                                 "immediately"},
     "unknown tool": {"error": "Unknown tool: mcp__wh__quickbooks__create_payment"},
-    "needs reauth": {"error": "MCP server 'wh' requires re-authentication.", "needs_reauth": True},
     "unrecognised text": {"error": "something Hermes has not said before"},
 }
 
@@ -262,6 +264,18 @@ def test_every_ledger_write_failing_after_dispatch_still_reports_unknown(env, mo
     assert out == {"status": "unknown", "park_id": row.park_id, "message": unknown_message(row)}
     assert env.ledger.get(row.park_id).status == "executing"  # could not be moved; the reply is still truthful
     assert len(env.dispatched) == 1
+
+
+def test_corrupt_saved_args_fail_without_dispatch(env):
+    row = env.approve()
+    with env.ledger._connect() as con:
+        con.execute("UPDATE parks SET args_json='{not json' WHERE park_id=?", (row.park_id,))
+    out = run(env.build(), row.park_id)
+    assert out == {"status": "failed", "park_id": row.park_id,
+                   "message": f"durable-park: {row.park_id} failed: saved arguments unreadable; nothing ran"}
+    assert env.dispatched == []
+    assert env.ledger.get(row.park_id).status == "failed"
+    assert env.provider.only().consumed_at is None  # the approval was not burned
 
 
 def test_ledger_failure_before_dispatch_is_not_unknown(env, monkeypatch):
