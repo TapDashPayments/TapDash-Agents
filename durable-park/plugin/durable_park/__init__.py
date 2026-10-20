@@ -10,6 +10,7 @@ from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor
 from .gatecall import make_gate
 from .ledger import Ledger
 from .park_hook import DEFAULT_RISKY_TOOLS, fail_closed_hook, make_pre_tool_call
+from .wake import drop_wake_hook, handle_wake, make_async_client_factory
 
 log = logging.getLogger("durable_park")
 
@@ -34,10 +35,8 @@ def _compile_risky(patterns) -> list[re.Pattern]:
 
 
 def register(ctx) -> None:
-    """Hermes plugin entry point: the ``pre_tool_call`` park hook and the ``parked_action_execute`` tool.
-
-    The ``pre_gateway_dispatch`` hook comes later.
-    """
+    """Hermes plugin entry point: the ``pre_tool_call`` park hook, the ``parked_action_execute`` tool and
+    the ``pre_gateway_dispatch`` wake handler."""
     risky = _compile_risky(ctx.get_config("risky_tools", list(DEFAULT_RISKY_TOOLS)))
     base_url = ctx.get_config("aap_base_url", DEFAULT_AAP_BASE_URL)
     token_file = ctx.get_config("token_file", DEFAULT_TOKEN_FILE)
@@ -54,6 +53,7 @@ def register(ctx) -> None:
     except Exception as exc:  # noqa: BLE001
         log.error("durable-park ledger unavailable (%s); refusing all risky tools", type(exc).__name__)
         ctx.register_hook("pre_tool_call", fail_closed_hook(risky))
+        ctx.register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         return
     ctx.register_hook("pre_tool_call", make_pre_tool_call(ledger, gate_factory, risky))
     # ctx.dispatch_tool -> registry.dispatch does not run pre_tool_call hooks, so the executor's own
@@ -63,3 +63,12 @@ def register(ctx) -> None:
         handler=make_executor(ledger, gate_factory, ctx.dispatch_tool,
                               crash_after_consume=crash_after_consume_enabled()),
         description=EXECUTE_SCHEMA["description"])
+    wake_client_factory = make_async_client_factory(base_url, token_file)
+
+    async def durable_park_wake(event=None, **_kw):
+        # Hermes awaits async hooks on the gateway loop and passes event=, gateway=, session_store=.
+        # ctx.inject_message is sync and only schedules the turn on that loop (plugins_injection.py).
+        return await handle_wake(event, ledger=ledger, async_client_factory=wake_client_factory,
+                                 inject=ctx.inject_message)
+
+    ctx.register_hook("pre_gateway_dispatch", durable_park_wake)

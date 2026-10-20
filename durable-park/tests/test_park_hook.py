@@ -187,7 +187,7 @@ class FakeCtx:
 def test_register_wires_pre_tool_call_with_default_settings(tmp_path):
     ctx = FakeCtx(tmp_path / "data")
     register(ctx)
-    assert set(ctx.hooks) == {"pre_tool_call"}
+    assert set(ctx.hooks) == {"pre_tool_call", "pre_gateway_dispatch"}
     assert set(ctx.tools) == {"parked_action_execute"}
     tool = ctx.tools["parked_action_execute"]
     assert tool.toolset == "durable_park" and tool.schema == EXECUTE_SCHEMA and callable(tool.handler)
