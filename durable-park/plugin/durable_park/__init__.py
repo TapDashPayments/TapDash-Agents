@@ -6,6 +6,7 @@ import logging
 import re
 from pathlib import Path
 
+from . import compat
 from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor
 from .gatecall import make_gate
 from .ledger import Ledger
@@ -37,6 +38,7 @@ def _compile_risky(patterns) -> list[re.Pattern]:
 def register(ctx) -> None:
     """Hermes plugin entry point: the ``pre_tool_call`` park hook, the ``parked_action_execute`` tool and
     the ``pre_gateway_dispatch`` wake handler."""
+    compat.check_hermes_version(log)  # warns (never refuses) on a Hermes other than v0.22.2
     risky = _compile_risky(ctx.get_config("risky_tools", list(DEFAULT_RISKY_TOOLS)))
     base_url = ctx.get_config("aap_base_url", DEFAULT_AAP_BASE_URL)
     token_file = ctx.get_config("token_file", DEFAULT_TOKEN_FILE)
@@ -73,3 +75,4 @@ def register(ctx) -> None:
         handler=make_executor(ledger, gate_factory, ctx.dispatch_tool,
                               crash_after_consume=crash_after_consume_enabled()),
         description=EXECUTE_SCHEMA["description"])
+    log.info("durable-park loaded: ledger=%s, %d risky tool pattern(s), aap=%s", ledger_path, len(risky), base_url)

@@ -68,7 +68,8 @@ def test_executes_exactly_once(env):
     row = env.approve()
     handler = env.build()
     out = run(handler, row.park_id)
-    assert out == {"status": "executed", "park_id": row.park_id, "result": {"ok": True, "payment_id": "pay_1"}}
+    assert out == {"status": "executed", "park_id": row.park_id,
+                   "result": json.dumps({"ok": True, "payment_id": "pay_1"})}
     assert env.dispatched == [(TOOL, ARGS)]
     done = env.ledger.get(row.park_id)
     assert done.status == "executed"
@@ -413,3 +414,49 @@ def test_schema():
     params = EXECUTE_SCHEMA["parameters"]
     assert params["type"] == "object" and params["required"] == ["park_id"]
     assert params["properties"]["park_id"]["type"] == "string"
+
+
+def _hermes_flags_failure(result: str) -> bool:
+    """Hermes v0.22.2 agent/display.py:999-1037 ``_detect_tool_failure`` for a plugin tool's string result
+    (the parts that apply to a non-terminal, non-memory tool): a dict with a truthy ``error`` (or a
+    ``message`` next to an ``error`` key / ``success: false``), or ``"error"`` / ``"failed"`` anywhere in the
+    first 500 characters (lower-cased), or a string starting with ``Error``."""
+    try:
+        data = json.loads(result)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        failed = data.get("success") is False
+        err = data.get("error") or data.get("message")
+        if err and (failed or "error" in data):
+            return True
+    head = result[:500].lower()
+    return '"error"' in head or '"failed"' in head or result.startswith("Error")
+
+
+@pytest.mark.parametrize("tool_result", [
+    json.dumps({"error": None, "id": "x"}),
+    json.dumps({"result": json.dumps({"Invoice": {"Id": "42", "status": "failed", "error": None}})}),
+    json.dumps({"result": "Error rate is 0%; \"failed\" count 0"}),
+    "Error-free run, nothing \"failed\"",
+    json.dumps({"success": False, "message": "partial"}),
+])
+def test_executed_reply_is_never_flagged_as_a_failure_by_hermes(env, tool_result):
+    """R21 probe: Hermes's display marks results with "error" in their first 500 chars as failed; a successful
+    execution must not look like one, whatever the tool returned (the raw result is nested as a JSON string)."""
+    row = env.approve()
+    env.box.result = tool_result
+    reply = env.build()({"park_id": row.park_id})
+    out = json.loads(reply)
+    assert out["status"] == "executed"
+    assert out["result"] == tool_result  # the tool's own text, unchanged
+    assert "error" not in out and "message" not in out
+    assert not _hermes_flags_failure(reply)
+
+
+def test_failed_reply_is_still_flagged_as_a_failure_by_hermes(env):
+    row = env.approve()
+    env.box.result = json.dumps({"error": "QuickBooks said no"})
+    reply = env.build()({"park_id": row.park_id})
+    assert json.loads(reply)["status"] == "failed"
+    assert _hermes_flags_failure(reply)

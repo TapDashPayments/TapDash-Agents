@@ -206,7 +206,11 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
         if not ledger.transition(park_id, "executing", "executed", result_json=raw):
             log.error("%s ran but the ledger row was no longer executing", park_id)
         log.info("executed %s tool=%s", park_id, row.tool)
-        return _reply("executed", park_id, result=payload)
+        # The tool's own text, nested as a JSON *string*: Hermes v0.22.2 marks any tool result with "error" or
+        # "failed" in its first 500 characters as a failure (agent/display.py:999-1037, _detect_tool_failure).
+        # Nested, every quote inside the tool's answer is escaped (\"error\"), so a success can never trip that
+        # check, and the reply itself never has an "error" key. Failures keep their "failed" status (flagged).
+        return _reply("executed", park_id, result=raw)
 
     def handler(args: Any = None, **_kw: Any) -> str:
         park_id = str(args.get("park_id") or "").strip() if isinstance(args, dict) else ""
