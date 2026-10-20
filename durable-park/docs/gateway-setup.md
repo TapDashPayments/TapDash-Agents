@@ -217,3 +217,128 @@ the wizard layout is **unverified** on the live tenant.
 - `check` output format beyond `quickbooks: ok, 142 tools` (seen once, with a
   dummy-credential run).
 - Real QuickBooks calls (needs real sandbox credentials).
+
+## Gateway bridge + approval pipeline (Task 7)
+
+One human approval per action. The model's first call to a risky tool is parked (a withHuman AAP request on
+the pseudo-server `park:<slug>` that Yaakov approves). When the model then runs the approved park with
+`parked_action_execute`, the real call goes through the gateway, and the pipeline's **webhook block** asks the
+**gateway bridge** whether this exact call is an approved, now-executing park. The bridge answers `approve`
+exactly once for a matching call and `human` for everything else, so nothing that was not parked is ever
+auto-approved, and an approved park is not asked about a second time.
+
+### What the bridge does
+
+| Item | Value |
+| --- | --- |
+| Code | `bridge/app.py` (Starlette + uvicorn), POST `/wh/bridge` on `127.0.0.1:8791` |
+| Unit | `deploy/durable-park-bridge.service` (system unit, `User=hermes`, group `dpwake`, strict sandbox; see the comments at its top for deploy-time values) |
+| Public URL | `https://proto-agents.taila95862.ts.net/wh/bridge` (Tailscale Funnel path, set up at deploy) |
+| Secret | `/etc/durable-park/bridge_secret` (0640 root:dpwake), read once at startup |
+| Ledger | `--ledger PATH` or env `DURABLE_PARK_LEDGER`; deployed path `/home/hermes/.hermes/plugin-data/durable-park/ledger.db`. The bridge never creates it: a missing file means every delivery gets `human` (logged once as `bridge ledger ... does not exist`). Retry records go to `bridge_deliveries.db` in the same directory |
+| Other options | `--secret-file`, `--host 127.0.0.1`, `--port 8791`, `--expected-agent proto-agents` (env `DURABLE_PARK_BRIDGE_SECRET_FILE`, `DURABLE_PARK_EXPECTED_AGENT`) |
+
+Signature (confirmed against withHuman's open-source repo `internal/webhookdelivery`, and its webhook-endpoints
+docs): header `WithHuman-Signature: t=<unix>,v1=<hex>`; `v1` = HMAC-SHA256 over `"<t>." + raw body`, keyed with
+the **whole** `whsec_...` string as text (not base64-decoded); 300 s tolerance either side; constant-time compare.
+A missing, malformed, stale or wrong signature gets `401` with an empty body, which withHuman treats as a failed
+delivery (so the block falls back to a human).
+
+Decision, for a delivery with a valid signature:
+
+1. The body must be `type: request_approval_block.webhook`, not `preview: true`, and `agent.slug` must equal the
+   expected agent (`proto-agents`); otherwise `human` (and the ledger is not touched).
+2. Hermes name = `mcp__wh__<request.server>__<request.tool>`. If an `executing` park has that tool name and the
+   exact same arguments (sha256 of canonical JSON, no stripping) and its gateway pass is unused, the bridge marks
+   the pass used and answers `{"outcome":"approve","reason":"Matches approved park P-XXXXXXXX"}`.
+3. Anything else, or any error: `{"outcome":"human","reason":"No approved park for this exact call"}`.
+4. withHuman retries a delivery (same `WithHuman-Idempotency-Key`); the bridge stores its answer per key together
+   with the Hermes tool name, the arguments digest and the agent slug. A retry of an approved delivery gets
+   `approve` again only if all three still match (`why=replay`); a reused key with a different call gets `human`
+   (`why=replay-mismatch`), and a different delivery for the same call gets `human`.
+
+Logs (`journalctl -u durable-park-bridge`): one line per delivery with the delivery id, server, tool, the sorted
+argument **key names**, the arguments digest and the outcome, plus a short `why` tag. Argument values and the
+secret are never logged.
+
+### HUMAN STEP C (Task 7 Step 5): endpoint, secret, pipeline
+
+Do this after Claude has deployed and started the bridge service and the Funnel path. Labels come from the
+withHuman docs (`webhook-endpoints`, `webhook-blocks`, `conditions`, `escalation-paths`); the exact screen layout
+is **unverified** on the live tenant.
+
+**C1. Add the webhook endpoint**
+
+1. https://app.withhuman.ai -> **Webhook endpoints** (look under Settings or the left menu if it is not at top
+   level) -> **Add endpoint** / **New endpoint**.
+2. Name `durable-park-bridge`. If it asks for a key, use `durable-park-bridge` (lowercase letters, digits, `.`,
+   `_`, `-`).
+3. URL: `https://proto-agents.taila95862.ts.net/wh/bridge`. Save and activate it.
+4. Copy the **signing secret** (`whsec_...`). It is shown **once**. Keep the tab open until step C2 is done.
+   (Rotating the secret later takes effect immediately in withHuman: repeat C2 right after.)
+
+**C2. Put the secret on the VM (no echo, no shell history, not in a command line)**
+
+1. From a device on your tailnet: `tailscale ssh ubuntu@proto-agents` (use a terminal that is not being
+   screen-shared).
+2. Run this one-liner, paste the secret when it prompts (nothing is shown), press Enter:
+
+   ```bash
+   sudo bash -c 'set -eu; f=/etc/durable-park/bridge_secret; getent group dpwake >/dev/null || groupadd --system dpwake; mkdir -p /etc/durable-park; install -m 0640 -o root -g dpwake /dev/null "$f"; read -rs -p "Paste withHuman signing secret, then Enter: " S; echo; printf "%s" "$S" > "$f"; unset S; echo "saved $(wc -c < "$f") bytes to $f"'
+   ```
+
+   It creates the file empty with mode 0640 root:dpwake first, then writes the secret into it, so the value is
+   never in a wider-permission file. A `whsec_...` secret is about 49 bytes; a very different number means a bad paste,
+   run it again.
+3. Tell Claude. The bridge reads the secret only at startup, so Claude restarts it
+   (`sudo systemctl restart durable-park-bridge`).
+4. Close the withHuman secret tab. Type `exit` to leave the VM.
+
+**C3. Pipeline rules (Approval pipelines -> the Entry pipeline), in this order**
+
+1. **Rule 1: parked calls ask Yaakov.** Add a rule/block with condition **MCP server** **starts with**
+   `park:`. Action: **Ask a human**, with an escalation path whose **Notify** step names Yaakov (create the path
+   under Escalation paths if none exists).
+2. **Rule 2: risky QuickBooks calls go to the bridge.** Add a **Branch** block with one **All** group. Tool
+   names are the gateway's own, without the `mcp__wh__<slug>__` prefix; use the anchored regex:
+   - **MCP server** *equals* `quickbooks`, and
+   - **Tool name** *matches regex*
+     `^(create|update|delete)[_-](payment|bill_payment|transfer|deposit|journal_entry|refund_receipt|sales_receipt|credit_memo|vendor_credit|purchase|invoice|bill)$`
+
+   (v1 is QuickBooks only. Later, if DocuSign is added, add a second **All** group inside an **Any**: server
+   `docusign` and tool regex `^(createEnvelope|updateEnvelope|triggerWorkflow|cancelWorkflowInstance|pauseNewWorkflowInstances|resumeWorkflow)$`.
+   Nothing about DocuSign is needed now.) Inside the branch add a **Webhook** block:
+   - Name `durable-park-bridge`; endpoint `durable-park-bridge`.
+   - Allowed outcomes: **Approve** and **Ask a human** only (untick Continue and Deny).
+   - Attempt timeout `5s`; max attempts `2`.
+   - Include: leave agent reasoning, context and previous metadata **off** (not needed; less data leaves).
+   - Escalation path: the same Yaakov path as rule 1, so a `human` answer asks Yaakov. Leave "agent's owner" off.
+   - Reason text, for example: `Approve only a call that matches an approved durable-park park`.
+3. **Rule 3: everything else is approved.** A final rule/default: **Approve**. Make sure the order is 1, 2, 3
+   (nothing above rule 1; rule 3 last).
+
+If the bridge is down, answers `401` or times out, the webhook block fails and the call goes to a human
+(withHuman: "no accepted answer after the attempts -> human review"), so an outage never auto-approves.
+
+**C4. Test**
+
+1. On the Webhook endpoints page, open `durable-park-bridge` and send the **test delivery**. The bridge answers
+   `human` (a test delivery is not a block delivery and there is no park); the log line shows `why=type`.
+   `journalctl -u durable-park-bridge -n 5` on the VM. Expect **no** `401` warning; a `401` means the secret
+   file does not match the endpoint secret (redo C2, restart).
+2. A real end-to-end check (a parked call, then `parked_action_execute`) happens in Task 8.
+
+### Known risks / unverified (Task 8 to settle)
+
+- **Arguments match is exact.** The bridge digests `request.arguments` as delivered. The gateway adds
+  `withhuman_scope` (and may add `withhuman_context`) to tool arguments; if those reach the pipeline body but
+  were not in the arguments the model sent when it was parked, the digests differ and every call goes to a human.
+  The delivery log lists the argument key names and digest for this; fix by stripping those keys on both sides.
+- Whether pipeline requests created through AAP with `server: park:<slug>` show up under **MCP server** in the
+  same pipeline conditions as gateway slugs (research notes: a `:` is probably not valid in a gateway slug, but
+  AAP `server` is a free string). If rule 1 cannot match on `park:`, match the park requests another way (for
+  example by agent or tool name) and update this section.
+- UI names (Webhook endpoints menu location, Branch vs Delegate block, "Entry pipeline") are from the docs, not
+  seen on the live tenant. Whether the endpoint **test** accepts a `human` answer for a non-block delivery type.
+- `/opt/durable-park/venv` as the service's Python and `dpwake` as an existing group are assumptions in the unit
+  file; the deploy step creates them.
