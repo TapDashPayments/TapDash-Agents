@@ -1,0 +1,97 @@
+# durable-park receiver, provisioning and deploy (proto VM)
+
+How withHuman's decision gets back into the Hermes chat:
+
+```
+withHuman (request.resolved, Standard-Webhooks signed)
+  -> https://proto-agents.taila95862.ts.net/aap/events          (Tailscale Funnel)
+  -> durable-park-receiver  127.0.0.1:8790 /aap/events           (system unit, user aaprecv)
+       verifies the signature, answers 204, reads the request with the instance credential,
+       context.resume = {"framework": "hermes", "park_id": ...}
+  -> POST http://127.0.0.1:8644/webhooks/durable-park-wake        (Hermes webhook route, X-Hub-Signature-256)
+  -> durable-park plugin, pre_gateway_dispatch: re-reads the decision from withHuman, updates the ledger,
+     injects the APPROVED / DENIED / ... text into the original chat. The wake never reaches the agent.
+```
+
+A cron job (`durable-park-sweep`, every 5 min, no agent) re-posts wakes for anything a lost notification
+left behind and turns `executing` rows older than 10 min into `unknown` with one alert line.
+
+## Files and owners
+
+| Path | Owner / mode | Written by | Holds |
+|---|---|---|---|
+| `/etc/durable-park/wake_secret` | root:dpwake 0640 | configure_hermes.sh (once) | HMAC secret for the local wake route (members of dpwake: hermes, aaprecv) |
+| `/etc/durable-park/provisioner_token` | root:root 0600 | Yaakov (Step 6) | `whp_` provisioner token; delete after provisioning |
+| `/etc/durable-park/receiver.json` | aaprecv:aaprecv 0600 | provision.py | signing secret, registration id, idempotency key, instance id, the receiver's own copy of the instance token |
+| `/etc/durable-park/instance_token` | root:hermes 0640 | provision.py | `whc_` instance credential (plugin gate + gateway) |
+| `/opt/durable-park/` | root 0755 | configure_hermes.sh | receiver venv (`agentapprovalprotocol==0.3.3`, `uvicorn==0.54.0`, `starlette==1.9.0`) and a copy of `receiver/*.py` |
+| `~hermes/.hermes/plugin-data/durable-park/ledger.db` | hermes | the plugin | the ledger (`plugins.entries.durable-park.settings.ledger_path`; the sweep and the bridge use the same path) |
+| `~hermes/.hermes/scripts/durable_park_sweep.sh` | hermes 0750 | configure_hermes.sh | cron wrapper: `exec /usr/bin/python3 -I <repo>/scripts/durable_park_sweep.py --ledger <ledger> --wake-secret-file /etc/durable-park/wake_secret` |
+
+The webhook route's secret in `config.yaml` is the reference `${env:DURABLE_PARK_WAKE_SECRET}`. Hermes's
+`command` secret source (`secrets.command.command`: `sed -n 's/^/DURABLE_PARK_WAKE_SECRET=/p' /etc/durable-park/wake_secret`)
+supplies the value at every Hermes start, so the secret exists at rest only in `/etc/durable-park/wake_secret`.
+Side effect: every `hermes` CLI command prints `Command helper: applied 1 secret` and a harmless
+`Config ref '${env:DURABLE_PARK_WAKE_SECRET}' ... is not set` line (the CLI reads config before the
+secret source runs; the gateway gets the real value, verified with a signed test wake).
+
+## Deploy (Step 5, done by Claude, re-runnable)
+
+```sh
+sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh
+```
+
+Idempotent. It never prints a secret. Before provisioning, the receiver runs and answers every event
+with 401 (no `receiver.json` yet). It restarts the hermes user manager once (so the gateway and its
+cron scripts get the new `dpwake` group), later runs only restart `hermes-gateway`.
+
+Checks after a deploy:
+
+```sh
+curl -s http://127.0.0.1:8644/health                               # {"status": "ok", "platform": "webhook"}
+grep "durable-park loaded" ~/.hermes/logs/agent.log | tail -1        # plugin loaded, ledger path
+sudo tailscale funnel status                                       # /aap/events proxy http://127.0.0.1:8790/aap/events
+systemctl status durable-park-receiver                             # active (running)
+hermes cron list                                                   # durable-park-sweep, every 5m, telegram
+~/.hermes/scripts/durable_park_sweep.sh                            # prints nothing when all is well
+```
+
+## Step 6 — Yaakov: provisioner token, then provision (human step)
+
+1. In withHuman: **Agents** → select the service agent **`proto-agents`** → open the menu beside
+   **New instance** → **Issue provisioner token**. Copy the `whp_…` token (it is shown once).
+
+2. Open a shell on the VM: `tailscale ssh ubuntu@proto-agents`, then paste this line exactly. It asks for
+   the token without echoing it; the token never appears on screen, in shell history or in any command's
+   arguments (`read` and `printf` are shell builtins):
+
+   ```sh
+   IFS= read -rs -p 'withHuman provisioner token (whp_...): ' T; echo; printf '%s\n' "$T" | sudo install -m 0600 -o root -g root /dev/stdin /etc/durable-park/provisioner_token; unset T; sudo stat -c '%a %U:%G %s bytes' /etc/durable-park/provisioner_token; sudo grep -q '^whp_' /etc/durable-park/provisioner_token && echo 'token stored (starts with whp_)'
+   ```
+
+   Expected: `600 root:root <n> bytes` and `token stored (starts with whp_)`.
+
+3. Provision the instance (prints only the instance id):
+
+   ```sh
+   sudo /opt/durable-park/bin/python -I /opt/durable-park/receiver/provision.py --provisioner-token-file /etc/durable-park/provisioner_token --url https://proto-agents.taila95862.ts.net/aap/events --name proto-agents-1
+   ```
+
+   What it does: writes a pending `receiver.json` (new `whsec_` signing secret + registration id), restarts
+   the receiver, checks that the receiver answers a signed verification challenge both on
+   `127.0.0.1:8790` and through the public Funnel URL (nothing is sent to withHuman if this fails), then
+   calls `POST https://app.withhuman.ai/api/aap/v1/instances` (withHuman verifies the receiver live
+   within 10 s), then writes the final `receiver.json` + `instance_token` and restarts the receiver.
+   Re-running it is safe: a pending registration is retried with the same idempotency key (no second
+   instance), a finished one is never re-provisioned. Exit 2 = refused before anything was sent;
+   exit 1 = a step failed, fix and re-run.
+
+4. After it printed the instance id: `sudo rm /etc/durable-park/provisioner_token` (not needed any more;
+   only keep it while a run is failing and you want to retry).
+
+The plugin reads `instance_token` lazily on each risky call, so no Hermes restart is needed.
+
+## Telegram alerts from the sweep
+
+The cron job delivers to Telegram's **home channel**. Hermes on this VM has no Telegram home channel
+yet, so alert lines would not be delivered. Fix: in the Telegram DM with the bot, send `/sethome`.

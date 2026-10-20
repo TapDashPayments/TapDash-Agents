@@ -1,0 +1,27 @@
+# durable-park AAP receiver: withHuman webhooks (via Tailscale Funnel) -> signed wake to Hermes.
+# Installed by deploy/configure_hermes.sh as /etc/systemd/system/durable-park-receiver.service.
+# Enabled and running from the start: until provision.py writes /etc/durable-park/receiver.json the
+# app answers every event with 401 (it never crash-loops on a missing/broken file).
+[Unit]
+Description=durable-park AAP receiver (withHuman request.resolved -> Hermes wake)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aaprecv
+Group=aaprecv
+# dpwake: read /etc/durable-park/wake_secret (0640 root:dpwake)
+SupplementaryGroups=dpwake
+ExecStart=/opt/durable-park/bin/python -I -B /opt/durable-park/receiver/app.py
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/durable-park
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

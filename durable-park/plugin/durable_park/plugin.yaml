@@ -3,3 +3,7 @@ version: "0.2.0"
 description: Durable park/resume of risky tool calls via withHuman (prototype)
 provides_tools: [parked_action_execute]
 provides_hooks: [pre_tool_call, pre_gateway_dispatch]
+# Hermes v0.22.2 never installs these at discovery (it only warns): PM admission installs them into Hermes's
+# environment when the plugin is enabled (`hermes plugins enable durable-park`); `hermes pm repair` restores
+# them. deploy/configure_hermes.sh does both as needed.
+python_dependencies: ["agentapprovalprotocol==0.3.3"]
