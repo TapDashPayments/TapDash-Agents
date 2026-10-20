@@ -1,3 +1,7 @@
+> **Historical.** This is the original build plan (2026-10-19). Several details changed during the build
+> (QuickBooks only, argument normalization, `unknown` handling, the form check). For how it works now,
+> see [../architecture.md](../architecture.md).
+
 # Durable Park (Hermes × withHuman) Prototype — Implementation Plan (v2: real QuickBooks + DocuSign)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

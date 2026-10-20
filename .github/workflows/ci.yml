@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    name: Docs updated with code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Every file is covered by the docs map
+        run: python3 tools/docs_check/check_docs.py --verify-map
+      - name: Code changes come with their docs
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: python3 tools/docs_check/check_docs.py --base "$BASE" --head "$HEAD"
+
+  diagrams:
+    name: Diagrams parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/diagrams/package-lock.json
+      - run: npm ci --prefix tools/diagrams --no-audit --no-fund
+      - run: node tools/diagrams/validate_mermaid.mjs $(git ls-files '*.md')
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: durable-park/requirements-dev.txt
+      - run: pip install -r durable-park/requirements-dev.txt
+      - name: durable-park
+        working-directory: durable-park
+        run: python -m pytest -q -W error
+      - name: docs checker
+        run: python -m pytest -q -W error tools/docs_check

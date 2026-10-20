@@ -60,3 +60,20 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - Rotate the `durable-park-bridge` webhook endpoint secret and re-store `bridge_secret`.
 - Also regenerate `wake_secret` (not pasted in chat; good hygiene before production).
 - Fix deferred Important items 1, 2, 3, 6, 7 and decide item 4 (write scope) before any real books are connected.
+
+## Since acceptance (2026-10-20, evening)
+
+The record above is kept as it was. Changes since then:
+
+- **Important #1 fixed**: the bridge builds tool names the way Hermes does (`create-bill` -> `create_bill`);
+  proved live with one approval for bill #147.
+- **Minor "integral floats" fixed**: `2.0` and `2` digest the same (`ledger.normalize_args`); a live $2 bill had
+  been approved twice before the fix.
+- **New: form check before parking** ([form-check.md](form-check.md)): a call that breaks the tool's rules is sent
+  back to the model and nobody is asked; proved live (a bill without `DetailType` was blocked, the fixed one
+  parked once).
+- **Docs** (Important #7): architecture, runbook and READMEs written; stale setup steps corrected (pipeline rule 1,
+  bridge matching).
+- Code now lives in GitHub `TapDashPayments/TapDash-Agents` (`durable-park/`); the VM works in a clone of it.
+
+Still open: Important #2, #3, #5, #6; the write-scope decision (#4); secret rotation.

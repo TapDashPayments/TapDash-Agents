@@ -7,7 +7,7 @@ withHuman (request.resolved, Standard-Webhooks signed)
   -> https://proto-agents.taila95862.ts.net/aap/events          (Tailscale Funnel)
   -> durable-park-receiver  127.0.0.1:8790 /aap/events           (system unit, user aaprecv)
        verifies the signature, answers 204, reads the request with the instance credential,
-       context.resume = {"framework": "hermes", "park_id": ...}
+       context.resume = {"framework": "hermes", "park_id": ..., "session_key": ...}
   -> POST http://127.0.0.1:8644/webhooks/durable-park-wake        (Hermes webhook route, X-Hub-Signature-256)
   -> durable-park plugin, pre_gateway_dispatch: re-reads the decision from withHuman, updates the ledger,
      injects the APPROVED / DENIED / ... text into the original chat. The wake never reaches the agent.
@@ -19,9 +19,9 @@ left behind and turns `executing` rows older than 10 min into `unknown` with one
 **Retries.** The SDK receiver answers withHuman `204` as soon as the signature checks out and only then,
 in the background, reads the request and posts the wake (agentapprovalprotocol 0.3.3 `receiver.py:158-166`).
 withHuman therefore counts the notification as delivered even if the wake later fails (Hermes down, wake
-refused, withHuman read failed) and never retries it. Recovery is the sweep: within 5 minutes it re-posts a
-wake for every `parked` row and every decided row the chat was not told about, so a lost wake costs at most
-one sweep interval. withHuman's own retries (up to 7 days) only cover the receiver being unreachable or
+refused, withHuman read failed) and never retries it. Recovery is the sweep: on its next run (every 5 minutes,
+about 6 in practice) it re-posts a wake for every `parked` row and every decided row the chat was not told
+about, so a lost wake costs at most one sweep interval. withHuman's own retries (up to 7 days) only cover the receiver being unreachable or
 answering non-2xx (e.g. 401 before provisioning).
 
 ## Files and owners
@@ -32,8 +32,12 @@ answering non-2xx (e.g. 401 before provisioning).
 | `/etc/durable-park/provisioner_token` | root:root 0600 | Yaakov (Step 6) | `whp_` provisioner token; delete after provisioning |
 | `/etc/durable-park/receiver.json` | aaprecv:aaprecv 0600 | provision.py | signing secret, registration id, idempotency key, instance id, the receiver's own copy of the instance token |
 | `/etc/durable-park/instance_token` | root:hermes 0640 | provision.py | `whc_` instance credential (plugin gate + gateway) |
-| `/opt/durable-park/` | root 0755 | configure_hermes.sh | receiver venv (`agentapprovalprotocol==0.3.3`, `uvicorn==0.54.0`, `starlette==1.9.0`) and a copy of `receiver/*.py` |
+| `/etc/durable-park/bridge_secret` | root:dpwake 0640 | Yaakov | the `durable-park-bridge` webhook endpoint's signing secret (bridge) |
+| `/etc/durable-park/tunnel.env` | root:root 0600 | Yaakov (`enter-secrets.sh`) | QuickBooks app keys, refresh token, realm id, withHuman tunnel token |
+| `/opt/durable-park/` | root 0755 | configure_hermes.sh | the receiver/bridge venv (`agentapprovalprotocol==0.3.3`, `uvicorn==0.54.0`, `starlette==1.9.0`); root-owned copies of `receiver/{app,wake_post,provision}.py`, `bridge/*.py` and `plugin/durable_park/*.py` (the bridge uses `ledger.py`); `libexec/hermes-secrets` |
 | `~hermes/.hermes/plugin-data/durable-park/ledger.db` | hermes | the plugin | the ledger (`plugins.entries.durable-park.settings.ledger_path`; the sweep and the bridge use the same path) |
+| `~hermes/.hermes/plugin-data/durable-park/bridge_deliveries.db` | hermes | the bridge | per-delivery answers, for withHuman's retries |
+| `~hermes/.hermes/plugin-data/durable-park/formcheck_status.json`, `formcheck_alert_state.json` | hermes | the gateway's form self-check / the sweep | form checker health and the alert state |
 | `~hermes/.hermes/scripts/durable_park_sweep.sh` | hermes 0750 | configure_hermes.sh | cron wrapper: `exec /usr/bin/python3 -I <repo>/scripts/durable_park_sweep.py --ledger <ledger> --wake-secret-file /etc/durable-park/wake_secret` |
 
 The webhook route's secret in `config.yaml` is the reference `${env:DURABLE_PARK_WAKE_SECRET}`. Hermes's
@@ -109,10 +113,11 @@ hermes cron list                                                   # durable-par
 
 The plugin reads `instance_token` lazily on each risky call, so no Hermes restart is needed.
 
-## Telegram alerts from the sweep
+## Alerts from the sweep
 
-The cron job delivers to Telegram's **home channel**. Hermes on this VM has no Telegram home channel
-yet, so alert lines would not be delivered. Fix: in the Telegram DM with the bot, send `/sethome`.
+The cron job delivers to Telegram's **home channel**, set to Yaakov's DM with `@TapDashAgentsBot` (`/sethome`
+in that DM changes it). Moving alerts to Microsoft Teams is planned: configure Hermes's Teams platform, then
+change the `durable-park-sweep` cron job's delivery target.
 
 ## Agent tool policy (v1 fix for the ledger bypass)
 
@@ -129,7 +134,7 @@ and after the gateway restart; a failed pre-restart check aborts without restart
   time: the built-in table (incl. `cron`), every gateway `Platform` (incl. `local`→`cli`,
   `msgraph_webhook`, `relay`, `sms`), every bundled platform plugin and its manifest alias (e.g. `teams`,
   `google_chat`, `irc`, `teams-platform`), every runtime-registered platform, `acp`, `tui`, `desktop`, and
-  any key already in the config (58 keys on the VM today);
+  any key already in the config (58 keys on the VM in October 2026);
 - `known_plugin_toolsets.<key>` = all plugin toolsets (so none switches itself on);
 - `agent.disabled_toolsets` = every other toolset (terminal, file, code_execution, delegation, cronjob,
   skills, browser*, computer_use, memory, session_search, kanban, vision, web, …). Hermes subtracts it last
@@ -146,7 +151,7 @@ the wake secret, the ledger or a freshly written file would be deliverable. `her
 the gateway registers any `mcp__wh__` tool outside `mcp__wh__quickbooks__*` (it then stops the gateway). The
 sweep is a no-agent cron script and is not affected.
 
-## v2: separate ledger owner
+## v2: separate ledger owner (design only, not built)
 
 The v1 tool policy is a configuration guard. A Hermes upgrade, a new plugin toolset or a hand edit could
 re-open the bypass. v2 makes it a privilege boundary instead:

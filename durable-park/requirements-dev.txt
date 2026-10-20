@@ -1,0 +1,6 @@
+# What the tests need (the same pins the VM uses). Install: pip install -r requirements-dev.txt
+agentapprovalprotocol==0.3.3
+starlette==1.9.0
+uvicorn==0.54.0
+httpx==0.28.1
+pytest==9.1.1

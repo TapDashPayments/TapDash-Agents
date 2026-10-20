@@ -1,0 +1,33 @@
+# Node (tools/diagrams)
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Runtime data (never commit ledgers or delivery records)
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets (they live in /etc/durable-park on the VM, entered by hand)
+*.env
+.env*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*secret*
+!**/*secret*.py
+!**/*secret*.sh
+!**/*secret*.md
+
+# Local working notes
+.superpowers/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

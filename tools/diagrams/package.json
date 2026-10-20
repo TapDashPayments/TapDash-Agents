@@ -1,0 +1,13 @@
+{
+  "name": "tapdash-agents-diagram-check",
+  "private": true,
+  "description": "Parses every Mermaid diagram in the docs so a broken diagram cannot land.",
+  "type": "module",
+  "scripts": {
+    "check": "node validate_mermaid.mjs"
+  },
+  "dependencies": {
+    "jsdom": "25.0.1",
+    "mermaid": "11.17.2"
+  }
+}

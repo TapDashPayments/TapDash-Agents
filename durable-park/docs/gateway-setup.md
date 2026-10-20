@@ -150,7 +150,7 @@ screen-shared or recorded.
    tailscale ssh ubuntu@proto-agents
    ```
 
-   (MagicDNS name `proto-agents.taila95862.ts.net`, Tailscale IP `100.99.171.75`.)
+   (MagicDNS name `proto-agents.taila95862.ts.net`.)
    Tailscale SSH is enabled on the VM (`tailscale set --ssh`). Your tailnet policy
    may open a browser to re-authenticate ("check" mode): follow it, then the
    session continues. `ubuntu` has passwordless sudo.
@@ -248,9 +248,13 @@ Decision, for a delivery with a valid signature:
 
 1. The body must be `type: request_approval_block.webhook`, not `preview: true`, and `agent.slug` must equal the
    expected agent (`proto-agents`); otherwise `human` (and the ledger is not touched).
-2. Hermes name = `mcp__wh__<request.server>__<request.tool>`. If an `executing` park has that tool name and the
-   exact same arguments (sha256 of canonical JSON, no stripping) and its gateway pass is unused, the bridge marks
-   the pass used and answers `{"outcome":"approve","reason":"Matches approved park P-XXXXXXXX"}`.
+2. The Hermes name is built the way Hermes registers MCP tools (`hermes_tool_name`):
+   `mcp__wh__<server>__<tool>` with every character outside `[A-Za-z0-9_]` turned into `_` (so `create-bill`
+   becomes `create_bill`), and names over 64 characters shortened with an 8-hex sha256 suffix. The arguments are
+   digested after `ledger.normalize_args` (top-level `withhuman_context` dropped, `withhuman_scope` defaulted to
+   `"default"`, whole-number floats such as `2.0` treated as `2`), exactly as at park time. If an `executing`
+   park has that name and digest and its gateway pass is unused, the bridge marks the pass used and answers
+   `{"outcome":"approve","reason":"Matches approved park P-XXXXXXXX"}`.
 3. Anything else, or any error: `{"outcome":"human","reason":"No approved park for this exact call"}`.
 4. withHuman retries a delivery (same `WithHuman-Idempotency-Key`); the bridge stores its answer per key together
    with the Hermes tool name, the arguments digest and the agent slug. A retry of an approved delivery gets
@@ -296,9 +300,13 @@ is **unverified** on the live tenant.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline), in this order**
 
-1. **Rule 1: parked calls ask Yaakov.** Add a rule/block with condition **MCP server** **starts with**
-   `park:`. Action: **Ask a human**, with an escalation path whose **Notify** step names Yaakov (create the path
-   under Escalation paths if none exists).
+1. **Rule 1: parked calls ask Yaakov.** Condition, exactly as live (revision 8): **All** of
+   (**Agent slug** *equals* `proto-agents`, **Any** of (**MCP server** *starts with* `park:`, **Tool name**
+   *starts with* `mcp__wh__`)). A park request's tool is the Hermes name (`mcp__wh__quickbooks__...`), so the
+   tool condition catches it even if the server condition does not match. Do **not** use the server condition
+   alone: if it does not match, park requests fall through to rule 3 and are auto-approved. Action: **Ask a
+   human**, with an escalation path whose **Notify** step names Yaakov (create the path under Escalation paths
+   if none exists).
 2. **Rule 2: risky QuickBooks calls go to the bridge.** Add a **Branch** block with one **All** group. Tool
    names are the gateway's own, without the `mcp__wh__<slug>__` prefix; use the anchored regex:
    - **MCP server** *equals* `quickbooks`, and
@@ -328,16 +336,10 @@ If the bridge is down, answers `401` or times out, the webhook block fails and t
    file does not match the endpoint secret (redo C2, restart).
 2. A real end-to-end check (a parked call, then `parked_action_execute`) happens in Task 8.
 
-### Known risks / unverified (Task 8 to settle)
+### Known risks / unverified
 
-- **Arguments match is exact.** The bridge digests `request.arguments` as delivered. The gateway adds
-  `withhuman_scope` (and may add `withhuman_context`) to tool arguments; if those reach the pipeline body but
-  were not in the arguments the model sent when it was parked, the digests differ and every call goes to a human.
-  The delivery log lists the argument key names and digest for this; fix by stripping those keys on both sides.
-- Whether pipeline requests created through AAP with `server: park:<slug>` show up under **MCP server** in the
-  same pipeline conditions as gateway slugs (research notes: a `:` is probably not valid in a gateway slug, but
-  AAP `server` is a free string). If rule 1 cannot match on `park:`, match the park requests another way (for
-  example by agent or tool name) and update this section.
+- Settled live: argument rewrites by the gateway (`withhuman_scope` added, `2.0` sent as `2`) are absorbed by
+  `ledger.normalize_args`; park requests are matched by rule 1 as written above (revision 8).
 - UI names (Webhook endpoints menu location, Branch vs Delegate block, "Entry pipeline") are from the docs, not
   seen on the live tenant. Whether the endpoint **test** accepts a `human` answer for a non-block delivery type.
 - Deploy: `deploy/configure_hermes.sh` installs the bridge (Python `/opt/durable-park/bin/python`, the

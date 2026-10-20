@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "about": "Which docs must be reviewed when code changes. A change to a file matching a rule's `code` must also change at least one of that rule's `docs` in the same push or pull request. Every tracked file must match a rule's `code` or an `exempt` pattern. Checked by tools/docs_check/check_docs.py. Skip once, with a reason, by adding the commit trailer `Docs-Not-Needed: <reason>`.",
+  "exempt": [
+    "**/*.md",
+    "**/tests/**",
+    "**/.gitignore",
+    "**/LICENSE*",
+    ".github/pull_request_template.md"
+  ],
+  "rules": [
+    {
+      "name": "Park hook and form check",
+      "code": [
+        "durable-park/plugin/durable_park/park_hook.py",
+        "durable-park/plugin/durable_park/formcheck.py"
+      ],
+      "docs": [
+        "durable-park/docs/architecture.md",
+        "durable-park/docs/form-check.md"
+      ]
+    },
+    {
+      "name": "Ledger (states, transitions, digest)",
+      "code": ["durable-park/plugin/durable_park/ledger.py"],
+      "docs": ["durable-park/docs/architecture.md"]
+    },
+    {
+      "name": "Plugin wiring, wake, executor, approval calls",
+      "code": [
+        "durable-park/plugin/durable_park/__init__.py",
+        "durable-park/plugin/durable_park/plugin.yaml",
+        "durable-park/plugin/durable_park/compat.py",
+        "durable-park/plugin/durable_park/gatecall.py",
+        "durable-park/plugin/durable_park/wake.py",
+        "durable-park/plugin/durable_park/executor.py"
+      ],
+      "docs": ["durable-park/docs/architecture.md"]
+    },
+    {
+      "name": "Vendored code",
+      "code": ["durable-park/plugin/durable_park/_vendor/**"],
+      "docs": ["durable-park/plugin/durable_park/_vendor/README.md"]
+    },
+    {
+      "name": "Gateway bridge",
+      "code": ["durable-park/bridge/**"],
+      "docs": [
+        "durable-park/docs/architecture.md",
+        "durable-park/docs/gateway-setup.md"
+      ]
+    },
+    {
+      "name": "Receiver and provisioning",
+      "code": ["durable-park/receiver/**"],
+      "docs": [
+        "durable-park/docs/architecture.md",
+        "durable-park/docs/receiver-setup.md"
+      ]
+    },
+    {
+      "name": "Sweep (cron)",
+      "code": ["durable-park/scripts/**"],
+      "docs": [
+        "durable-park/docs/architecture.md",
+        "durable-park/docs/runbook.md"
+      ]
+    },
+    {
+      "name": "Deploy scripts and service units",
+      "code": [
+        "durable-park/deploy/*.sh",
+        "durable-park/deploy/*.py",
+        "durable-park/deploy/*.service"
+      ],
+      "docs": [
+        "durable-park/docs/runbook.md",
+        "durable-park/docs/receiver-setup.md",
+        "durable-park/docs/gateway-setup.md"
+      ]
+    },
+    {
+      "name": "QuickBooks tunnel",
+      "code": ["durable-park/deploy/tunnel/**"],
+      "docs": ["durable-park/docs/gateway-setup.md"]
+    },
+    {
+      "name": "Python project and dependencies",
+      "code": [
+        "durable-park/pyproject.toml",
+        "durable-park/requirements-dev.txt"
+      ],
+      "docs": ["durable-park/README.md"]
+    },
+    {
+      "name": "Repo tooling (checks, hooks, CI)",
+      "code": [
+        ".github/docs-map.json",
+        ".github/workflows/**",
+        ".githooks/**",
+        "tools/**"
+      ],
+      "docs": ["CONTRIBUTING.md"]
+    }
+  ]
+}

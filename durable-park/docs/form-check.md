@@ -30,7 +30,7 @@ README) so it never depends on Hermes's Python environment.
 - The 5-minute sweep alerts **once** when that report is missing, older than 75 minutes, or failing on
   two sweeps in a row, and once when it recovers:
 
-      durable-park ALERT: the form checker is not working - <reason>. Risky actions will be refused until it is fixed.
+      durable-park ALERT: the form checker is not working — <reason>. Risky actions will be refused until it is fixed.
 
 - The alert goes wherever the `durable-park-sweep` cron job delivers (today: Telegram). To change it,
   change that job's delivery target (Hermes cron `--deliver`; Hermes has email and Teams platforms, which
