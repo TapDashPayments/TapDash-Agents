@@ -211,15 +211,21 @@ def selfcheck_loop(checker: FormChecker, names_fn: Callable[[], Iterable[str]], 
                    poll: float = 10.0, sleep: Callable[[float], None] = time.sleep,
                    clock: Callable[[], float] = time.monotonic, iterations: int | None = None) -> None:
     """Wait until risky tools are registered (MCP discovery is asynchronous), then check and write the
-    status every ``interval`` seconds. Never raises."""
+    status every ``interval`` seconds. A process that never sees a risky tool (a short-lived Hermes helper
+    without the gateway's MCP servers) writes nothing: it cannot speak for the gateway, and a missing or
+    stale report is itself alerted on by the sweep. Never raises."""
     deadline = clock() + wait_timeout
-    while clock() < deadline:
+    seen = False
+    while not seen and clock() < deadline:
         try:
-            if any(any(p.fullmatch(n) for p in risky) for n in names_fn()):
-                break
+            seen = any(any(p.fullmatch(n) for p in risky) for n in names_fn())
         except Exception:  # noqa: BLE001
-            pass
-        sleep(poll)
+            seen = False
+        if not seen:
+            sleep(poll)
+    if not seen:
+        log.info("durable-park form self-check: no risky tools in this process; not reporting")
+        return
     done = 0
     while iterations is None or done < iterations:
         try:

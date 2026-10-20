@@ -216,7 +216,7 @@ def test_selfcheck_loop_waits_for_tools_then_writes(tmp_path):
     assert data["ok"] is True and data["tools_checked"] == 1
 
 
-def test_selfcheck_loop_writes_failure_after_wait_timeout(tmp_path):
+def test_selfcheck_loop_never_reports_without_seeing_risky_tools(tmp_path):
     import re
     from durable_park.formcheck import selfcheck_loop
     path = tmp_path / "formcheck_status.json"
@@ -227,7 +227,18 @@ def test_selfcheck_loop_writes_failure_after_wait_timeout(tmp_path):
         return t["now"]
     selfcheck_loop(FormChecker(lambda tool: BILL_SCHEMA), lambda: [], [re.compile(RISKY[0])], str(path),
                    sleep=lambda s: None, clock=clock, wait_timeout=300, iterations=1)
-    assert json.loads(path.read_text())["ok"] is False
+    assert not path.exists()  # a helper process without the gateway's tools must not overwrite its report
+
+
+def test_selfcheck_loop_reports_tools_lost_after_they_were_seen(tmp_path):
+    import re
+    from durable_park.formcheck import selfcheck_loop
+    path = tmp_path / "formcheck_status.json"
+    lists = iter([["mcp__wh__quickbooks__create_bill"], [], []])
+    selfcheck_loop(FormChecker(lambda tool: BILL_SCHEMA), lambda: next(lists), [re.compile(RISKY[0])], str(path),
+                   sleep=lambda s: None, iterations=1)
+    status = json.loads(path.read_text())
+    assert status["ok"] is False and "no risky tools" in status["problems"][0]
 
 
 def test_selfcheck_loop_never_raises(tmp_path):
