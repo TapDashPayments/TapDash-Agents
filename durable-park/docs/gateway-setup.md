@@ -235,7 +235,7 @@ auto-approved, and an approved park is not asked about a second time.
 | Unit | `deploy/durable-park-bridge.service` (system unit, `User=hermes`, group `dpwake`, strict sandbox; see the comments at its top for deploy-time values) |
 | Public URL | `https://proto-agents.taila95862.ts.net/wh/bridge` (Tailscale Funnel path, set up at deploy) |
 | Secret | `/etc/durable-park/bridge_secret` (0640 root:dpwake), read once at startup |
-| Ledger | `--ledger PATH` or env `DURABLE_PARK_LEDGER` (set at deploy); retry records go to `bridge_deliveries.db` in the same directory |
+| Ledger | `--ledger PATH` or env `DURABLE_PARK_LEDGER`; deployed path `/home/hermes/.hermes/plugin-data/durable-park/ledger.db`. The bridge never creates it: a missing file means every delivery gets `human` (logged once as `bridge ledger ... does not exist`). Retry records go to `bridge_deliveries.db` in the same directory |
 | Other options | `--secret-file`, `--host 127.0.0.1`, `--port 8791`, `--expected-agent proto-agents` (env `DURABLE_PARK_BRIDGE_SECRET_FILE`, `DURABLE_PARK_EXPECTED_AGENT`) |
 
 Signature (confirmed against withHuman's open-source repo `internal/webhookdelivery`, and its webhook-endpoints
@@ -252,8 +252,10 @@ Decision, for a delivery with a valid signature:
    exact same arguments (sha256 of canonical JSON, no stripping) and its gateway pass is unused, the bridge marks
    the pass used and answers `{"outcome":"approve","reason":"Matches approved park P-XXXXXXXX"}`.
 3. Anything else, or any error: `{"outcome":"human","reason":"No approved park for this exact call"}`.
-4. withHuman retries a delivery (same `WithHuman-Idempotency-Key`); the bridge stores its answer per key, so a
-   retry of an approved delivery gets `approve` again, while a different delivery for the same call gets `human`.
+4. withHuman retries a delivery (same `WithHuman-Idempotency-Key`); the bridge stores its answer per key together
+   with the Hermes tool name, the arguments digest and the agent slug. A retry of an approved delivery gets
+   `approve` again only if all three still match (`why=replay`); a reused key with a different call gets `human`
+   (`why=replay-mismatch`), and a different delivery for the same call gets `human`.
 
 Logs (`journalctl -u durable-park-bridge`): one line per delivery with the delivery id, server, tool, the sorted
 argument **key names**, the arguments digest and the outcome, plus a short `why` tag. Argument values and the
@@ -297,16 +299,15 @@ is **unverified** on the live tenant.
 1. **Rule 1: parked calls ask Yaakov.** Add a rule/block with condition **MCP server** **starts with**
    `park:`. Action: **Ask a human**, with an escalation path whose **Notify** step names Yaakov (create the path
    under Escalation paths if none exists).
-2. **Rule 2: risky gateway calls go to the bridge.** Add a **Branch** block with this condition (an **Any**
-   group of two **All** groups). Tool names are the gateway's own, without the `mcp__wh__<slug>__` prefix; use
-   the anchored regexes:
-   - All of: **MCP server** *equals* `quickbooks`, and **Tool name** *matches regex*
+2. **Rule 2: risky QuickBooks calls go to the bridge.** Add a **Branch** block with one **All** group. Tool
+   names are the gateway's own, without the `mcp__wh__<slug>__` prefix; use the anchored regex:
+   - **MCP server** *equals* `quickbooks`, and
+   - **Tool name** *matches regex*
      `^(create|update|delete)[_-](payment|bill_payment|transfer|deposit|journal_entry|refund_receipt|sales_receipt|credit_memo|vendor_credit|purchase|invoice|bill)$`
-   - All of: **MCP server** *equals* `docusign`, and **Tool name** *matches regex*
-     `^(createEnvelope|updateEnvelope|triggerWorkflow|cancelWorkflowInstance|pauseNewWorkflowInstances|resumeWorkflow)$`
 
-   (Equivalent to "MCP server is one of `quickbooks`, `docusign` AND the tool matches the risky list" for the
-   matching service.) Inside the branch add a **Webhook** block:
+   (v1 is QuickBooks only. Later, if DocuSign is added, add a second **All** group inside an **Any**: server
+   `docusign` and tool regex `^(createEnvelope|updateEnvelope|triggerWorkflow|cancelWorkflowInstance|pauseNewWorkflowInstances|resumeWorkflow)$`.
+   Nothing about DocuSign is needed now.) Inside the branch add a **Webhook** block:
    - Name `durable-park-bridge`; endpoint `durable-park-bridge`.
    - Allowed outcomes: **Approve** and **Ask a human** only (untick Continue and Deny).
    - Attempt timeout `5s`; max attempts `2`.

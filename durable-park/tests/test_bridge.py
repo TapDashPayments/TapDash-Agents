@@ -3,12 +3,13 @@ import hmac
 import json
 import logging
 import sqlite3
+import threading
 
 import pytest
 from starlette.testclient import TestClient
 
-from bridge.app import (BLOCK_TYPE, DEFAULT_SECRET_FILE, NO_PARK_REASON, create_app, load_secret,
-                        parse_args, verify_signature)
+from bridge.app import (BLOCK_TYPE, DEFAULT_SECRET_FILE, NO_PARK_REASON, _DeliveryStore, create_app,
+                        load_secret, parse_args, verify_signature)
 from durable_park.ledger import Ledger, args_digest
 
 SECRET = "whsec_0123456789abcdefTESTSECRETvalue=="
@@ -308,7 +309,136 @@ def test_rejected_signature_logs_without_secret(client, caplog):
 def test_human_line_names_the_reason_tag(client, caplog):
     caplog.set_level(logging.INFO, logger="durable_park.bridge")
     deliver(client, payload(slug="other"))
-    assert "agent" in caplog.text and "human" in caplog.text
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "durable_park.bridge"]
+    assert "outcome=human" in line and "why=agent" in line
+
+
+def test_endpoint_test_delivery_without_request_logs_why_type(client, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    body = {"version": "2026-09-01", "type": "webhook_endpoint.test", "delivery_id": "t-1"}
+    human(deliver(client, body, key="kt"))
+    (line,) = [r.getMessage() for r in caplog.records if r.name == "durable_park.bridge"]
+    assert "outcome=human" in line and "why=type" in line
+
+
+@pytest.mark.parametrize("preview", ["false", 0, None, "true", 1, True, []])
+def test_only_explicit_false_preview_proceeds(client, ledger, preview):
+    row = executing_park(ledger)
+    body = payload()
+    body["preview"] = preview
+    human(deliver(client, body))
+    assert ledger.get(row.park_id).gateway_passed_at is None
+    approves(client, "k-ok")
+
+
+def test_absent_preview_proceeds(client, ledger):
+    executing_park(ledger)
+    body = payload()
+    del body["preview"]
+    body["idempotency_key"] = "k-absent"
+    assert deliver(client, body).json()["outcome"] == "approve"
+
+
+# ---- replay is bound to the call -------------------------------------------------------------
+
+def test_replay_with_changed_arguments_goes_to_human(client, ledger):
+    first = executing_park(ledger)
+    other_args = dict(ARGS, Amount=6)
+    other = executing_park(ledger, args=other_args, call="c2")  # a legitimate, unused park for the NEW args
+    approves(client, "k1")
+    human(deliver(client, payload(arguments=other_args, idempotency_key="k1")))
+    assert ledger.get(other.park_id).gateway_passed_at is None
+    assert ledger.get(first.park_id).gateway_passed_at is not None
+    # the genuine retry (same body) still replays the approve
+    assert deliver(client, payload(idempotency_key="k1")).json() == {
+        "outcome": "approve", "reason": f"Matches approved park {first.park_id}"}
+    # and the other park is approvable under its own key
+    approves(client, "k2", body_obj=payload(arguments=other_args, idempotency_key="k2"))
+
+
+def test_replay_with_different_tool_goes_to_human(client, ledger):
+    first = executing_park(ledger)
+    invoice = executing_park(ledger, tool="mcp__wh__quickbooks__create_invoice", call="c3")
+    approves(client, "k1")
+    human(deliver(client, payload(tool="create_invoice", idempotency_key="k1")))
+    assert ledger.get(invoice.park_id).gateway_passed_at is None
+    human(deliver(client, payload(server="docusign", idempotency_key="k1")))
+
+
+def test_replay_mismatch_is_logged(client, ledger, caplog):
+    executing_park(ledger)
+    approves(client, "k1")
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    deliver(client, payload(arguments={"Amount": 7}, idempotency_key="k1"))
+    assert "why=replay-mismatch" in caplog.text and "outcome=human" in caplog.text
+
+
+def test_store_binds_agent_slug_too(tmp_path):
+    store = _DeliveryStore(str(tmp_path / "d.db"))
+    calls = []
+
+    def decide():
+        calls.append(1)
+        return "approve", "P-1"
+
+    assert store.decide_once("k", "d1", "n", "dg", "agent-a", decide) == ("approve", "P-1", "new")
+    assert store.decide_once("k", "d2", "n", "dg", "agent-a", decide) == ("approve", "P-1", "replay")
+    for changed in (("n2", "dg", "agent-a"), ("n", "dg2", "agent-a"), ("n", "dg", "agent-b")):
+        assert store.decide_once("k", "d3", *changed, decide) == ("human", None, "replay-mismatch")
+    assert calls == [1]
+
+
+def test_old_deliveries_file_without_binding_columns_is_migrated(tmp_path):
+    path = tmp_path / "d.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE deliveries (idempotency_key TEXT PRIMARY KEY, delivery_id TEXT,"
+                " outcome TEXT NOT NULL, park_id TEXT, created_at TEXT NOT NULL)")
+    con.execute("INSERT INTO deliveries VALUES ('k','d','approve','P-1','t')")
+    con.commit()
+    con.close()
+    store = _DeliveryStore(str(path))
+    assert store.decide_once("k", "d2", "n", "dg", "a", lambda: ("approve", "P-2")) == ("human", None, "replay-mismatch")
+
+
+# ---- ledger path safety ----------------------------------------------------------------------
+
+def test_missing_ledger_file_is_never_created(tmp_path, caplog):
+    path = tmp_path / "ledger.db"  # directory exists, file does not
+    app = create_app(ledger_path=str(path), secret=SECRET, expected_agent="proto-agents", clock=lambda: NOW)
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    c = TestClient(app)
+    human(deliver(c, key="k1"))
+    human(deliver(c, key="k2"))
+    assert not path.exists()
+    assert not (tmp_path / "bridge_deliveries.db").exists()
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1 and "does not exist" in errors[0].getMessage()
+    assert "why=ledger-missing" in caplog.text
+    # once the ledger appears (created by the plugin), the bridge works without a restart
+    ledger = Ledger(str(path))
+    executing_park(ledger)
+    approves(c, "k3")
+
+
+# ---- concurrency -----------------------------------------------------------------------------
+
+def test_two_threads_same_park_different_keys_exactly_one_approve(tmp_path, ledger):
+    app = create_app(ledger_path=ledger.path, secret=SECRET, expected_agent="proto-agents", clock=lambda: NOW)
+    for n in range(6):
+        row = executing_park(ledger, args=dict(ARGS, Amount=100 + n), call=f"cc{n}")
+        barrier = threading.Barrier(2)
+        results = []
+
+        def worker(key):
+            c = TestClient(app)
+            barrier.wait()
+            results.append(deliver(c, payload(arguments=dict(ARGS, Amount=100 + n), idempotency_key=key)).json())
+
+        threads = [threading.Thread(target=worker, args=(f"race-{n}-{i}",)) for i in range(2)]
+        [t.start() for t in threads]
+        [t.join(30) for t in threads]
+        assert sorted(r["outcome"] for r in results) == ["approve", "human"], results
+        assert ledger.get(row.park_id).gateway_passed_at is not None
 
 
 # ---- config ----------------------------------------------------------------------------------

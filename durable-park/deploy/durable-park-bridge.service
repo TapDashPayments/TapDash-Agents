@@ -4,8 +4,10 @@
 #   sudo install -m 0644 deploy/durable-park-bridge.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now durable-park-bridge
 #
-# DEPLOY-TIME VALUES (R4): set DURABLE_PARK_LEDGER and ReadWritePaths to the real ledger location (the
-# directory that holds ledger.db; the bridge also keeps bridge_deliveries.db next to it).
+# LEDGER PATH: the deployed plugin's ledger is /home/hermes/.hermes/plugin-data/durable-park/ledger.db
+# (DURABLE_PARK_LEDGER below; ReadWritePaths is its directory, which also holds the -wal/-shm files and the
+# bridge's bridge_deliveries.db). The directory must exist before the unit starts, and the bridge refuses to
+# create a missing ledger file (it answers human and logs once), so a wrong path cannot create an empty one.
 # /opt/durable-park is assumed to hold a venv (venv/) with starlette + uvicorn and a copy/checkout of this
 # repo's bridge/ and plugin/ directories.
 [Unit]
@@ -22,7 +24,7 @@ SupplementaryGroups=dpwake
 WorkingDirectory=/opt/durable-park
 Environment=PYTHONPATH=/opt/durable-park/plugin:/opt/durable-park
 Environment=PYTHONUNBUFFERED=1
-Environment=DURABLE_PARK_LEDGER=/home/hermes/.hermes/durable-park/ledger.db
+Environment=DURABLE_PARK_LEDGER=/home/hermes/.hermes/plugin-data/durable-park/ledger.db
 ExecStart=/opt/durable-park/venv/bin/python -m bridge.app --host 127.0.0.1 --port 8791 --secret-file /etc/durable-park/bridge_secret --expected-agent proto-agents
 Restart=on-failure
 RestartSec=3
@@ -31,7 +33,7 @@ RestartSec=3
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/hermes/.hermes/durable-park
+ReadWritePaths=/home/hermes/.hermes/plugin-data/durable-park
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

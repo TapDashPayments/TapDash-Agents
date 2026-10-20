@@ -64,9 +64,13 @@ CREATE TABLE IF NOT EXISTS deliveries (
     delivery_id     TEXT,
     outcome         TEXT NOT NULL,
     park_id         TEXT,
-    created_at      TEXT NOT NULL
+    created_at      TEXT NOT NULL,
+    name            TEXT,
+    args_digest     TEXT,
+    agent_slug      TEXT
 );
 """
+_BOUND_COLUMNS = ("name", "args_digest", "agent_slug")
 
 
 def verify_signature(header: str | None, body: bytes, secret: str | None, now: float) -> bool:
@@ -135,30 +139,46 @@ class _DeliveryStore:
             con.execute("PRAGMA journal_mode=WAL")
             if not self._ready:
                 con.executescript(_SCHEMA)
+                have = {r[1] for r in con.execute("PRAGMA table_info(deliveries)")}
+                for column in _BOUND_COLUMNS:  # a file from before the replay binding: old rows then mismatch
+                    if column not in have:
+                        con.execute(f"ALTER TABLE deliveries ADD COLUMN {column} TEXT")
                 self._ready = True
             yield con
         finally:
             con.close()
 
-    def decide_once(self, key: str, delivery_id: str,
-                    decide: Callable[[], tuple[str, str | None]]) -> tuple[str, str | None, bool]:
-        """Return ``(outcome, park_id, replayed)``; ``decide`` runs only for the first delivery of ``key``."""
+    def decide_once(self, key: str, delivery_id: str, name: str, digest: str, slug: str,
+                    decide: Callable[[], tuple[str, str | None]]) -> tuple[str, str | None, str]:
+        """Return ``(outcome, park_id, how)``; ``decide`` runs only for the first delivery of ``key``.
+
+        ``how`` is ``new``, ``replay`` or ``replay-mismatch``. A stored answer is replayed only when this
+        request's Hermes tool name, arguments digest and agent slug equal the ones stored with the key;
+        otherwise the answer is ``human`` and nothing is approved or recorded.
+        """
         with self._lock, self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
-                row = con.execute("SELECT outcome, park_id FROM deliveries WHERE idempotency_key=?",
-                                  (key,)).fetchone()
+                row = con.execute("SELECT outcome, park_id, name, args_digest, agent_slug FROM deliveries"
+                                  " WHERE idempotency_key=?", (key,)).fetchone()
                 if row is not None:
                     con.execute("COMMIT")
-                    return row[0], row[1], True
+                    if (row[2], row[3], row[4]) != (name, digest, slug):
+                        return "human", None, "replay-mismatch"
+                    return row[0], row[1], "replay"
                 outcome, park_id = decide()
-                con.execute("INSERT INTO deliveries (idempotency_key, delivery_id, outcome, park_id, created_at)"
-                            " VALUES (?,?,?,?,?)", (key, delivery_id, outcome, park_id, _now_iso()))
+                con.execute("INSERT INTO deliveries (idempotency_key, delivery_id, outcome, park_id, created_at,"
+                            " name, args_digest, agent_slug) VALUES (?,?,?,?,?,?,?,?)",
+                            (key, delivery_id, outcome, park_id, _now_iso(), name, digest, slug))
                 con.execute("COMMIT")
-                return outcome, park_id, False
+                return outcome, park_id, "new"
             except BaseException:
                 con.execute("ROLLBACK")
                 raise
+
+
+class LedgerMissing(Exception):
+    """The configured ledger file does not exist (the bridge never creates it)."""
 
 
 class Bridge:
@@ -167,13 +187,21 @@ class Bridge:
         self.expected_agent = expected_agent
         self._ledger: Ledger | None = None
         self._ledger_lock = threading.Lock()
+        self._missing_logged = False
         self._deliveries = _DeliveryStore(
             deliveries_path or str(Path(ledger_path).expanduser().parent / DELIVERIES_FILENAME))
 
     def _get_ledger(self) -> Ledger:
         with self._ledger_lock:
             if self._ledger is None:
-                self._ledger = Ledger(str(Path(self.ledger_path).expanduser()))
+                path = Path(self.ledger_path).expanduser()
+                if not path.is_file():  # Ledger() would silently create an empty one at a wrong path
+                    if not self._missing_logged:
+                        self._missing_logged = True
+                        log.error("bridge ledger %s does not exist: answering human until it does", path)
+                    raise LedgerMissing(str(path))
+                self._missing_logged = False
+                self._ledger = Ledger(str(path))
             return self._ledger
 
     def _match(self, name: str, digest: str) -> tuple[str, str | None]:
@@ -191,7 +219,8 @@ class Bridge:
         try:
             outcome, park_id, why = self._decide(raw, header_key, info)
         except Exception as exc:  # noqa: BLE001 - any bug must fall back to a human, never an approval
-            outcome, park_id, why = "human", None, f"error:{type(exc).__name__}"
+            outcome, park_id, why = "human", None, (
+                "ledger-missing" if isinstance(exc, LedgerMissing) else f"error:{type(exc).__name__}")
         log.info("bridge delivery=%s server=%s tool=%s arg_keys=[%s] digest=%s outcome=%s why=%s",
                  info["delivery"], info["server"], info["tool"], info["keys"], info["digest"], outcome, why)
         if outcome == "approve":
@@ -205,20 +234,23 @@ class Bridge:
         info["delivery"] = _clean(payload.get("delivery_id") or info["delivery"])
         request = payload.get("request")
         agent = payload.get("agent")
-        if not isinstance(request, dict) or not isinstance(agent, dict):
-            return "human", None, "malformed"
-        server, tool, arguments = request.get("server"), request.get("tool"), request.get("arguments")
-        info["server"], info["tool"] = _clean(server), _clean(tool)
-        if not isinstance(arguments, dict):
-            return "human", None, "arguments-not-object"
-        digest = args_digest(arguments)
-        info["digest"] = digest
-        info["keys"] = ",".join(_clean(k, 40) for k in sorted(map(str, arguments))[:40])
+        server = tool = arguments = None
+        if isinstance(request, dict):  # best effort, for the log line only
+            server, tool, arguments = request.get("server"), request.get("tool"), request.get("arguments")
+            info["server"], info["tool"] = _clean(server), _clean(tool)
+            if isinstance(arguments, dict):
+                info["digest"] = args_digest(arguments)
+                info["keys"] = ",".join(_clean(k, 40) for k in sorted(map(str, arguments))[:40])
         if payload.get("type") != BLOCK_TYPE:
             return "human", None, "type"
-        if payload.get("preview") is True:
+        if payload.get("preview", False) is not False:  # only an explicit boolean false (or absent) proceeds
             return "human", None, "preview"
-        if agent.get("slug") != self.expected_agent:
+        if not isinstance(request, dict) or not isinstance(agent, dict):
+            return "human", None, "malformed"
+        if not isinstance(arguments, dict):
+            return "human", None, "arguments-not-object"
+        slug = agent.get("slug")
+        if not isinstance(slug, str) or slug != self.expected_agent:
             return "human", None, "agent"
         if not isinstance(server, str) or not server or not isinstance(tool, str) or not tool:
             return "human", None, "malformed"
@@ -228,11 +260,16 @@ class Bridge:
         if body_key is not None and body_key != header_key:
             return "human", None, "idempotency-mismatch"
         name = f"mcp__wh__{server}__{tool}"
-        outcome, park_id, replayed = self._deliveries.decide_once(
-            header_key, str(payload.get("delivery_id") or ""), lambda: self._match(name, digest))
+        digest = info["digest"]
+        self._get_ledger()  # raises LedgerMissing before anything is recorded
+        outcome, park_id, how = self._deliveries.decide_once(
+            header_key, str(payload.get("delivery_id") or ""), name, digest, slug,
+            lambda: self._match(name, digest))
+        if how == "replay-mismatch":
+            return "human", None, "replay-mismatch"
         if outcome == "approve":
-            return "approve", park_id, "replay" if replayed else f"park={park_id}"
-        return "human", None, "replay" if replayed else "no-park"
+            return "approve", park_id, "replay" if how == "replay" else f"park={park_id}"
+        return "human", None, "replay" if how == "replay" else "no-park"
 
 
 async def _read_body(request: Request) -> bytes | None:
