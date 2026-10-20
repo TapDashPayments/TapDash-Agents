@@ -1,0 +1,17 @@
+# withHuman tunnel config, mounted read-only at /etc/withhuman/tunnel.yaml.
+# The server key `quickbooks` is the name entered in withHuman when registering
+# the gateway server "Through a tunnel". ${VAR} values come from the tunnel's
+# environment (/etc/durable-park/tunnel.env via docker compose); the tunnel
+# refuses to start if one is unset. Each command server only sees its own env.
+servers:
+  quickbooks:
+    command: ["qbo-mcp-server"]
+    env:
+      QUICKBOOKS_CLIENT_ID: ${QUICKBOOKS_CLIENT_ID}
+      QUICKBOOKS_CLIENT_SECRET: ${QUICKBOOKS_CLIENT_SECRET}
+      QUICKBOOKS_REFRESH_TOKEN: ${QUICKBOOKS_REFRESH_TOKEN}
+      QUICKBOOKS_REALM_ID: ${QUICKBOOKS_REALM_ID}
+      QUICKBOOKS_ENVIRONMENT: sandbox
+      # Rotated refresh tokens are persisted here (named volume). Once this file
+      # exists its values override the env above (stale-token trap: see docs).
+      QUICKBOOKS_TOKEN_STORE_PATH: /data/qbo-token.env

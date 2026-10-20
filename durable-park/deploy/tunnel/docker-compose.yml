@@ -1,0 +1,35 @@
+# Run from this directory (as root / via sudo):
+#   docker compose build
+#   docker compose up -d wh-tunnel          # needs /etc/durable-park/tunnel.env (5 values)
+#   docker compose run --rm check           # list tools; does not connect to withHuman
+name: durable-park-tunnel
+
+services:
+  wh-tunnel:
+    container_name: wh-tunnel
+    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
+    volumes:
+      - ./tunnel.yaml:/etc/withhuman/tunnel.yaml:ro
+      - qbo-data:/data
+    security_opt:
+      - no-new-privileges:true
+
+  # `docker compose run --rm check` -> `withhuman-tunnel check`: starts every
+  # configured server once and lists its tools. Never connects to withHuman, so
+  # WITHHUMAN_TUNNEL_TOKEN is not needed (the QUICKBOOKS_* vars still are,
+  # because tunnel.yaml references them). No data volume: nothing is persisted.
+  check:
+    profiles: ["check"]
+    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5
+    command: ["check"]
+    env_file: ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
+    volumes:
+      - ./tunnel.yaml:/etc/withhuman/tunnel.yaml:ro
+
+volumes:
+  qbo-data:
+    name: durable-park-qbo-data
