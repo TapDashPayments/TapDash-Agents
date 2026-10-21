@@ -366,7 +366,7 @@ flowchart TD
   it meanwhile), the call is blocked and the spent approval is not used again.
 - **Deny** with status `error` (withHuman unreachable, credential refused, bad answer) counts as a breaker failure;
   if a request was already created it is cancelled, so it never waits for a person. Every other Deny (denied,
-  expired, cancelled, consumed) is an answer and resets the breaker. A reviewer's note is passed to the model in the
+  expired, cancelled, consumed) is an answer and resets the breaker. The note is passed to the model in the
   refusal, as one line of at most 300 characters.
 - **Any error** in the hook (token file unreadable, arguments that are not strict JSON, a ledger error) blocks the
   call with "could not open an approval request"; the row is cancelled when no request was attached to it, and a
@@ -384,7 +384,7 @@ form-checked tool's rules work, and writes `formcheck_status.json`. The sweep al
 | Situation | What happens | Who acts |
 |---|---|---|
 | Denied in withHuman | Row `denied`; the chat is told it did not run. | Nobody |
-| withHuman refuses at once (a pipeline deny rule) | Row `refused`; the call is blocked with "refused by withHuman policy" (and the reviewer's note, if any). | Nobody |
+| withHuman refuses at once (a pipeline deny rule) | Row `refused`; the call is blocked with "refused by withHuman policy" (and the rule's note, if any; the ledger note says "policy", never "a reviewer"). | Nobody |
 | withHuman cannot be reached | Row `refused`; the call is blocked with "withHuman could not be reached". After 3 errors in a row the breaker refuses at once for 30 s, then tries again; the sweep alerts once on open and once on close. | Check withHuman ([runbook](runbook.md#withhuman-could-not-be-reached)) |
 | Another `pre_tool_call` callback (a plugin's hook, a `config.yaml` shell hook or outbound webhook) or another plugin's `tool_request` / `tool_execution` middleware could change arguments after approval | Every tool call except the exempt ones is blocked. | An admin removes the hook or lists it in `observer_hooks` |
 | No chat session (e.g. a one-shot `hermes chat -q`) | Every tool call except the exempt ones is blocked. | Use a chat |

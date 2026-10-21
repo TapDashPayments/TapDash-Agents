@@ -260,7 +260,7 @@ The park hook answers a blocked call with one of these (the model sees them and 
 | Message starts with | Meaning | What to do |
 |---|---|---|
 | `PARKED P-...` | withHuman sent it to a person; nothing ran. | Decide it in the withHuman app |
-| `durable-park: "<tool>" was refused by withHuman policy` | A pipeline rule refused it at once (row `refused`, the reviewer's note after the colon if any). | Nothing, or change the pipeline rule |
+| `durable-park: "<tool>" was refused by withHuman policy` | A pipeline rule refused it at once (row `refused`; the rule's note after the colon if any; the ledger note reads `withHuman denied: refused by withHuman policy[: <note>]`, never "a reviewer", because withHuman exposes no decider and an instant answer cannot be a person's). | Nothing, or change the pipeline rule |
 | `durable-park: withHuman could not be reached` | withHuman did not answer (or the breaker is open); row `refused`, nothing ran. | See [withHuman could not be reached](#withhuman-could-not-be-reached); ask again later |
 | `durable-park: P-... is already waiting for approval in this chat` | Another call of this chat waits for a person or is running; this call's request was cancelled. | Decide the waiting one ([below](#a-chat-says-already-waiting-but-nothing-is-pending-in-withhuman)) |
 | `durable-park: P-... is already <status>; this call was not run again` | The model replayed a call id that was already decided (`allowed`, `refused`, `denied`, ...). | Nothing |
