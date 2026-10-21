@@ -23,8 +23,11 @@
 #   4c. agent tool policy (deploy/hermes_tool_policy.py, run in Hermes's own Python): every platform key an
 #      agent can run under gets only durable_park + clarify + MCP server wh (QuickBooks tools); every toolset
 #      with local file/command/code access is disabled; model-named file delivery is limited to the Hermes
-#      caches (closes the ledger bypass: the agent's tools run as hermes, which owns the ledger). Checked
+#      caches (closes the ledger bypass: the agent's tools run as hermes, which owns the ledger). Toolsets an
+#      admin lists in /etc/durable-park/allowed_toolsets (created empty here; Phase-2 ones refused) are opened too. Checked
 #      before AND after the gateway restart; a failed pre-restart check aborts without restarting anything.
+#      A hermes-gateway drop-in (50-durable-park-policy.conf) re-runs the check at every gateway start
+#      (deploy/tool_policy_check.sh); the plugin refuses every tool call when its report is missing/failed/stale.
 #   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (every 5m, --no-agent, telegram)
 #   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events and /wh/bridge -> 127.0.0.1:8791/wh/bridge
 #   7. restart: the hermes user manager when the gateway does not carry the dpwake group yet, else the
@@ -66,6 +69,7 @@ die() { printf 'configure_hermes: ERROR: %s\n' "$*" >&2; exit 1; }
 [[ -n "$HERMES_HOMEDIR" && -d "$HERMES_HOME" ]] || die "no Hermes home for user $HERMES_USER"
 [[ -x "$HERMES_BIN" ]] || die "hermes launcher not found at $HERMES_BIN"
 [[ -f "$REPO/plugin/durable_park/plugin.yaml" ]] || die "repo layout not found under $REPO"
+[[ "$REPO" != *[[:space:]]* ]] || die "the checkout path contains whitespace ($REPO); move it (the systemd ExecStartPre= line cannot hold it)"
 HERMES_UID=$(id -u "$HERMES_USER")
 RUNTIME_DIR="/run/user/$HERMES_UID"
 
@@ -227,11 +231,31 @@ log "Hermes config set (plugin settings, hook timeout, webhook route $ROUTE, sec
 as_hermes install -d -m 0750 "$(dirname "$LEDGER")"   # also the bridge unit's ReadWritePaths: must exist
 
 # --- 4c. agent tool policy ---------------------------------------------------------------------------------
-tool_policy apply || die "could not apply the agent tool policy"
+# The one list of toolsets opened beyond the v1 lockdown (read by apply and check). Created empty if missing,
+# never overwritten: an admin edits it as root (docs/runbook.md "Open a toolset").
+[[ -e "$ETC/allowed_toolsets" ]] || install -m 640 -o root -g hermes /dev/null "$ETC/allowed_toolsets"
+# Propagate the script's exit code: 2 = invalid allow file (nothing applied, nothing restarted), 1 = anything else.
+tool_policy apply || { rc=$?; printf 'configure_hermes: ERROR: %s\n' "could not apply the agent tool policy (exit $rc)" >&2; exit "$rc"; }
 # Check BEFORE any restart: a failed check stops here and the running gateway keeps its old process.
 policy_report=$(tool_policy check) \
     || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed (nothing restarted)"; }
 log "agent tool policy ok before restart"
+
+# Re-check the policy at every gateway start: a user-unit drop-in runs deploy/tool_policy_check.sh as
+# ExecStartPre=- (never blocks the start; the plugin fails closed when the report it writes is missing, failed
+# or older than 15 minutes). The %h/durable-park path in the repo copy is rewritten to this checkout.
+DROPIN_DIR="$HERMES_HOMEDIR/.config/systemd/user/hermes-gateway.service.d"
+DROPIN="$DROPIN_DIR/50-durable-park-policy.conf"
+dropin_tmp=$(mktemp)
+trap 'rm -f "$dropin_tmp"' EXIT
+sed "s|%h/durable-park/deploy/|$REPO/deploy/|" "$REPO/deploy/hermes-gateway-policy.conf" >"$dropin_tmp"
+if ! as_hermes cmp -s - "$DROPIN" <"$dropin_tmp"; then
+    as_hermes install -d -m 0755 "$DROPIN_DIR"
+    as_hermes tee "$DROPIN" <"$dropin_tmp" >/dev/null
+    as_hermes chmod 0644 "$DROPIN"
+    log "installed $DROPIN"
+fi
+user_systemctl daemon-reload
 
 # --- 4b. gateway bridge ------------------------------------------------------------------------------------
 CHANGED=0

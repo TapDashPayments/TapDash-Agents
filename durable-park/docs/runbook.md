@@ -172,6 +172,46 @@ tool calls are still asked about as usual. Read `formcheck_status.json` and the 
 
 A second line `durable-park: the form checker is working again.` follows when it recovers.
 
+### Tool policy check failed
+
+`durable-park ALERT: the tool policy check failed at gateway start — <problems>. Every tool call is refused until it passes.`
+
+Applies while the v1 tool lockdown is applied (it is on proto-agents). Before every `hermes-gateway` start, the user-unit drop-in
+`~hermes/.config/systemd/user/hermes-gateway.service.d/50-durable-park-policy.conf` runs
+`deploy/tool_policy_check.sh` (`ExecStartPre=-`, so a failure never stops the gateway). It runs `hermes_tool_policy.py
+check --status-file` and writes `plugin-data/durable-park/tool_policy_status.json` next to the ledger
+(`ok`, `checked_at`, `problems`, `allowed`). The plugin reads it at load: a missing report, `ok: false`, or a report
+older than 15 minutes makes it refuse every tool call except `parked_action_execute` and `clarify` (the log says
+`durable-park tool policy check failed (<reason>)`); wakes are dropped and `parked_action_execute` answers
+"refused" without touching the row, so an approved park stays approved. Telegram, Teams and the sweep keep running.
+The sweep alerts once when the report is missing or failed, and once (`durable-park: the tool policy check passes
+again.`) when it passes.
+
+The plugin also writes its own verdict at load, `tool_policy_load.json` next to the ledger (`ok`, `problem`,
+`checked_at`), because the sweep cannot judge a report's age. The sweep alerts once when `ok` is false:
+
+`durable-park ALERT: the tool policy check did not pass when the plugin loaded — <problem>. Every tool call is refused until an admin fixes it and restarts the gateway.`
+
+and once (`durable-park: the tool policy check passed when the plugin loaded.`) when a later load passes. Fix the
+`<problem>` with the table below, then restart the gateway.
+
+| Problem | Likely cause | Fix |
+|---|---|---|
+| `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
+| `hermes python not found` | Not exactly one `~/.hermes/installs/*/facts.json`, or its Python is missing | Check that directory; the same lookup is `hermes_python()` in `deploy/configure_hermes.sh` |
+| `the tool policy check did not write a report` | The check was killed (the 60 s timeout), crashed, or could not write its report; the wrapper then wrote this failing report itself | `journalctl --user -u hermes-gateway` for `tool_policy_check:` lines; run `deploy/hermes_tool_policy.py check --status-file /tmp/x.json` by hand as `hermes` in Hermes's Python and read the error |
+| `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
+| a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
+| `stale` | The gateway started without the drop-in (the report is older than 15 minutes), **or** Hermes re-ran the plugin's `register` more than 15 minutes after the start (`discover_plugins(force=True)`, for example a plugin reload), so the old report aged out: every call is refused although the report says ok | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). This case is only visible through the `tool_policy_load.json` alert above |
+
+Before go-live, time the check once on the VM (`time bash deploy/tool_policy_check.sh` as `hermes`): it must
+finish well under 60 s, because `ExecStartPre` counts toward `TimeoutStartSec`.
+
+Fix it, then `systemctl --user restart hermes-gateway` (only when nothing is waiting or running): the check runs
+again at the start. If the report directory is not writable the script cannot replace an old report: it logs
+`durable-park: tool policy report could not be refreshed (directory not writable?)` (journal) and the plugin's
+15-minute staleness check refuses calls once the old report ages out. `systemctl --user show hermes-gateway -p ExecStartPre` shows the drop-in is active.
+
 ### withHuman could not be reached
 
 `durable-park ALERT: withHuman could not be reached (since <time>); every tool call is being refused until it answers again.`
@@ -255,6 +295,7 @@ plugins:
         exempt_tools: [parked_action_execute, clarify]   # keep parked_action_execute
         form_checked_tools: ['mcp__wh__quickbooks__(create|update|delete)[_-](payment|bill)']  # optional
         observer_hooks: []                                # module.qualname of reviewed hooks
+        # tool_policy_status: /path/to/tool_policy_status.json   # default: next to the ledger; leave unset
 ```
 
 - `exempt_tools`, `form_checked_tools` and `observer_hooks` must be lists of strings. A wrong type (a number,
@@ -330,6 +371,46 @@ that has to agree:
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
 
 The form check needs nothing: it reads each tool's rules from Hermes automatically.
+
+## Open a toolset
+
+The v1 tool lockdown is applied on proto-agents. The
+allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolsets`
+([format](receiver-setup.md#agent-tool-policy-v1-lockdown-re-applied-on-proto-agents)).
+
+1. Check no ledger row is `parked`, `approved` or `executing` (a gateway restart would strand it), with the
+   ledger query from the [health check](#health-check) ("Waiting or stuck rows"); it must print nothing:
+
+   ```sh
+   python3 - <<'PY'
+   import sqlite3
+   c = sqlite3.connect("file:/home/hermes/.hermes/plugin-data/durable-park/ledger.db?mode=ro", uri=True)
+   for r in c.execute("select park_id, tool, status, created_at from parks "
+                      "where status in ('parked','approved','executing') order by created_at"):
+       print(r)
+   PY
+   ```
+2. As admin, add the toolset's name on its own line (for example `web`), save.
+   `terminal`, `file`, `code_execution`, `delegation`, `cronjob`, `skills` and `computer_use` are refused until
+   Clean Setup Phase 2; a typo is refused too (exit 2, message on stderr, nothing changed).
+   Not Phase-2-gated but still risky: `desktop_ui`, `catalog`, `browser-cdp`, `a2a`, `connections`; open them
+   through the file only after their pipeline rule exists ([spec section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
+   An allow file the `hermes` user cannot read (for example a pre-existing one with mode 600 root:root) makes
+   `apply` exit 2 and `configure_hermes.sh` exit 2 too (nothing applied, nothing restarted; `hermes_mcp.sh` stops
+   as well), and at gateway start the report says `invalid allow file: <reason>`; fix it with
+   `chgrp hermes` and `chmod 640` on the file (or, if it is empty, re-create it with
+   `install -m 640 -o root -g hermes /dev/null /etc/durable-park/allowed_toolsets`).
+3. Re-run `sudo bash deploy/hermes_mcp.sh`: it re-applies the `wh` server settings, runs `hermes_tool_policy.py
+   apply`, then `check` (before the restart; a failure stops it with nothing restarted), restarts `hermes-gateway`
+   and checks again. It needs the provisioned instance token. Without it, run `apply` then `check` by hand as the
+   `hermes` user in Hermes's own Python (`<hermes env python> -I deploy/hermes_tool_policy.py apply`, then
+   `... check`; the Python is the `venv.environment` path in `~/.hermes/installs/*/facts.json`). `check` must end with
+   `tool policy: ok`.
+4. Restart `hermes-gateway`: its start runs `check` itself (the drop-in, see [Tool policy check
+   failed](#tool-policy-check-failed)) and the plugin refuses every call if it fails. Run `check` once more by hand
+   (`--status-file PATH` to leave the result as JSON; any path except the live report, `tool_policy_status.json`).
+
+To close it again, remove the line and repeat from step 3.
 
 ## Rotate secrets before production
 

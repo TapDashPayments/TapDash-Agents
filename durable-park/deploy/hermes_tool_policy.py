@@ -13,8 +13,15 @@ and the gateway delivers model-named files (``MEDIA:`` paths) only from the Herm
 
 Run inside Hermes's own Python environment, as the hermes user (deploy/configure_hermes.sh does that):
 
-    <hermes env python> -I deploy/hermes_tool_policy.py apply    # write the policy with Hermes's config writer
-    <hermes env python> -I deploy/hermes_tool_policy.py check    # print each platform's tools; exit 1 on a leak
+    <hermes env python> -I deploy/hermes_tool_policy.py apply [--allow-file PATH]
+    <hermes env python> -I deploy/hermes_tool_policy.py check [--allow-file PATH] [--status-file PATH]
+
+Opening a toolset: the root-owned file ``ALLOW_FILE`` (/etc/durable-park/allowed_toolsets) lists extra
+toolsets, one per line (``#`` comments), that are taken out of ``agent.disabled_toolsets`` and added to every
+platform list. Empty or missing = the v1 lockdown above, unchanged. Toolsets with local file/command/code
+access (``PHASE2_TOOLSETS``) are refused until Clean Setup Phase 2. Exit codes: 0 ok, 1 check failed,
+2 usage error or invalid allow file (message on stderr, nothing applied). ``check --status-file`` writes
+``{"ok", "checked_at", "problems", "allowed"}`` atomically, also when the check fails or crashes.
 
 Policy, three layers (Hermes v0.22.2, ~/.hermes/hermes-agent):
 1. ``platform_toolsets.<platform> = [durable_park, clarify, wh]`` for EVERY platform key an agent can run
@@ -42,13 +49,17 @@ The model can only call names in its tool list (agent/turn_tool_round.py:107-127
 
 from __future__ import annotations
 
+import argparse
+import datetime
 import io
 import json
 import os
 import sys
+import tempfile
 from contextlib import redirect_stdout
 
 HERMES_AGENT = os.path.expanduser("~hermes/.hermes/hermes-agent")
+ALLOW_FILE = "/etc/durable-park/allowed_toolsets"
 
 ALLOWED_TOOLSETS = ["durable_park", "clarify"]
 MCP_SERVER = "wh"
@@ -77,6 +88,35 @@ FORBIDDEN_TOOLSETS = [
     "session_search", "skills", "terminal", "todo", "tts", "video", "video_gen", "vision", "web", "x_search",
     "yuanbao",
 ]
+# Toolsets with local file / command / code / process access, agent spawning or scheduling: the ledger-bypass
+# set. Refused in the allow file until Clean Setup Phase 2. All seven are real Hermes v0.22.2 toolset names
+# (toolsets.py:96,102,103,117,122,155,156).
+PHASE2_TOOLSETS = frozenset({"terminal", "file", "code_execution", "delegation", "cronjob", "skills",
+                             "computer_use"})
+
+
+def read_allowed(path: str) -> list[str]:
+    """The toolsets opened in the allow file: one per line, ``#`` comments and blank lines ignored, order kept,
+    duplicates dropped. A missing file is an empty list. A name that is not a known forbidden toolset, or a
+    Phase-2-only one, raises ValueError (nothing is applied from a bad file)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"cannot read {path}: {exc}") from exc
+    allowed: list[str] = []
+    for line in lines:
+        name = line.split("#", 1)[0].strip()
+        if not name or name in allowed:
+            continue
+        if name in PHASE2_TOOLSETS:
+            raise ValueError(f"{name} stays off until Clean Setup Phase 2")
+        if name not in FORBIDDEN_TOOLSETS:
+            raise ValueError(f"unknown toolset: {name}")
+        allowed.append(name)
+    return allowed
 
 
 def _bootstrap() -> None:
@@ -139,13 +179,15 @@ def _wh_configured() -> bool:
     return isinstance((load_config().get("mcp_servers") or {}).get(MCP_SERVER), dict)
 
 
-def desired_settings() -> dict:
+def desired_settings(allowed: list[str] | None = None) -> dict:
+    allowed = list(allowed or [])
     plugin_toolsets = _plugin_toolsets()
     mcp = MCP_SERVER if _wh_configured() else "no_mcp"
-    settings: dict = {"agent.disabled_toolsets": FORBIDDEN_TOOLSETS, "tools.tool_search.enabled": "off",
+    disabled = [t for t in FORBIDDEN_TOOLSETS if t not in allowed]
+    settings: dict = {"agent.disabled_toolsets": disabled, "tools.tool_search.enabled": "off",
                       "gateway.strict": True, "gateway.trust_recent_files": False}
     for platform in _platforms():
-        settings[f"platform_toolsets.{platform}"] = [*ALLOWED_TOOLSETS, mcp]
+        settings[f"platform_toolsets.{platform}"] = [*ALLOWED_TOOLSETS, *allowed, mcp]
         settings[f"known_plugin_toolsets.{platform}"] = plugin_toolsets
     return settings
 
@@ -159,7 +201,7 @@ def _get(config: dict, dotted: str):
     return node
 
 
-def apply() -> int:
+def apply(allowed: list[str] | None = None) -> int:
     """Write every setting that differs, through Hermes's own ``hermes config set`` implementation."""
     from hermes_cli.config import (get_config_path, require_readable_config_before_write, set_config_value,
                                    unset_config_value)
@@ -171,7 +213,7 @@ def apply() -> int:
         with redirect_stdout(io.StringIO()):
             unset_config_value("tool_search")
         changed += 1
-    for key, value in desired_settings().items():
+    for key, value in desired_settings(allowed).items():
         if _get(raw, key) == value:
             continue
         with redirect_stdout(io.StringIO()):
@@ -218,8 +260,20 @@ def effective_tools(platform: str, enabled: list[str] | None | str = "config") -
     return sorted(d["function"]["name"] for d in defs if d["function"]["name"] not in drops)
 
 
-def is_allowed(name: str) -> bool:
-    return name in ALLOWED_TOOL_NAMES or name.startswith(ALLOWED_TOOL_PREFIXES)
+def allowed_tool_names(allowed: list[str]) -> set[str]:
+    """The tool names Hermes defines for the opened toolsets."""
+    import model_tools
+
+    # HERMES_KANBAN_TASK (which makes Hermes add kanban tools, model_tools.py:322-324) is never set for the gateway:
+    # only a kanban worker has it, so the definitions below are exactly the toolsets' own tools.
+    # An empty list selects nothing (model_tools.py:316-321: only ``None`` means every toolset).
+
+    defs = model_tools.get_tool_definitions(enabled_toolsets=list(allowed), quiet_mode=True)
+    return {d["function"]["name"] for d in defs}
+
+
+def is_allowed(name: str, extra: set[str] | frozenset[str] = frozenset()) -> bool:
+    return name in ALLOWED_TOOL_NAMES or name in extra or name.startswith(ALLOWED_TOOL_PREFIXES)
 
 
 def media_check() -> list[str]:
@@ -249,45 +303,118 @@ def config_ledger_path(config: dict) -> str | None:
     return (entry.get("settings") or {}).get("ledger_path")
 
 
-def check() -> int:
+def check(allowed: list[str] | None = None, problems: list[str] | None = None) -> int:
+    """Print each platform's tools; return 1 on a leak. Every problem is also appended to *problems*."""
+    allowed = list(allowed or [])
+    problems = problems if problems is not None else []
     _plugin_toolsets()  # discovery registers plugin tools, as at agent start
-    bad = 0
+    extra = allowed_tool_names(allowed)
     for platform in _platforms():
         names = effective_tools(platform)
-        leaks = [n for n in names if not is_allowed(n)]
+        leaks = [n for n in names if not is_allowed(n, extra)]
         missing = [] if REQUIRED_TOOL in names else [REQUIRED_TOOL]
-        bad += len(leaks) + len(missing)
+        problems += [f"{platform}: LEAK {n}" for n in leaks] + [f"{platform}: MISSING {n}" for n in missing]
         print(f"{platform}: {', '.join(names) or '(none)'}" + (f"  LEAK: {', '.join(leaks)}" if leaks else "")
               + (f"  MISSING: {REQUIRED_TOOL}" if missing else ""))
     for posture, enabled in POSTURES.items():
         for platform in ("cli", "tui", "desktop", "acp", "telegram"):
-            leaks = [n for n in effective_tools(platform, enabled) if not is_allowed(n)]
-            bad += len(leaks)
+            leaks = [n for n in effective_tools(platform, enabled) if not is_allowed(n, extra)]
+            problems += [f"{posture}@{platform}: LEAK {n}" for n in leaks]
             if leaks:
                 print(f"{posture}@{platform}: LEAK: {', '.join(leaks)}")
     print(f"postures ({', '.join(POSTURES)}) on cli/tui/desktop/acp/telegram: "
-          + ("ok" if not bad else "see LEAK lines"))
+          + ("ok" if not problems else "see LEAK lines"))
     media = media_check()
     for problem in media:
         print(f"media: {problem}")
-    bad += len(media)
+    problems += [f"media: {p}" for p in media]
     if not media:
         print("media: ok (strict, no recency trust; wake_secret, ledger and a fresh file are not deliverable)")
-    if bad:
-        print(f"tool policy: FAILED, {bad} problem(s): forbidden tool reachable, {REQUIRED_TOOL} missing "
+    if problems:
+        print(f"tool policy: FAILED, {len(problems)} problem(s): forbidden tool reachable, {REQUIRED_TOOL} missing "
               "or media delivery open", file=sys.stderr)
         return 1
+    opened = f" plus the opened toolsets ({', '.join(allowed)})" if allowed else ""
     print(f"tool policy: ok on {len(_platforms())} platform keys (only durable_park, clarify and "
-          "mcp__wh__quickbooks__* tools)")
+          f"mcp__wh__quickbooks__* tools{opened})")
     return 0
 
 
+def write_status(path: str, ok: bool, problems: list[str], allowed: list[str]) -> None:
+    """Write the check result as JSON, atomically (temp file in the same directory, then rename)."""
+    status = {"ok": ok, "checked_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "problems": problems, "allowed": allowed}
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".status-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(status, handle)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="hermes_tool_policy.py")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("apply", "check"):
+        p = sub.add_parser(name)
+        p.add_argument("--allow-file", default=ALLOW_FILE, metavar="PATH")
+        if name == "check":
+            p.add_argument("--status-file", default=None, metavar="PATH")
+    return parser
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 1 or argv[0] not in ("apply", "check"):
-        print("usage: hermes_tool_policy.py apply|check", file=sys.stderr)
+    try:
+        args = _parser().parse_args(argv)
+    except SystemExit as exc:  # argparse: usage error -> 2 (--help -> 0)
+        return int(exc.code or 0)
+    try:
+        allowed = read_allowed(args.allow_file)
+    except ValueError as exc:
+        print(f"hermes_tool_policy.py: invalid allow file {args.allow_file}: {exc}", file=sys.stderr)
+        status_file = getattr(args, "status_file", None)
+        if status_file:  # the alert must name the real reason, not "did not write a report"
+            try:
+                write_status(status_file, False, [f"invalid allow file: {exc}"], [])
+            except OSError as werr:
+                print(f"hermes_tool_policy.py: cannot write status file {status_file}: {werr}", file=sys.stderr)
         return 2
-    _bootstrap()
-    return apply() if argv[0] == "apply" else check()
+    status_file = getattr(args, "status_file", None)
+    problems: list[str] = []
+    if status_file:  # replace any earlier pass first: a crash or a failed final write must not leave a stale ok
+        try:
+            write_status(status_file, False, ["check did not finish"], allowed)
+        except OSError as exc:  # cannot record a failure: report one, run nothing
+            print(f"hermes_tool_policy.py: cannot write status file {status_file}: {exc}", file=sys.stderr)
+            return 1
+    try:
+        _bootstrap()
+        if args.command == "apply":
+            return apply(allowed)
+        rc = check(allowed, problems)
+    except Exception as exc:  # noqa: BLE001 - a crashed check must still leave a failing status file
+        if not status_file:
+            raise
+        problems.append(f"check crashed: {type(exc).__name__}: {exc}")
+        print(problems[-1], file=sys.stderr)
+        rc = 1
+    except BaseException:  # SystemExit / KeyboardInterrupt: the pre-written failure stays; refresh its reason
+        if status_file:
+            write_status(status_file, False, ["check interrupted"], allowed)
+        raise
+    if status_file:
+        write_status(status_file, rc == 0, problems, allowed)
+    return rc
 
 
 if __name__ == "__main__":

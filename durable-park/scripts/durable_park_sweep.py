@@ -46,6 +46,10 @@ FORMCHECK_STALE = timedelta(minutes=75)  # the gateway re-checks every 30 minute
 FORMCHECK_BAD_RUNS = 2  # one bad sweep may be a restart in progress
 BREAKER_STATUS = "breaker_status.json"
 BREAKER_STATE = "breaker_alert_state.json"
+POLICY_STATUS = "tool_policy_status.json"
+POLICY_STATE = "tool_policy_alert_state.json"
+POLICY_LOAD = "tool_policy_load.json"  # the plugin's own verdict at load (it judges the report's age)
+POLICY_LOAD_STATE = "tool_policy_load_alert_state.json"
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -249,6 +253,65 @@ def _breaker_alert(ledger_path: str, now: datetime) -> None:
         _save_state(state_path, announced)
 
 
+def _policy_problem(status_path: str) -> str | None:
+    """What is wrong with the report deploy/tool_policy_check.sh wrote at the last gateway start, or ``None``
+    when it passed. Age is not judged here: the report is written only at gateway start, so an old passing
+    report on a long-running gateway is normal (the plugin judges freshness at load)."""
+    try:
+        with open(status_path, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except FileNotFoundError:
+        return "no tool policy report"
+    except (OSError, ValueError):
+        return "the tool policy report is unreadable"
+    if not isinstance(report, dict):
+        return "the tool policy report is unreadable"
+    if report.get("ok") is True:
+        return None
+    problems = report.get("problems")
+    if isinstance(problems, list) and problems:
+        return "; ".join(_clean(p, 200) for p in problems[:3])
+    return "the tool policy check failed"
+
+
+def _policy_alert(ledger_path: str, now: datetime) -> None:
+    """Alert once when the tool policy check fails at gateway start, and once when it passes again (``now`` is
+    unused: the report carries its own time)."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    problem = _policy_problem(os.path.join(directory, POLICY_STATUS))
+    state_path = os.path.join(directory, POLICY_STATE)
+    alerted = _load_state(state_path).get("alerted") is True
+    if problem is not None and not alerted:
+        print(f"durable-park ALERT: the tool policy check failed at gateway start \u2014 {_clean(problem)}. "
+              "Every tool call is refused until it passes.", flush=True)
+        alerted = True
+    elif problem is None and alerted:
+        print("durable-park: the tool policy check passes again.", flush=True)
+        alerted = False
+    _save_state(state_path, {"alerted": alerted})
+    _policy_load_alert(directory)
+
+
+def _policy_load_alert(directory: str) -> None:
+    """Alert once when the plugin reports at load that the tool policy check did not pass (it also catches a
+    stale report, which the check above cannot see), and once when a later load passes. A missing or unreadable
+    verdict file is silent (an older plugin, or one that has not loaded yet)."""
+    verdict = _load_state(os.path.join(directory, POLICY_LOAD))  # missing or unreadable -> {}
+    ok = verdict.get("ok")
+    state_path = os.path.join(directory, POLICY_LOAD_STATE)
+    alerted = _load_state(state_path).get("alerted") is True
+    if ok is False and not alerted:
+        problem = verdict.get("problem")
+        reason = _clean(problem, 200) if isinstance(problem, str) and problem else "the tool policy check failed"
+        print("durable-park ALERT: the tool policy check did not pass when the plugin loaded \u2014 "
+              f"{reason}. Every tool call is refused until an admin fixes it and restarts the gateway.", flush=True)
+        alerted = True
+    elif ok is True and alerted:
+        print("durable-park: the tool policy check passed when the plugin loaded.", flush=True)
+        alerted = False
+    _save_state(state_path, {"alerted": alerted})
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -274,6 +337,10 @@ def main(argv=None) -> int:
         _breaker_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the breaker alert must never stop the sweep
         _err(f"breaker alert failed ({type(exc).__name__})")
+    try:
+        _policy_alert(args.ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - the policy alert must never stop the sweep
+        _err(f"tool policy alert failed ({type(exc).__name__})")
     status = 0
     targets = _wake_targets(ledger)
     if targets:

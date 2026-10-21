@@ -6,7 +6,11 @@ import httpx
 import pytest
 from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
-from durable_park import foreign_pre_tool_call_hooks, register
+import json
+from datetime import datetime, timedelta, timezone
+
+import durable_park
+from durable_park import POLICY_MESSAGE, foreign_pre_tool_call_hooks, policy_problem, register
 from durable_park.executor import EXECUTE_SCHEMA
 from durable_park.gatecall import GateHolder, build_call, bounded_http, make_gate
 from durable_park.ledger import Ledger, call_key
@@ -15,6 +19,16 @@ from agentapprovalprotocol import Gate
 from durable_park.breaker import Breaker
 from durable_park.formcheck import FormChecker
 from durable_park.park_hook import DEFAULT_FORM_CHECKED_TOOLS, make_pre_tool_call
+
+REAL_POLICY_PROBLEM = policy_problem
+
+
+@pytest.fixture(autouse=True)
+def _policy_passes(monkeypatch):
+    """The register tests are about everything else: a passing tool policy report is assumed (the tests of the
+    report itself put the real ``policy_problem`` back)."""
+    monkeypatch.setattr(durable_park, "policy_problem", lambda path, now, max_age=None: None)
+
 
 SESSION_KEY = "agent:main:telegram:dm:42"
 COULD_NOT_OPEN = "durable-park: could not open an approval request; the call was not run"
@@ -363,13 +377,13 @@ def test_register_fails_closed_when_ledger_cannot_open(tmp_path):
     assert ctx.tools == {}  # without a ledger there is nothing to execute
 
 
-def test_register_fails_closed_with_the_configured_exempt_tools(tmp_path):
+def test_register_fails_closed_with_the_default_exempt_tools_only(tmp_path):
     ctx = FakeCtx(tmp_path, {"ledger_path": str(tmp_path), "exempt_tools": ["web_search"]})
     register(ctx)
     hook = ctx.hooks["pre_tool_call"]
-    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") is None
-    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") == {
-        "action": "block", "message": COULD_NOT_OPEN}
+    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": COULD_NOT_OPEN}  # a configured extra is not exempt when failing closed
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") is None
 
 
 def test_foreign_hook_detected_through_manager(tmp_path, with_session, fake_withhuman):
@@ -1114,3 +1128,146 @@ def test_missing_executor_in_exempt_tools_still_warns(tmp_path, caplog):
     with caplog.at_level("WARNING", logger="durable_park"):
         register(FakeCtx(tmp_path / "data", {"exempt_tools": ["clarify"]}))
     assert any(r.levelname == "WARNING" and "parked_action_execute" in r.getMessage() for r in caplog.records)
+
+
+def write_policy_report(path, *, ok=True, age_minutes=0, problems=()):
+    at = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
+    path.write_text(json.dumps({"ok": ok, "checked_at": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "problems": list(problems), "allowed": []}))
+
+
+def test_policy_problem(tmp_path):
+    path = tmp_path / "status.json"
+    now = datetime.now(timezone.utc)
+    assert policy_problem(str(path), now) == "no tool policy report"  # missing
+    path.write_text("{not json")
+    assert policy_problem(str(path), now) == "no tool policy report"
+    path.write_text("[1]")
+    assert policy_problem(str(path), now) == "no tool policy report"
+    write_policy_report(path, ok=False, problems=["terminal is open", "wh missing"])
+    assert policy_problem(str(path), now) == "terminal is open; wh missing"
+    write_policy_report(path, ok=True, age_minutes=16)
+    assert policy_problem(str(path), now) == "stale"
+    write_policy_report(path, ok=True, age_minutes=14)
+    assert policy_problem(str(path), now) is None
+    write_policy_report(path, ok=True, age_minutes=-30)  # a clock far in the future is not "fresh"
+    assert policy_problem(str(path), now) == "stale"
+    path.write_text(json.dumps({"ok": True, "checked_at": "garbage"}))
+    assert policy_problem(str(path), now) == "stale"
+    path.write_text(json.dumps({"ok": "yes", "checked_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}))
+    assert policy_problem(str(path), now) is not None  # only a real true passes
+
+
+def test_policy_message_text():
+    assert POLICY_MESSAGE == ("durable-park: the tool policy check did not pass at gateway start; tool calls are "
+                              "refused until an admin fixes it.")
+
+
+@pytest.mark.parametrize("report", [None, "failed", "stale"])
+def test_register_fails_closed_on_policy_problem(tmp_path, monkeypatch, report):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    if report == "failed":
+        write_policy_report(data / "tool_policy_status.json", ok=False, problems=["x"])
+    elif report == "stale":
+        write_policy_report(data / "tool_policy_status.json", age_minutes=20)
+    ctx = FakeCtx(data)  # default location: next to the ledger
+    register(ctx)
+    hook = ctx.hooks["pre_tool_call"]
+    for tool in ("web_search", "mcp__wh__quickbooks__search_customers"):
+        assert hook(tool_name=tool, args={}, session_id="s", tool_call_id="c") == {
+            "action": "block", "message": POLICY_MESSAGE}
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") is None
+    assert hook(tool_name="parked_action_execute", args={}, session_id="s", tool_call_id="c") is None
+    assert "pre_gateway_dispatch" in ctx.hooks  # wakes are dropped, never reach the agent
+    assert set(ctx.tools) == {"parked_action_execute"}
+    reply = json.loads(ctx.tools["parked_action_execute"].handler({"park_id": "P-1"}))
+    assert reply["status"] == "refused" and reply["message"] == POLICY_MESSAGE
+    assert not (data / "ledger.db").exists()  # nothing opened, nothing consumed
+
+
+def _normal_hook_reached(ctx, fake_withhuman):
+    result = ctx.hooks["pre_tool_call"](tool_name="web_search", args={"q": 1}, session_id="s", tool_call_id="c")
+    assert result["message"].startswith("PARKED P-")  # the normal hook asked withHuman and parked the call
+    assert len(fake_withhuman.provider.requests) == 1
+
+
+def test_register_passes_with_a_fresh_passing_report(tmp_path, monkeypatch, with_session, fake_withhuman):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    report = tmp_path / "elsewhere.json"
+    write_policy_report(report)
+    ctx = FakeCtx(tmp_path / "data", {"tool_policy_status": str(report), "token_file": fake_withhuman.token})
+    register(ctx)
+    _normal_hook_reached(ctx, fake_withhuman)
+    assert "tool_policy_status" in ctx.asked
+
+
+def test_register_uses_the_default_status_path(tmp_path, monkeypatch, with_session, fake_withhuman):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    write_policy_report(data / "tool_policy_status.json")  # next to the ledger, no setting given
+    ctx = FakeCtx(data, {"token_file": fake_withhuman.token})
+    register(ctx)
+    _normal_hook_reached(ctx, fake_withhuman)
+
+
+def test_register_bad_policy_setting_does_not_fail_open(tmp_path):
+    ctx = FakeCtx(tmp_path / "data", {"tool_policy_status": 5})
+    register(ctx)
+    assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s",
+                                      tool_call_id="c") is not None
+
+
+def test_policy_failure_hook_ignores_the_configured_exempt_tools(tmp_path, monkeypatch):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    write_policy_report(data / "tool_policy_status.json", ok=False, problems=["x"])
+    ctx = FakeCtx(data, {"exempt_tools": ["parked_action_execute", "clarify", "web_search"]})
+    register(ctx)
+    hook = ctx.hooks["pre_tool_call"]
+    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": POLICY_MESSAGE}  # the message says every call is refused: it must be true
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") is None
+
+
+def _load_verdict(directory):
+    return json.loads((directory / "tool_policy_load.json").read_text())
+
+
+@pytest.mark.parametrize("report,problem", [(None, "no tool policy report"), ("failed", "x"), ("stale", "stale")])
+def test_register_writes_its_load_verdict_when_the_policy_fails(tmp_path, monkeypatch, report, problem):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    if report == "failed":
+        write_policy_report(data / "tool_policy_status.json", ok=False, problems=["x"])
+    elif report == "stale":
+        write_policy_report(data / "tool_policy_status.json", age_minutes=20)
+    register(FakeCtx(data))
+    verdict = _load_verdict(data)
+    assert verdict["ok"] is False and verdict["problem"] == problem
+    assert verdict["checked_at"].endswith("Z") and len(verdict["checked_at"]) == 20
+    assert [p.name for p in data.iterdir() if p.name.startswith(".")] == []  # no temp file left
+
+
+def test_register_writes_an_ok_load_verdict_when_the_policy_passes(tmp_path, monkeypatch, with_session, fake_withhuman):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    write_policy_report(data / "tool_policy_status.json")
+    register(FakeCtx(data, {"token_file": fake_withhuman.token}))
+    verdict = _load_verdict(data)
+    assert verdict["ok"] is True and verdict["problem"] is None
+
+
+def test_the_load_verdict_write_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(durable_park, "policy_problem", lambda path, now, max_age=None: "stale")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "tool_policy_load.json").mkdir()  # cannot be replaced by a file
+    ctx = FakeCtx(data)
+    register(ctx)  # must not raise, and must still fail closed
+    assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c")["action"] == "block"

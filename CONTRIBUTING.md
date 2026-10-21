@@ -52,6 +52,9 @@ See the rules: `python3 tools/docs_check/check_docs.py --explain`.
 **Adding a file?** Add it to a rule in `docs-map.json` (or to `exempt` if it is a test or a doc). CI fails until
 you do. Example: `durable-park/plugin/durable_park/breaker.py` (the withHuman circuit breaker) is mapped to
 `architecture.md` in the "Plugin wiring, wake, executor, approval calls" rule.
+The gateway-start tool policy check (`durable-park/deploy/tool_policy_check.sh` and its systemd drop-in
+`durable-park/deploy/hermes-gateway-policy.conf`) is mapped to `runbook.md` in the "Deploy scripts and service units"
+rule: change either, update the runbook's "Tool policy check failed" and "Open a toolset" sections.
 The withHuman entry pipeline kept as a reviewed file (`durable-park/deploy/withhuman/entry-pipeline.json`) is mapped to
 `architecture.md`: change the file, change the pipeline table there in the same commit.
 

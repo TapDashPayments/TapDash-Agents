@@ -21,6 +21,11 @@ def stamp(minutes_ago):
     return at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def write_policy(tmp_path, *, ok, problems=()):
+    (tmp_path / "tool_policy_status.json").write_text(json.dumps(
+        {"ok": ok, "checked_at": "2026-10-21T10:00:00Z", "problems": list(problems), "allowed": []}))
+
+
 class World:
     def __init__(self, tmp_path):
         self.ledger = Ledger(str(tmp_path / "ledger.db"))
@@ -28,6 +33,7 @@ class World:
         (tmp_path / "formcheck_status.json").write_text(
             '{"ok": true, "tools_checked": 1, "problems": [], "checked_at": "%s"}'
             % datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        write_policy(tmp_path, ok=True)  # a passing tool policy report from the last gateway start
         self.secret_file = tmp_path / "wake_secret"
         self.secret_file.write_text("s3cr3t\n")
         self.posted = []
@@ -445,3 +451,70 @@ def test_breaker_broken_status_or_state_does_not_stop_the_sweep(world, monkeypat
     (tmp_path / "breaker_status.json").write_text("{not json")
     (tmp_path / "breaker_alert_state.json").write_text("[1")
     assert runs(world, monkeypatch, capsys, 1) == [""]
+
+
+POLICY_ALERT = ("durable-park ALERT: the tool policy check failed at gateway start \u2014 {problems}. "
+                "Every tool call is refused until it passes.")
+POLICY_OK = "durable-park: the tool policy check passes again."
+
+
+def test_policy_alert_once_and_recovery(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # healthy: silent
+    write_policy(tmp_path, ok=False, problems=["terminal is open", "wh missing"])
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == POLICY_ALERT.format(problems="terminal is open; wh missing") and second == ""
+    write_policy(tmp_path, ok=True)
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.strip() == POLICY_OK and fourth == ""
+
+
+def test_policy_alert_when_the_report_is_missing_or_unreadable(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "tool_policy_status.json").unlink()
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == POLICY_ALERT.format(problems="no tool policy report") and second == ""
+    write_policy(tmp_path, ok=True)
+    runs(world, monkeypatch, capsys, 1)
+    (tmp_path / "tool_policy_status.json").write_text("{not json")
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.strip() == POLICY_ALERT.format(problems="the tool policy report is unreadable")
+
+
+def test_policy_old_passing_report_is_not_an_alert(world, monkeypatch, capsys, tmp_path):
+    # written only at gateway start: an old pass on a long-running gateway is normal
+    assert runs(world, monkeypatch, capsys, 2) == ["", ""]
+
+
+def test_policy_broken_state_file_does_not_stop_the_sweep(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "tool_policy_alert_state.json").write_text("[1")
+    world.row("approved")
+    assert world.main(monkeypatch) == 0
+    assert len(world.posted) == 1
+
+
+LOAD_ALERT = ("durable-park ALERT: the tool policy check did not pass when the plugin loaded \u2014 {problem}. "
+              "Every tool call is refused until an admin fixes it and restarts the gateway.")
+LOAD_OK = "durable-park: the tool policy check passed when the plugin loaded."
+
+
+def write_load(tmp_path, *, ok, problem=None):
+    (tmp_path / "tool_policy_load.json").write_text(json.dumps(
+        {"ok": ok, "problem": problem, "checked_at": "2026-10-21T10:00:00Z"}))
+
+
+def test_load_verdict_alert_once_and_recovery(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # no verdict file (old plugin / not loaded yet): silent
+    write_load(tmp_path, ok=True)
+    assert runs(world, monkeypatch, capsys, 1) == [""]
+    write_load(tmp_path, ok=False, problem="stale")  # the report itself still says ok: the blind spot
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == LOAD_ALERT.format(problem="stale") and second == ""
+    write_load(tmp_path, ok=True)
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.strip() == LOAD_OK and fourth == ""
+
+
+def test_load_verdict_unreadable_is_silent_and_keeps_the_sweep_going(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "tool_policy_load.json").write_text("{not json")
+    world.row("approved")
+    assert world.main(monkeypatch) == 0
+    assert capsys.readouterr().out == "" and len(world.posted) == 1

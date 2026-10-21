@@ -152,8 +152,21 @@ and after the gateway restart; a failed pre-restart check aborts without restart
   just by naming it (`MEDIA:/path`) - no tool needed. Non-strict, the ledger was deliverable. Now only the
   Hermes media caches are.
 
-`check` fails (and the deploy with it) if any tool other than `parked_action_execute`, `clarify` and
-`mcp__wh__quickbooks__*` is reachable on any key or posture, if `parked_action_execute` is missing, or if
+**One stored list of opened toolsets.** `/etc/durable-park/allowed_toolsets` (root-owned, `0640 root:hermes`;
+`configure_hermes.sh` creates it empty if missing and never overwrites it) names the toolsets opened beyond
+the lockdown, one per line, `#` comments allowed. `apply` and `check` both read it (`--allow-file PATH`
+overrides the path): each listed toolset leaves `agent.disabled_toolsets` and joins every platform list, and
+`check` then accepts exactly the tools Hermes defines for those toolsets, plus the three above. An empty or
+missing file gives the lockdown exactly as described here. A name that is not a Hermes toolset, or one of
+`terminal`, `file`, `code_execution`, `delegation`, `cronjob`, `skills`, `computer_use` (these stay off until
+Clean Setup Phase 2), makes the script print the reason on stderr and exit 2 without writing anything.
+`check --status-file PATH` also writes `{"ok", "checked_at", "problems", "allowed"}` as JSON (atomically,
+also when the check fails or crashes) for the gateway-start check. Exit codes: 0 ok, 1 check failed, 2 usage
+error or invalid allow file. How to open one: [runbook](runbook.md#open-a-toolset).
+
+`check` fails (and the deploy with it) if any tool other than `parked_action_execute`, `clarify`,
+`mcp__wh__quickbooks__*` and the tools of the opened toolsets is reachable on any key or posture, if
+`parked_action_execute` is missing, or if
 the wake secret, the ledger or a freshly written file would be deliverable. `hermes_mcp.sh` also fails if
 the gateway registers any `mcp__wh__` tool outside `mcp__wh__quickbooks__*` (it then stops the gateway). The
 sweep is a no-agent cron script and is not affected.

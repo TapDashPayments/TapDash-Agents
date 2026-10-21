@@ -72,7 +72,8 @@
       "code": [
         "durable-park/deploy/*.sh",
         "durable-park/deploy/*.py",
-        "durable-park/deploy/*.service"
+        "durable-park/deploy/*.service",
+        "durable-park/deploy/*.conf"
       ],
       "docs": [
         "durable-park/docs/runbook.md",
