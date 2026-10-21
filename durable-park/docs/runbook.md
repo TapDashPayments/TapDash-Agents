@@ -16,7 +16,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 
 | What | How |
 |---|---|
-| VM | `proto-agents` (OVH VPS, Ubuntu 26.04, Hermes v0.22.2). Admins: `tailscale ssh ubuntu@proto-agents` (passwordless sudo). |
+| VM | `proto-agents` (OVH VPS, Ubuntu 26.04, Hermes v0.22.3). Admins: `tailscale ssh ubuntu@proto-agents` (passwordless sudo). |
 | AI agents (e.g. Claude) | Current route: the Proto-Agents connector (see the last row), which runs as `hermes` with passwordless sudo. Older route (jump host, production; not for this VM): through the Hermes Server connector, piping scripts into `/tmp/dp-tools/vm` (runs as `hermes`) or `/tmp/dp-tools/vmroot` (root) on the jump host. |
 | Repo on the VM | `/home/hermes/tapdash-agents` (a clone of this repo). `/home/hermes/durable-park` links to its `durable-park/` folder. |
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
@@ -55,6 +55,25 @@ Rules:
 - QuickBooks is a **sandbox** company. Never connect real books before the [rotation](#rotate-secrets-before-production)
   and the open v2 items are done.
 
+### Agent persona (SOUL.md)
+
+`~/.hermes/SOUL.md` on the VM carries a capability paragraph (reworded 2026-10-21). It deliberately **lists no
+specific tools**: the allowed tools can change at any time (the owner's point), so a list in the persona would go
+stale. Instead it tells the agent to:
+
+- use only the tools in its current tool list, and check that list each time;
+- never call a tool that is not in it (for example a shell or terminal it was not given);
+- use tool search, if it has it, before saying it cannot do something;
+- say plainly when it lacks a tool;
+- treat a "terminal UI" chat as only the chat screen, not a terminal;
+- call `parked_action_execute` only with a park ID taken from a `[durable-park]` message in this chat, and never
+  invent one.
+
+Why: the dashboard chat's Hermes system prompt says "You are in the Hermes terminal UI (TUI)", which a small model
+read as having a terminal (2026-10-21). Because the paragraph names no tools, opening or closing a toolset (the
+[all-tools plan](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)) does not require editing it; the agent
+follows whatever tool list it is given. Check that the wording is still there after any change to `SOUL.md`.
+
 ## Dashboard over HTTPS
 
 The dashboard itself speaks plain HTTP on the Tailscale IP only (`hermes dashboard --host 100.99.171.75 --port 9119`).
@@ -71,6 +90,12 @@ front of it on the machine's Tailscale name, port 8443 (set up 2026-10-21):
   `tailscale serve status --json` lists `AllowFunnel` for port 443 only.
 - Undo: `tailscale serve --https=8443 off`, delete the drop-in, then `systemctl --user daemon-reload && systemctl --user restart hermes-dashboard`.
   The saved Serve config from before the change is in `/home/hermes/serve-backup/`.
+- `RestartPreventExitStatus=78` (Hermes v0.22.3 asks for it) is a line in the **main** unit file
+  `~/.config/systemd/user/hermes-dashboard.service`, which is hand-written; it is not in a drop-in. Keep it there:
+  Hermes's update check (`hermes_cli/update_cmd_fleet.py`, `_repair_unit_without_fatal_exit_park`) reads only the main
+  unit file, so a drop-in would still be reported as missing. Its hint, "Repair: `hermes gateway install`", only
+  regenerates the **gateway** unit, so do not run it for the dashboard; edit the dashboard unit by hand, then
+  `systemctl --user daemon-reload && systemctl --user restart hermes-dashboard`.
 - Restarting `hermes-dashboard` does not touch the gateway, so the "no `parked`, `approved` or `executing` row" rule does not apply to it.
 
 ## Health check
@@ -267,7 +292,8 @@ previous proof first (`ExecStartPre`), so a proof from an earlier process can ne
 Symptom: `systemctl --user status hermes-gateway` shows `failed` or `start-limit-hit`, and the journal has
 `durable-park ALERT: the plugin did not load in this gateway (pid N); stopping the gateway so no tool call runs unchecked`.
 The drop-in's `ExecStartPost=` (`deploy/plugin_load_check.sh`, no `-`) fails the unit when no `plugin_load.json` for
-the gateway's pid appears within `DURABLE_PARK_LOAD_TIMEOUT` seconds (default 30; Hermes's own load deadline is 10 s and
+the gateway's pid appears within `DURABLE_PARK_LOAD_TIMEOUT` seconds of real time (default 30, always waited in full: the
+deadline is a wall-clock one; Hermes's own load deadline is 10 s and
 the live gateway loads the plugin in about 2 s, well inside systemd's default 90 s start timeout).
 
 1. Find the reason in the journal: `journalctl --user -u hermes-gateway -n 200 --no-pager | grep -i -E "durable|plugin"`.

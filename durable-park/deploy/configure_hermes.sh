@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # On proto-agents this script re-applies the current tool policy (v1 lockdown, re-applied 2026-10-21 03:16 UTC). It restarts the gateway: run it only when no ledger row is parked, approved or executing. See docs/specs/2026-10-21-all-tools-withhuman-design.md.
-# durable-park deploy for the proto VM (Hermes Agent v0.22.2). Idempotent: safe to re-run.
+# durable-park deploy for the proto VM (Hermes Agent v0.22.3). Idempotent: safe to re-run.
 #
 #   sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh
 #

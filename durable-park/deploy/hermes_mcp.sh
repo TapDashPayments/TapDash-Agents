@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Connect Hermes (proto VM, v0.22.2) to the withHuman MCP gateway as MCP server `wh`. Idempotent.
+# Connect Hermes (proto VM, v0.22.3) to the withHuman MCP gateway as MCP server `wh`. Idempotent.
 #
 #   sudo bash /home/hermes/durable-park/deploy/hermes_mcp.sh      (or run it as the hermes user)
 #
