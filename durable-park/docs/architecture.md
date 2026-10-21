@@ -223,7 +223,7 @@ when it is loaded again.
 The foreign-hook guard reads Hermes's hook registry (`ctx._manager.iter_hook_callbacks("pre_tool_call")`,
 Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) and its middleware registry
 (`ctx._manager._middleware["tool_request"]` and `["tool_execution"]`, `hermes_cli/plugins.py:1183`; no public
-accessor exists) on every call; durable-park's own callbacks are recognised by object identity. The dependency is listed in `compat.py`, so a Hermes upgrade warns to re-verify it.
+accessor exists) on every call; durable-park's own callbacks are recognised by object identity. The dependency is listed in `compat.py`, so a Hermes upgrade warns to re-verify it: one WARNING in the gateway process's log (`hermes gateway run`), and only an INFO in any other process that loads the plugin (the 5-minute cron sweep, CLI runs), so the sweep does not put a line in `errors.log` every few minutes.
 
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
 configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 UTC; rev 8 is the rollback for the old code only, and rev 10 was a temporary test deny, now deactivated). Every rule for agent

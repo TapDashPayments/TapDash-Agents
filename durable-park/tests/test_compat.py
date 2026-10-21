@@ -15,8 +15,22 @@ HOOK_NAMES = ("pre_tool_call", "pre_gateway_dispatch", "ctx.inject_message", "ct
               "_middleware")
 
 
+GATEWAY_ARGV = ["hermes", "gateway", "run"]
+SIDE_PROCESS_ARGV = ["hermes", "cron", "tick"]
+
+
+@pytest.fixture(autouse=True)
+def _gateway_process(monkeypatch):
+    """Hermes loads the plugin in every process; the version warning is the gateway's, so default to it."""
+    monkeypatch.setattr(sys, "argv", GATEWAY_ARGV)
+
+
 def _warnings(caplog):
     return [r for r in caplog.records if r.levelno == logging.WARNING and r.name == "durable_park"]
+
+
+def _infos(caplog):
+    return [r for r in caplog.records if r.levelno == logging.INFO and r.name == "durable_park"]
 
 
 @pytest.mark.parametrize("version", ["0.22.2", "v0.22.2"])
@@ -93,3 +107,36 @@ def test_register_on_the_supported_version_does_not_warn(tmp_path, monkeypatch, 
     with caplog.at_level(logging.DEBUG, logger="durable_park"):
         register(FakeCtx(tmp_path / "data"))
     assert [r for r in _warnings(caplog) if "0.22.2" in r.getMessage()] == []
+
+
+def test_other_version_in_the_gateway_logs_a_warning(caplog):
+    with caplog.at_level(logging.DEBUG, logger="durable_park"):
+        assert compat.check_hermes_version(logging.getLogger("durable_park"), get_version=lambda: "0.22.3") is False
+    (record,) = _warnings(caplog)
+    assert "v0.22.3" in record.getMessage() and "re-verify" in record.getMessage()
+    assert _infos(caplog) == []
+
+
+@pytest.mark.parametrize("argv", [SIDE_PROCESS_ARGV, ["hermes"], []])
+def test_other_version_in_a_side_process_logs_info_and_no_warning(caplog, monkeypatch, argv):
+    """The 5-minute no-agent cron sweep loads the plugin too; its warning landed in errors.log every ~6 minutes."""
+    monkeypatch.setattr(sys, "argv", argv)
+    with caplog.at_level(logging.DEBUG, logger="durable_park"):
+        assert compat.check_hermes_version(logging.getLogger("durable_park"), get_version=lambda: "0.22.3") is False
+    assert _warnings(caplog) == []
+    (record,) = _infos(caplog)
+    message = record.getMessage()
+    assert "v0.22.3" in message and "re-verify" in message
+    for name in HOOK_NAMES:
+        assert name in message
+
+
+def test_register_in_a_side_process_logs_the_version_notice_at_info_only(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(sys, "argv", SIDE_PROCESS_ARGV)
+    monkeypatch.setattr(compat, "hermes_version", lambda: "0.22.3")
+    ctx = FakeCtx(tmp_path / "data")
+    with caplog.at_level(logging.DEBUG, logger="durable_park"):
+        register(ctx)
+    assert set(ctx.hooks) == {"pre_tool_call", "pre_gateway_dispatch"}
+    assert [r for r in _warnings(caplog) if "0.22.2" in r.getMessage()] == []
+    assert len([r for r in _infos(caplog) if "0.22.2" in r.getMessage()]) == 1
