@@ -20,12 +20,14 @@ from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor
 from .gatecall import GateHolder
 from .ledger import Ledger
 from .park_hook import DEFAULT_EXEMPT_TOOLS, DEFAULT_FORM_CHECKED_TOOLS, fail_closed_hook, make_pre_tool_call
-from .wake import drop_wake_hook, handle_wake, make_async_client_factory
+from .wake import drop_wake_hook, handle_wake, make_async_client_factory, make_audit_client_factory
 
 log = logging.getLogger("durable_park")
 
 DEFAULT_AAP_BASE_URL = "https://app.withhuman.ai/api/aap"
 DEFAULT_TOKEN_FILE = "/etc/durable-park/instance_token"
+DEFAULT_AUDIT_KEY_FILE = "/etc/durable-park/audit_key"  # optional: org key with audit.read only
+DEFAULT_AUDIT_BASE_URL = "https://app.withhuman.ai"
 EXECUTOR_TOOL = EXECUTE_SCHEMA["name"]
 HOOK_REGISTRY_UNAVAILABLE = "<hook registry unavailable>"
 POLICY_STATUS_FILENAME = "tool_policy_status.json"
@@ -271,12 +273,20 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
     state_dir = Path(ledger_path).expanduser().parent
     # Register the wake hook first so a later registration failure can never leave wakes reaching the agent.
     wake_client_factory = make_async_client_factory(base_url, token_file)
+    # Optional: names who decided. The key file is read per lookup; none = no name, nothing else changes.
+    audit_key_file = ctx.get_config("audit_key_file", DEFAULT_AUDIT_KEY_FILE)
+    audit_base_url = ctx.get_config("audit_base_url", DEFAULT_AUDIT_BASE_URL)
+    if isinstance(audit_key_file, str) and audit_key_file and isinstance(audit_base_url, str) and audit_base_url:
+        audit_client_factory = make_audit_client_factory(audit_base_url, str(Path(audit_key_file).expanduser()))
+    else:
+        log.warning("durable-park: audit_key_file and audit_base_url must be non-empty strings; deciders not named")
+        audit_client_factory = None
 
     async def durable_park_wake(event=None, **_kw):
         # Hermes awaits async hooks on the gateway loop and passes event=, gateway=, session_store=.
         # ctx.inject_message is sync and only schedules the turn on that loop (plugins_injection.py).
         return await handle_wake(event, ledger=ledger, async_client_factory=wake_client_factory,
-                                 inject=ctx.inject_message)
+                                 inject=ctx.inject_message, audit_client_factory=audit_client_factory)
 
     register_hook("pre_gateway_dispatch", durable_park_wake)
 

@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS parks (
     executing_at     TEXT,
     notified_at      TEXT,
     gateway_passed_at TEXT,
+    decided_by       TEXT,
     UNIQUE (session_id, tool_call_id)
 );
 CREATE INDEX IF NOT EXISTS parks_session ON parks (session_key, status);
@@ -80,6 +81,7 @@ class ParkRow:
     executing_at: str | None
     notified_at: str | None
     gateway_passed_at: str | None
+    decided_by: str | None = None  # who decided in withHuman ("Name (channel)"), when the audit log said
 
 
 _COLUMNS = tuple(f.name for f in fields(ParkRow))
@@ -148,6 +150,24 @@ class Ledger:
         self.path = path
         with self._connect() as con:
             con.executescript(_SCHEMA)
+            self._add_decided_by(con)
+
+    @staticmethod
+    def _column_names(con: sqlite3.Connection) -> list[str]:
+        return [r[1] for r in con.execute("PRAGMA table_info(parks)")]
+
+    @staticmethod
+    def _add_decided_by(con: sqlite3.Connection) -> None:
+        """Add ``decided_by`` to a ledger created before it existed. Idempotent; the gateway, the sweep and the
+        bridge all open this file through this class, so another process may add the column first: that
+        ("duplicate column name") is fine."""
+        if "decided_by" in Ledger._column_names(con):
+            return
+        try:
+            con.execute("ALTER TABLE parks ADD COLUMN decided_by TEXT")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

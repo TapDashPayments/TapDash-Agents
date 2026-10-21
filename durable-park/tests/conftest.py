@@ -35,6 +35,12 @@ def _no_real_credentials(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_audit_key(monkeypatch, tmp_path_factory):
+    """Likewise the optional withHuman audit key file."""
+    monkeypatch.setattr("durable_park.DEFAULT_AUDIT_KEY_FILE", str(tmp_path_factory.getbasetemp() / "no-audit-key"))
+
+
+@pytest.fixture(autouse=True)
 def _permissive_tool_rules(monkeypatch):
     """Unit tests run without Hermes's tool registry: the default rules lookup accepts any object.
     Tests of the form check pass their own rules explicitly."""

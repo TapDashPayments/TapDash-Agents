@@ -49,7 +49,8 @@ flowchart LR
 
 The full picture - every component, arrow, state and failure path: **[docs/architecture.md](docs/architecture.md)**.
 
-Settings (`exempt_tools`, `form_checked_tools`, `observer_hooks`, `aap_base_url`, `token_file`, `ledger_path`)
+Settings (`exempt_tools`, `form_checked_tools`, `observer_hooks`, `aap_base_url`, `token_file`, `audit_key_file`,
+`audit_base_url`, `ledger_path`)
 live in `plugins.entries.durable-park.settings` in Hermes's `config.yaml`: [table](docs/architecture.md#plugin-settings),
 [how to change them](docs/runbook.md#plugin-settings). The old `risky_tools` setting is ignored with a warning. If
 anything else registers a `pre_tool_call` callback (another plugin, a `config.yaml` shell hook or outbound webhook) or

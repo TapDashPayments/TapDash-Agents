@@ -107,6 +107,7 @@ flowchart LR
   recv -->|"wake, signed"| route
   route --> wake
   wake -->|"re-reads the decision"| aap
+  wake -->|"asks the audit log who decided;<br/>fails soft"| aap
   wake -->|"records decision"| ledger
   wake -->|"APPROVED: run it, same chat"| agent
   agent -->|"park_id"| exec
@@ -154,6 +155,8 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
+| `audit_key_file` | `/etc/durable-park/audit_key` | Optional. A withHuman org API key with only `audit.read`; read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `info` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
+| `audit_base_url` | `https://app.withhuman.ai` | Where that audit lookup (`GET /api/v1/audit`) goes. |
 | `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json` and `formcheck_status.json` are written next to it. |
 | `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
 | `risky_tools` | (retired) | Renamed `form_checked_tools`. If still set, a warning `risky_tools is renamed form_checked_tools; ignoring it` is logged and its value is not used. |
@@ -251,7 +254,8 @@ sequenceDiagram
   W->>R: request.resolved (signed)
   R->>K: wake P-XXXX (signed, via Hermes webhook route)
   K->>W: read decision
-  K->>L: parked to approved
+  K->>W: ask the audit log who decided (fails soft)
+  K->>L: parked to approved (and decided_by, if known)
   K-->>A: APPROVED - call parked_action_execute
   A->>E: parked_action_execute(P-XXXX)
   E->>L: approved to executing
@@ -322,6 +326,11 @@ stateDiagram-v2
   person checks QuickBooks (runbook: [UNKNOWN outcome](runbook.md#outcome-unknown)).
 - `gateway_passed_at` is set when the bridge approves the gateway call (once per row). `notified_at` is set when the
   chat was told about a decision.
+- `decided_by` (nullable, `"Name (channel)"`) is written in the same single update as the decision, only for
+  `approved`, `denied` and `cancelled`, and only when the withHuman audit log's newest `approval.decided` event for
+  the request was made by a human. It is cosmetic: any failure of that lookup (no key file, HTTP error, 5 s timeout,
+  bad JSON, a pipeline decision) leaves it empty and the message and the decision unchanged. An older ledger gets the
+  column added when any process (gateway, sweep, bridge) first opens it.
 
 ## 4. Tool call: form check, then one question to withHuman
 
@@ -451,6 +460,7 @@ the repo) and never printed by any script.
 | `bridge_secret` | 0640 root:dpwake | bridge | verifies withHuman's pipeline webhook signature |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
+| `audit_key` (optional) | 0640 root:hermes | plugin | withHuman org API key with only `audit.read`: names who decided in the chat message |
 
 The user `hermes` has passwordless sudo, so an agent that got a terminal or file tool could read every file in this table. The v1 lockdown withholds those tools today. See backlog item 0.
 

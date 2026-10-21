@@ -141,6 +141,7 @@ chmod 0640 "$ETC/wake_secret"
 # Files provision.py / the human step own: only re-assert their owners and modes if they exist.
 if [[ -e "$ETC/receiver.json" ]]; then chown aaprecv:aaprecv "$ETC/receiver.json"; chmod 0600 "$ETC/receiver.json"; fi
 if [[ -e "$ETC/instance_token" ]]; then chown "root:$HERMES_USER" "$ETC/instance_token"; chmod 0640 "$ETC/instance_token"; fi
+if [[ -e "$ETC/audit_key" ]]; then chown "root:$HERMES_USER" "$ETC/audit_key"; chmod 0640 "$ETC/audit_key"; fi  # optional
 if [[ -e "$ETC/provisioner_token" ]]; then chown root:root "$ETC/provisioner_token"; chmod 0600 "$ETC/provisioner_token"; fi
 
 # --- 3. receiver venv, code, unit --------------------------------------------------------------------------

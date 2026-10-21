@@ -313,6 +313,28 @@ plugins:
 - After the restart, `~/.hermes/logs/agent.log` shows `durable-park loaded: ... exempt tool(s), ... form-checked
   pattern(s), ... observer hook(s)`.
 
+### Name the decider (optional)
+
+By default the chat is told "P-XXXX was DENIED in withHuman: <note>". With an audit key it says who decided: "was
+DENIED in withHuman by Yaakov Yehuda (android): <note>". Without the key nothing breaks; the message stays as above.
+A decision made by the pipeline (no person) is never given a name.
+
+1. In withHuman, mint an **organization API key** (`who_...`) with **only** `audit.read`. Read-only: it cannot decide,
+   change or delete anything.
+2. An admin stores it on the VM, typed with `read -rs` (never pasted into chat, never in the repo):
+
+   ```sh
+   read -rs -p "audit key: " AUDIT_KEY; echo; printf '%s' "$AUDIT_KEY" | sudo install -m 640 -o root -g hermes /dev/stdin /etc/durable-park/audit_key; unset AUDIT_KEY
+   ```
+
+3. Restart the gateway with no row `parked`, `approved` or `executing` ([health check](#health-check)). The key is
+   read at each lookup, so a later rotation needs no restart.
+4. Check: decide a test request, then `sqlite3 <ledger> "select park_id, decided_by from parks order by rowid desc limit 3"`
+   shows `Name (channel)`. Nothing shows? `~/.hermes/logs/agent.log` has `no audit key file` (file missing or empty) or
+   `decider lookup failed (<ErrorType>)` (HTTP error such as 403 = key lacks `audit.read`, a timeout, bad JSON).
+
+Settings `audit_key_file` and `audit_base_url`: [architecture](architecture.md#plugin-settings).
+
 ### Allow another hook (`observer_hooks`)
 
 durable-park refuses every non-exempt call while anything else has a `pre_tool_call` callback in Hermes's hook
@@ -435,6 +457,8 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - [ ] Issue a new withHuman tunnel token
 - [ ] Rotate the `durable-park-bridge` webhook endpoint secret and re-store `bridge_secret`
 - [ ] Regenerate `wake_secret`
+- [ ] Rotate the withHuman audit key (`audit_key`, if you set one): revoke it in withHuman and
+      [store a new one](#name-the-decider-optional)
 - [ ] Revoke any GitHub token shared in chat; keep only the VM's deploy key for this repo
 - [ ] Then the rest of the [backlog's "Before real books" list](backlog.md#before-real-books)
 
