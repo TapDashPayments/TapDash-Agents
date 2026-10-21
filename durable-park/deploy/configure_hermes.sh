@@ -23,7 +23,8 @@
 #   4c. agent tool policy (deploy/hermes_tool_policy.py, run in Hermes's own Python): every platform key an
 #      agent can run under gets only durable_park + clarify + MCP server wh (QuickBooks tools); every toolset
 #      with local file/command/code access is disabled; model-named file delivery is limited to the Hermes
-#      caches (closes the ledger bypass: the agent's tools run as hermes, which owns the ledger). Checked
+#      caches (closes the ledger bypass: the agent's tools run as hermes, which owns the ledger). Toolsets an
+#      admin lists in /etc/durable-park/allowed_toolsets (created empty here; Phase-2 ones refused) are opened too. Checked
 #      before AND after the gateway restart; a failed pre-restart check aborts without restarting anything.
 #   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (every 5m, --no-agent, telegram)
 #   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events and /wh/bridge -> 127.0.0.1:8791/wh/bridge
@@ -227,6 +228,9 @@ log "Hermes config set (plugin settings, hook timeout, webhook route $ROUTE, sec
 as_hermes install -d -m 0750 "$(dirname "$LEDGER")"   # also the bridge unit's ReadWritePaths: must exist
 
 # --- 4c. agent tool policy ---------------------------------------------------------------------------------
+# The one list of toolsets opened beyond the v1 lockdown (read by apply and check). Created empty if missing,
+# never overwritten: an admin edits it as root (docs/runbook.md "Open a toolset").
+[[ -e "$ETC/allowed_toolsets" ]] || install -m 640 -o root -g hermes /dev/null "$ETC/allowed_toolsets"
 tool_policy apply || die "could not apply the agent tool policy"
 # Check BEFORE any restart: a failed check stops here and the running gateway keeps its old process.
 policy_report=$(tool_policy check) \

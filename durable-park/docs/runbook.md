@@ -331,6 +331,23 @@ that has to agree:
 
 The form check needs nothing: it reads each tool's rules from Hermes automatically.
 
+## Open a toolset
+
+Only on a VM that runs the v1 tool lockdown (not proto-agents today, where the agent has every tool). The
+allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolsets`
+([format](receiver-setup.md#agent-tool-policy-v1-fix-for-the-ledger-bypass-lifted-on-proto-agents)).
+
+1. Check no ledger row is `parked`, `approved` or `executing` (a gateway restart would strand it).
+2. As admin, add the toolset's name on its own line (for example `web`), save.
+   `terminal`, `file`, `code_execution`, `delegation`, `cronjob`, `skills` and `computer_use` are refused until
+   Clean Setup Phase 2; a typo is refused too (exit 2, message on stderr, nothing changed).
+3. Apply and check, as the `hermes` user in Hermes's own Python (or just re-run `deploy/hermes_mcp.sh`, which does both):
+   `<hermes env python> -I deploy/hermes_tool_policy.py apply`, then `... check`. `check` must end with
+   `tool policy: ok`.
+4. Restart `hermes-gateway`, then run `check` once more (`--status-file PATH` to leave the result as JSON).
+
+To close it again, remove the line and repeat from step 3.
+
 ## Rotate secrets before production
 
 Several secrets were pasted into chat during testing (approved for testing only). Before any real books:
