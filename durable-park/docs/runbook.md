@@ -255,6 +255,10 @@ plugins:
   `true`, a mapping, an empty `observer_hooks:` that YAML reads as null) makes durable-park refuse every call
   except `parked_action_execute` and `clarify`; the log says `durable-park setting <name> must be a list of
   strings`. Fix it and restart.
+- `exempt_tools`: anything listed here runs with no approval and no ledger row. Keep it to
+  `parked_action_execute` and `clarify`. Any other name logs an ERROR at every gateway start; an MCP tool
+  (`mcp__...`) or a form-checked tool is refused (`durable-park setting exempt_tools must not list MCP or
+  form-checked tool '<name>'`) and every call is refused until it is removed.
 - `risky_tools` is retired: it was renamed `form_checked_tools`. If it is still set the gateway log says
   `risky_tools is renamed form_checked_tools; ignoring it`; move the value to `form_checked_tools` and delete it.
 - After the restart, `~/.hermes/logs/agent.log` shows `durable-park loaded: ... exempt tool(s), ... form-checked

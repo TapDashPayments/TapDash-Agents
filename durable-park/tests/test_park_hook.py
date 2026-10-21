@@ -1066,3 +1066,51 @@ def test_missing_arguments_are_an_empty_object(env):
     result = env.hook(tool_name="web_search", args=None, session_id="sess-1", tool_call_id="call-1")
     assert result["message"].startswith("PARKED P-")
     assert env.provider.only().body["arguments"] == {}
+
+
+def test_exempt_name_outside_the_defaults_logs_an_error(tmp_path, caplog):
+    """Anything in exempt_tools runs with no approval and no ledger row: an extra name is loud (ERROR)."""
+    ctx = FakeCtx(tmp_path / "data", {"exempt_tools": ["parked_action_execute", "clarify", "web_search"]})
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(ctx)
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert any("web_search" in m and "no approval" in m for m in errors)
+    assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c") is None
+    assert "parked_action_execute" in ctx.tools  # not refused: loaded normally
+
+
+def test_default_exempt_names_log_no_error(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(FakeCtx(tmp_path / "data"))
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+@pytest.mark.parametrize("exempt, extra", [
+    (["parked_action_execute", "clarify", "mcp__github__create_issue"], {}),
+    (["parked_action_execute", "mcp__wh__quickbooks__search_customers"], {}),
+    (["parked_action_execute", "clarify", "custom_pay"], {"form_checked_tools": [r"custom_pay"]}),
+])
+def test_exempt_mcp_or_form_checked_name_is_refused_as_a_bad_setting(tmp_path, caplog, exempt, extra):
+    ctx = FakeCtx(tmp_path / "data", {"exempt_tools": exempt, **extra})
+    with caplog.at_level("ERROR", logger="durable_park"):
+        register(ctx)  # does not raise
+    _assert_fails_closed_with_default_exempt(ctx)
+    assert ctx.tools == {}
+    hook = ctx.hooks["pre_tool_call"]
+    assert hook(tool_name=exempt[-1], args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": COULD_NOT_OPEN}
+    assert any("exempt_tools" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+
+
+def test_exempt_default_form_checked_tool_is_refused(tmp_path):
+    """A name the default form-checked patterns match is refused even without the mcp__ check (belt and braces)."""
+    ctx = FakeCtx(tmp_path / "data", {"exempt_tools": ["parked_action_execute",
+                                                       "mcp__wh__quickbooks__create_payment"]})
+    register(ctx)
+    _assert_fails_closed_with_default_exempt(ctx)
+
+
+def test_missing_executor_in_exempt_tools_still_warns(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(FakeCtx(tmp_path / "data", {"exempt_tools": ["clarify"]}))
+    assert any(r.levelname == "WARNING" and "parked_action_execute" in r.getMessage() for r in caplog.records)

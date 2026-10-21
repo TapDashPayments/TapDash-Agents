@@ -99,8 +99,17 @@ def foreign_pre_tool_call_hooks(ctx: Any, own: set[int], allowed: set[str]) -> l
     return foreign
 
 
-def _exempt_tools(ctx: Any) -> tuple[str, ...]:
+def _exempt_tools(ctx: Any, form_checked: list[re.Pattern]) -> tuple[str, ...]:
+    """The ``exempt_tools`` setting. Anything listed runs with no approval and no ledger row, so:
+    an MCP tool (``mcp__...``) or a form-checked tool is refused as a bad setting (``BadSetting``: every call is
+    then refused), and any other name outside ``DEFAULT_EXEMPT_TOOLS`` is logged as an ERROR."""
     exempt = tuple(_names("exempt_tools", ctx.get_config("exempt_tools", list(DEFAULT_EXEMPT_TOOLS))))
+    for name in exempt:
+        if name.startswith("mcp__") or any(p.fullmatch(name) for p in form_checked):
+            raise BadSetting(f"setting exempt_tools must not list MCP or form-checked tool {name!r}")
+    for name in exempt:
+        if name not in DEFAULT_EXEMPT_TOOLS:
+            log.error("exempt_tools lists %s: it runs with no approval and no ledger row", name)
     if EXECUTOR_TOOL not in exempt:
         log.warning("exempt_tools does not list %s: approved parks will be asked about again and cannot run",
                     EXECUTOR_TOOL)
@@ -137,9 +146,9 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
     if ctx.get_config("risky_tools", None) is not None:
         log.warning(RISKY_TOOLS_RENAMED)
     # Every list setting is validated before anything is registered (BadSetting -> refuse everything).
-    exempt = _exempt_tools(ctx)
     form_checked = _compile_form_checked(
         _names("form_checked_tools", ctx.get_config("form_checked_tools", list(DEFAULT_FORM_CHECKED_TOOLS))))
+    exempt = _exempt_tools(ctx, form_checked)
     observers = frozenset(_names("observer_hooks", ctx.get_config("observer_hooks", [])))
 
     ledger_path = ctx.get_config("ledger_path", str(Path(ctx.state.data_dir) / "ledger.db"))
