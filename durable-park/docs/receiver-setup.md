@@ -51,7 +51,11 @@ Side effect: every `hermes` CLI command prints `Command helper: applied 1 secret
 `Config ref '${env:DURABLE_PARK_WAKE_SECRET}' ... is not set` line (the CLI reads config before the
 secret source runs; the gateway gets the real value, verified with a signed test wake).
 
-## Deploy (Step 5, admin or AI agent, re-runnable)
+## Deploy (Step 5, admin or AI agent, re-runnable on a VM that should have the lockdown; NOT on proto-agents)
+
+> **Do not run this on proto-agents.** The script re-applies the v1 tool lockdown, which was lifted there (decided
+> 2026-10-20, live 2026-10-21). See the warning under [Agent tool policy](#agent-tool-policy-v1-fix-for-the-ledger-bypass-lifted-on-proto-agents)
+> and the [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md) section 4.1. It is re-runnable only on a VM that should have the lockdown.
 
 ```sh
 sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh
@@ -116,10 +120,20 @@ The plugin reads `instance_token` lazily on each risky call, so no Hermes restar
 ## Alerts from the sweep
 
 The cron job delivers to Telegram's **home channel**, set to the admin's DM with `@TapDashAgentsBot` (`/sethome`
-in that DM changes it). Moving alerts to Microsoft Teams is planned: configure Hermes's Teams platform, then
-change the `durable-park-sweep` cron job's delivery target.
+in that DM changes it). Moving alerts to Microsoft Teams is planned: Hermes's Teams platform is already connected
+in the same gateway (since 2026-10-21), so only the `durable-park-sweep` cron job's delivery target has to change.
 
-## Agent tool policy (v1 fix for the ledger bypass)
+## Agent tool policy (v1 fix for the ledger bypass; lifted on proto-agents)
+
+> **Status:** what is true now: the agent's terminal and file tools run on the VM as `hermes` with passwordless sudo,
+> so the threat described below is **not prevented** on proto-agents (accepted for the sandbox phase; see
+> [architecture](architecture.md#the-three-guarantees)). History: on 2026-10-20 Yaakov decided the one agent on proto-agents gets the full Hermes toolset, and since
+> about 02:20 UTC on 2026-10-21 it runs that way: `platform_toolsets` and `known_plugin_toolsets` are removed from
+> `~/.hermes/config.yaml`, `agent.disabled_toolsets` is `[]` (Hermes stock) and `approvals.mode` is `off`.
+> `tools.tool_search.enabled: off`, `gateway.strict: true` and `gateway.trust_recent_files: false` were kept. **Do not
+> re-run `configure_hermes.sh` or `hermes_tool_policy.py` on this VM**: they re-apply the lockdown described below
+> and their `check` fails on this VM by design. Why, and the plan: [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md). The text below is the history of what the
+> lockdown did and why.
 
 The agent's tools run as the `hermes` user. That user owns the ledger and can read `instance_token`. So
 an agent with a terminal or file tool, for example one hijacked by a prompt injection, could write an

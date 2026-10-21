@@ -18,7 +18,7 @@ The lockdown is defined by `durable-park/deploy/hermes_tool_policy.py::desired_s
 |---|---|---|
 | `platform_toolsets.<58 platforms>` | delete block | delete block (same) |
 | `known_plugin_toolsets.<40 platforms>` | not mentioned | delete block (stock has none; with it present, plugin toolsets such as `durable_park` are OFF on every platform once `platform_toolsets` is gone) |
-| `agent.disabled_toolsets` = 35 "forbidden" toolsets | remove 6 entries | replace with Hermes's stock default list (Task 2 step 2 extracts it) **minus `clarify`**, which the approved durable-park flow uses to ask the user questions |
+| `agent.disabled_toolsets` = 35 "forbidden" toolsets | remove 6 entries | set to [] — Hermes's stock default (hermes_cli/config_defaults.py:279); the 31-entry list on the ubuntu install is the "Blank Slate" setup preset, not stock |
 | `tools.tool_search.enabled: off` | not mentioned | **keep off.** durable-park's wake message tells the model to call `parked_action_execute` by name; with tool_search on, Hermes may hide plugin/MCP tools behind a search bridge. Untested; restricts nothing. |
 | `gateway.strict: true`, `gateway.trust_recent_files: false` | leave | leave (same) |
 
@@ -34,7 +34,7 @@ Also: Hermes installs Teams dependencies itself at gateway start (`ubuntu` gatew
 - withHuman side (plugin settings `risky_tools`, `mcp_servers.wh`, bridge, receiver, pipeline) is **not changed by any task**.
 - Config edits are text edits that keep comments; never round-trip `config.yaml` through a YAML dumper.
 - Commit trailer for repo commits: `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` and `Claude-Session: https://claude.ai/code/session_01FxcYWEdzmD5mZef95rh1wx`. Code-only comment changes use `Docs-Not-Needed: <reason>`.
-- The install's own interpreter is `/home/hermes/.hermes/hermes-agent/.hermes/bin/python` (the gateway unit runs `.hermes/bin/hermes` next to it). Verify with `ls` once; if absent, use the interpreter of the running gateway: `tr '\0' '\n' < /proc/$(systemctl --user show -p MainPID --value hermes-gateway)/cmdline | head -1`.
+- `HPY` = the Hermes venv python. Read it from the install's facts file, the way `durable-park/deploy/configure_hermes.sh` `hermes_python()` does: `HPY=$(python3 -I -c 'import glob,json,os; f=glob.glob(os.path.expanduser("~/.hermes/installs/*/facts.json")); assert len(f)==1, f; print(json.load(open(f[0]))["packages"]["venv"]["environment"]+"/bin/python")')` (`packages.venv.environment` + `/bin/python`). The venv path is not fixed (it can change after `hermes pm repair`), so every script that needs the install's python defines `HPY` first (each connector call is a fresh shell) and never hard-codes a path. Check it once with `"$HPY" -c 'import hermes_cli; print(1)'`; if it fails, use the interpreter of the running gateway: `tr '\0' '\n' < /proc/$(systemctl --user show -p MainPID --value hermes-gateway)/cmdline | head -1`.
 - Sub-agent models: implementer tasks on **sonnet**; pure-check steps (Task 0.1, Task 6 reads) may run on **haiku**; the final whole-branch/whole-change review on the most capable model.
 
 ## Review Focus
@@ -105,29 +105,28 @@ Commit message subject: `docs: amend merge spec §4.1 with the full lockdown; ad
 - Modify (VM): `/home/hermes/.hermes/config.yaml` — delete block at `^platform_toolsets:` (line 1168 → line before `^stt:`), delete block at `^known_plugin_toolsets:` (line 2311 → line before `^tools:`), replace the list under `agent.disabled_toolsets` (lines 1061–1095), add `  mode: off` under `^approvals:` (line 2616). Line numbers are from 2026-10-20; re-derive with grep, never hard-code.
 
 **Interfaces:**
-- Produces: a config that Hermes's loader accepts; `STOCK_DISABLED` = the stock default `agent.disabled_toolsets` list (step 2), reused by Task 6 #4.
+- Produces: a config that Hermes's loader accepts; `STOCK_DISABLED` = `[]`, the stock default `agent.disabled_toolsets` (step 2), reused by Task 6 #4.
 
 - [ ] **Step 1: Confirm block boundaries fresh**
 
 Run: `grep -n -E "^platform_toolsets:|^stt:|^known_plugin_toolsets:|^tools:|^approvals:|^  disabled_toolsets:" ~/.hermes/config.yaml`
 Expected: exactly six lines, in the order `disabled_toolsets`, `platform_toolsets`, `stt`, `known_plugin_toolsets`, `tools`, `approvals`. If `tools:` is not the first top-level key after `known_plugin_toolsets:`, find the real next top-level key (`awk 'NR>L && /^[a-z_]+:/{print NR": "$0; exit}'`) and use that.
 
-- [ ] **Step 2: Get the stock default disabled list**
+- [ ] **Step 2: Confirm the stock default disabled list**
 
-Run with the install's python: `cd ~/.hermes/hermes-agent && ~/.hermes/hermes-agent/.hermes/bin/python -c "from hermes_cli import config_defaults as d; import re,inspect; src=inspect.getsource(d); print(src[src.find('disabled_toolsets'):src.find('disabled_toolsets')+1200])"` and read the default list. Cross-check: it must equal the `ubuntu` install's list (`sudo -n awk '/^  disabled_toolsets:/{f=1;next} f&&/^    - /{print $2;next} f{exit}' /home/ubuntu/.hermes/config.yaml`), 31 entries, which includes `clarify` and `stt`. If the two differ, STOP and report both lists.
-Set `STOCK_DISABLED` = that list **without** `clarify` (30 entries).
+Run with the install's python: `cd ~/.hermes/hermes-agent && $HPY -c "from hermes_cli import config_defaults as d; import re,inspect; src=inspect.getsource(d); print(src[src.find('disabled_toolsets'):src.find('disabled_toolsets')+1200])"`. Expected: the stock default is `disabled_toolsets: []` at `hermes_cli/config_defaults.py:279`, so there is no list to extract. Do not cross-check against the `ubuntu` install: its 31-entry list (with `clarify` and `stt`) is the "Blank Slate" setup preset, not stock. Set `STOCK_DISABLED = []`.
 
 - [ ] **Step 3: Apply the edits with one python3 text script** (read file, operate on lines, write back; no YAML library):
   1. Delete lines from `^platform_toolsets:` up to (not including) the next line matching `^[a-z_]+:`.
   2. Delete lines from `^known_plugin_toolsets:` up to (not including) the next `^[a-z_]+:`.
-  3. Under `^  disabled_toolsets:` (inside `agent:`), replace the following `^    - ` lines with `STOCK_DISABLED`, one `    - <name>` per line, same order as stock.
+  3. Replace the `^  disabled_toolsets:` line and the `^    - ` lines that follow it with the single line `  disabled_toolsets: []` (`STOCK_DISABLED` is empty, so there are no items).
   4. After the line `^approvals:` insert `  mode: off` as the next line.
   Write to `~/.hermes/config.yaml.new`, then `mv` over the original (owner `hermes`, mode unchanged).
 
 - [ ] **Step 4: Verify the text**
 
-Run: `grep -n -c -E "^platform_toolsets:|^known_plugin_toolsets:" ~/.hermes/config.yaml; grep -n -A1 "^approvals:" ~/.hermes/config.yaml; awk '/^  disabled_toolsets:/{f=1;next} f&&/^    - /{n++;next} f{print n; exit}' ~/.hermes/config.yaml; grep -c -E "^    - (clarify|terminal|file|skills|vision|browser-cdp|browser-use)$" ~/.hermes/config.yaml`
-Expected: `0`; `approvals:` followed by `  mode: off`; `30`; `0`.
+Run: `grep -n -c -E "^platform_toolsets:|^known_plugin_toolsets:" ~/.hermes/config.yaml; grep -n -A1 "^approvals:" ~/.hermes/config.yaml; awk 'BEGIN{n=0} /^  disabled_toolsets:/{f=1;next} f&&/^    - /{n++;next} f{print n; exit}' ~/.hermes/config.yaml; grep -c -E "^    - (clarify|terminal|file|skills|vision|browser-cdp|browser-use)$" ~/.hermes/config.yaml`
+Expected: `0`; `approvals:` followed by `  mode: off`; `0`; `0`.
 
 - [ ] **Step 5: withHuman settings untouched**
 
@@ -136,12 +135,12 @@ Expected: `PLUGINS_SAME` and `MCP_SAME`.
 
 - [ ] **Step 6: Hermes's own loader accepts the file**
 
-Run: `cd ~/.hermes/hermes-agent && HERMES_HOME=/home/hermes/.hermes ~/.hermes/hermes-agent/.hermes/bin/python -c "from hermes_cli.config import load_config; c=load_config(); print('approvals', c.get('approvals',{}).get('mode')); print('platform_toolsets', c.get('platform_toolsets')); print('known', c.get('known_plugin_toolsets')); print('disabled', len(c['agent']['disabled_toolsets'])); print('tool_search', c.get('tools',{}).get('tool_search',{}).get('enabled'))"`
-Expected: `approvals off`, `platform_toolsets None` (or `{}`), `known None` (or `{}`), `disabled 30`, `tool_search off`.
+Run: `cd ~/.hermes/hermes-agent && HERMES_HOME=/home/hermes/.hermes $HPY -c "from hermes_cli.config import load_config; c=load_config(); print('approvals', c.get('approvals',{}).get('mode')); print('platform_toolsets', c.get('platform_toolsets')); print('known', c.get('known_plugin_toolsets')); print('disabled', len(c['agent']['disabled_toolsets'])); print('tool_search', c.get('tools',{}).get('tool_search',{}).get('enabled'))"`
+Expected: `approvals False` (the bare `off` in YAML is the boolean false; Hermes normalises it to the string "off" in `tools/approval_context.py` `_normalize_approval_mode`), `platform_toolsets None` (or `{}`), `known None` (or `{}`), `disabled 0`, `tool_search off`.
 
 - [ ] **Step 7: The old lockdown check now reports the tools are open** (inverse evidence)
 
-Run: `cd ~/.hermes/hermes-agent && HERMES_HOME=/home/hermes/.hermes ~/.hermes/hermes-agent/.hermes/bin/python -I /home/hermes/durable-park/deploy/hermes_tool_policy.py check 2>&1 | tail -5; echo exit=$?`
+Run: `cd ~/.hermes/hermes-agent && HERMES_HOME=/home/hermes/.hermes $HPY -I /home/hermes/durable-park/deploy/hermes_tool_policy.py check 2>&1 | tail -5; echo exit=$?`
 Expected: exit `1` and the output names forbidden tools (e.g. `terminal`, `read_file`) as present for `telegram`. That is the desired state now.
 
 ---
@@ -153,12 +152,12 @@ Expected: exit `1` and the output names forbidden tools (e.g. `terminal`, `read_
 
 - [ ] **Step 1: Teams SDK present in the `hermes` install**
 
-Run: `cd ~/.hermes/hermes-agent && ~/.hermes/hermes-agent/.hermes/bin/python -c "import microsoft.teams.apps; print('teams sdk ok')" 2>&1 | tail -1`
+Run: `cd ~/.hermes/hermes-agent && $HPY -c "import microsoft_teams.apps; print('teams sdk ok')" 2>&1 | tail -1`
 If `teams sdk ok`: skip step 2. Otherwise step 2.
 
 - [ ] **Step 2: Install it the documented way**
 
-Run: `cd ~/.hermes/hermes-agent && ~/.hermes/hermes-agent/.hermes/bin/python -c "import pm; pm.sync_venv(['teams'], explicit=True)" 2>&1 | tail -3` then re-run step 1.
+Run: `cd ~/.hermes/hermes-agent && $HPY -c "import pm; pm.sync_venv(['teams'], explicit=True)" 2>&1 | tail -3` then re-run step 1.
 Expected: `teams sdk ok`. If the import still fails, STOP and report the error text.
 
 - [ ] **Step 3: Copy the four TEAMS_* keys and add TEAMS_HOST, by script, values never printed**
@@ -170,10 +169,13 @@ want=['TEAMS_CLIENT_ID','TEAMS_CLIENT_SECRET','TEAMS_TENANT_ID','TEAMS_ALLOWED_U
 lines=[l for l in src if l.split('=',1)[0] in want]
 assert [l.split('=',1)[0] for l in lines]==want, [l.split('=',1)[0] for l in lines]
 dst=pathlib.Path('/home/hermes/.hermes/.env'); txt=dst.read_text()
-assert 'TEAMS_' not in txt
+assert not re.search(r'^TEAMS_[A-Z_]+=', txt, re.M)
 dst.write_text(txt.rstrip('\n')+'\n\n# Teams bot "TapDash Agent" (moved from the ubuntu install, 2026-10-20)\n'+'\n'.join(lines)+'\nTEAMS_HOST=127.0.0.1\n')
 print('appended', [l.split('=',1)[0] for l in lines]+['TEAMS_HOST'])
 ENVCOPY_4b9e`
+
+(As executed: the original guard tripped on commented `# TEAMS_*` template lines in .env and was narrowed to active `TEAMS_*=` lines.)
+
 Expected: `appended ['TEAMS_CLIENT_ID', 'TEAMS_CLIENT_SECRET', 'TEAMS_TENANT_ID', 'TEAMS_ALLOWED_USERS', 'TEAMS_HOST']`.
 
 - [ ] **Step 4: Verify keys only**
@@ -209,7 +211,7 @@ Expected: `appended dashboard block with keys ['basic_auth', 'username', 'passwo
 
 - [ ] **Step 2: Loader accepts it**
 
-Run: `cd ~/.hermes/hermes-agent && HERMES_HOME=/home/hermes/.hermes ~/.hermes/hermes-agent/.hermes/bin/python -c "from hermes_cli.config import load_config; d=load_config()['dashboard']['basic_auth']; print(sorted(d.keys()), d['username'])"`
+Run: `cd ~/.hermes/hermes-agent && HERMES_HOME=/home/hermes/.hermes $HPY -c "from hermes_cli.config import load_config; d=load_config()['dashboard']['basic_auth']; print(sorted(d.keys()), d['username'])"`
 Expected: `['password_hash', 'secret', 'username'] TapDash`.
 
 - [ ] **Step 3: Write the unit** `/home/hermes/.config/systemd/user/hermes-dashboard.service`:
@@ -276,7 +278,7 @@ Each row needs its evidence pasted into the task report. Rows 2, 3 and 6 need Ya
 - [ ] **#2 Teams** — Yaakov messages TapDash Agent in Teams → reply. Evidence: `grep -c "platform=teams" ~/.hermes/logs/gateway.log` increased, and Yaakov confirms.
 - [ ] **#3 Telegram** — Yaakov messages the bot → reply. Evidence: same with `platform=telegram`, Yaakov confirms.
 - [ ] **#4 Tools open** — Yaakov (Telegram): "run `uname -a` and tell me the output" → the reply contains `Linux vps-c204f492`. Evidence: `grep -c '"tool":"terminal"' ~/.hermes/logs/agent.log` (or the equivalent tool-call line) increased; reply text.
-- [ ] **#5 Hermes approvals off** — config evidence from Task 2 step 6 (`approvals off`); Yaakov: "create /tmp/x then run `rm -f /tmp/x`" → done with no approval prompt in chat.
+- [ ] **#5 Hermes approvals off** — config evidence from Task 2 step 6 (`approvals False`, which Hermes reads as "off"); Yaakov: "create /tmp/x then run `rm -f /tmp/x`" → done with no approval prompt in chat.
 - [ ] **#6 withHuman still gates** — Yaakov (Telegram): "record a $1 payment from Kookies by Kathy against invoice 1016 (sandbox)". Expected: bot says it is waiting for approval; `select park_id,status from parks order by created_at desc limit 1` = `parked`; request visible in withHuman; Yaakov **denies** it; chat receives the denial; ledger row = `denied`. Evidence: the SQL output before and after, and Yaakov's confirmation.
 - [ ] **#7 Dashboard** — Yaakov opens `http://100.99.171.75:9119/`, logs in as `TapDash`, Sessions tab lists the Telegram sessions. Evidence: Yaakov confirms; `grep -c "GET /api/sessions" ~/.hermes/logs/*.log` > 0 (or dashboard journal: `journalctl --user -u hermes-dashboard -n 20`).
 - [ ] **#8 Cron intact** — `~/.hermes/hermes-agent/.hermes/bin/hermes cron list 2>/dev/null | grep durable-park-sweep` shows the job; within 6 min `grep -c durable-park ~/.hermes/logs/gateway.log` increases or `ls -t ~/.hermes/cron/output | head -1` is newer than the restart.

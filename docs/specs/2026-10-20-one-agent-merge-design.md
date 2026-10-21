@@ -1,12 +1,12 @@
 # One agent on proto-agents — merge design
 
-Date: 2026-10-20 · Status: DRAFT for Yaakov's review · Author: Claude (with Yaakov)
+Date: 2026-10-20 · Status: Implemented 2026-10-21 · Author: Claude (with Yaakov)
 
 ## 1. Intent (in Yaakov's words, written back)
 
 - Two agents are still the plan, built one at a time. Right now: **one agent** on proto-agents.
 - That agent gets **every tool** Hermes offers (terminal, files, browser, Teams, Telegram, QuickBooks via withHuman, ...).
-- **withHuman is the only gate.** Hermes's own built-in approval prompts are off.
+- **withHuman is the only gate.** Hermes's own built-in approval prompts are off. (as a policy; not yet a security boundary — see §8)
 - **First phase: allow everything** on the Hermes side so Yaakov can see what the agent actually uses, then lock down as he chooses.
 - **withHuman side is not touched.** The existing rule (12 QuickBooks money-move tool types are parked for approval) stays as is. No step backwards.
 - Per-person profiles with different permissions come later. Not in this spec.
@@ -20,7 +20,7 @@ Two Hermes 0.22.2 installs on the VPS `proto-agents` (100.99.171.75), built by t
 | Created | Oct 19, 7:29pm ET | Oct 20, 2:45pm ET |
 | What it is | durable-park / withHuman approvals prototype (v1 accepted Oct 20) | Teams bot "TapDash Agent" + web dashboard |
 | Channels | Telegram, webhook (durable-park wake) | Teams, via devtunnel `proto-agents-bot` → port 3978 |
-| Tools | **locked down**: `platform_toolsets` = `[durable_park, clarify, wh]` on every platform; `agent.disabled_toolsets` adds browser-cdp, browser-use, file, skills, terminal, vision | stock defaults |
+| Tools | **locked down**: `platform_toolsets` = `[durable_park, clarify, wh]` on every platform; `agent.disabled_toolsets` adds 35 toolsets (file, terminal, browser, skills, vision, web, memory, … — full list in `durable-park/deploy/hermes_tool_policy.py` FORBIDDEN_TOOLSETS) (before 2026-10-21; see §4.1 and §10) | stock defaults |
 | Hermes approvals | not set (= `smart`) | `mode: off` |
 | Dashboard | none | `hermes dashboard --host 100.99.171.75 --port 9119`, basic-auth user `TapDash` |
 | Model | `meituan/longcat-2.5-preview:free` | `upstage/solar-mini4:free` |
@@ -46,11 +46,19 @@ Rejected: (a) building on `ubuntu` and re-deploying durable-park there — re-do
 
 ### 4.1 Hermes side: allow everything (`/home/hermes/.hermes/config.yaml`)
 
-1. Delete the whole `platform_toolsets:` block (line 1168 to just before `stt:` at 1598). Hermes then uses its built-in per-platform defaults — the same state as a fresh install.
-2. In `agent.disabled_toolsets` (line 1060), remove the six lockdown entries: `browser-cdp`, `browser-use`, `file`, `skills`, `terminal`, `vision`. Leave the others.
-3. Under the existing `approvals:` block (line 2616) add `mode: off`.
-4. Leave `strict: true`, `trust_recent_files: false`, `max_turns: 500` as they are (not part of the lockdown; unrelated to tool availability).
-5. Add a comment at the top of `/home/hermes/durable-park/deploy/configure_hermes.sh`: "Do not re-run on proto-agents: it re-applies the tool lockdown removed on 2026-10-20 by decision (see docs/specs/2026-10-20-one-agent-merge-design.md in the TapDash-Agents repo)". No code change.
+| Lockdown setting | First draft of §4.1 said | Done (2026-10-21) |
+|---|---|---|
+| `platform_toolsets.<58 platforms>` | delete block | delete block (same) |
+| `known_plugin_toolsets.<40 platforms>` | not mentioned | delete block (stock has none; with it present, plugin toolsets such as `durable_park` are OFF on every platform once `platform_toolsets` is gone) |
+| `agent.disabled_toolsets` = 35 "forbidden" toolsets | remove 6 entries | set to [] — Hermes's stock default (hermes_cli/config_defaults.py:279); the 31-entry list on the ubuntu install is the "Blank Slate" setup preset, not stock |
+| `tools.tool_search.enabled: off` | not mentioned | **keep off.** durable-park's wake message tells the model to call `parked_action_execute` by name; with tool_search on, Hermes may hide plugin/MCP tools behind a search bridge. Untested; restricts nothing. |
+| `gateway.strict: true`, `gateway.trust_recent_files: false` | leave | leave (same) |
+
+Found while planning on 2026-10-20: the lockdown is `hermes_tool_policy.py::desired_settings()`, which writes five settings.
+
+1. Under the existing `approvals:` block add `mode: off` (Hermes built-in approvals off; withHuman stays the only gate).
+2. Leave `strict: true`, `trust_recent_files: false`, `max_turns: 500` as they are (not part of the lockdown; unrelated to tool availability).
+3. Add a comment at the top of `/home/hermes/durable-park/deploy/configure_hermes.sh`: as committed: "DO NOT RE-RUN on proto-agents. On 2026-10-20 Yaakov decided the agent gets every Hermes tool (withHuman/durable-park remains the only gate). This script re-applies the v1 tool lockdown via hermes_tool_policy.py. See docs/specs/2026-10-20-one-agent-merge-design.md §4.1." No code change.
 
 ### 4.2 withHuman side: no change
 
@@ -108,7 +116,8 @@ Restore the `hermes` config/.env from backup, restart `hermes-gateway`, stop `he
 ## 8. Known risks / accepted
 
 - With tools open and Hermes approvals off, **only QuickBooks money moves are gated**. Terminal and file tools run freely. Accepted for the setup phase on a test VM with a sandbox QuickBooks.
-- durable-park was accepted under the lockdown. Parking QuickBooks calls with the full toolset present is expected to behave the same (the hook is tool-name based) but is re-verified in §6.6.
+- **This is not a security boundary today.** The agent's terminal and file tools run on the VM (`terminal.backend: local`) as `hermes`, which has passwordless sudo. The agent can read `/etc/durable-park/*` (the QuickBooks client secret and refresh token and the withHuman tunnel token in `tunnel.env`, `wake_secret`, `bridge_secret`, `instance_token`), change `/opt/durable-park`, forge ledger rows, stop services, edit the Proto-Agents connector (`/home/hermes/hermes-shell-mcp`, also exposed through Tailscale Funnel) and call QuickBooks directly, bypassing withHuman. So withHuman gates QuickBooks money moves only when the agent does not deliberately go around it. Accepted by Yaakov on 2026-10-20 for the exploration phase on a QuickBooks sandbox test VM. A fix is pending his choice between (a) sandboxing the agent's terminal/file tools in Hermes's docker backend (recommended), (b) `approvals.deny` patterns as a partial backstop, (c) accepting it until before real books. Tracked as item 0 of the durable-park backlog's "Before real books".
+- durable-park was accepted under the lockdown. Parking QuickBooks calls with the full toolset present is expected to behave the same (the hook is tool-name based) but is re-verified in §6.6 (result: §10).
 - Free model quality is a known limitation (see acceptance notes); unchanged by this merge.
 - Secrets rotation before real books (durable-park backlog #1) is still owed; unchanged by this merge.
 
@@ -117,3 +126,21 @@ Restore the `hermes` config/.env from backup, restart `hermes-gateway`, stop `he
 - Dashboard pages: pending withHuman approvals, full withHuman view, live agent/tool trace.
 - Widening `risky_tools` (the later lock-down phase); `approvals.deny` backstop.
 - Per-person profiles; the second (content) agent.
+
+## 10. Result (2026-10-21)
+
+Cutover at 02:20 UTC on 2026-10-21 (gateway on venv `58c7a333`, Telegram and Teams connected, no rollback). Verification of §6, with Yaakov:
+
+| # | Result | Evidence |
+|---|---|---|
+| 1 | Pass | Gateway active; Telegram and Teams connected; `127.0.0.1:3978` owned by the `hermes` gateway |
+| 2 | Pass | Teams message received 02:31:35 UTC; Yaakov confirmed the reply |
+| 3 | Pass | Telegram works |
+| 4 | Pass | "run uname -a" at 02:32:20; the reply had `Linux vps-c204f492` (Yaakov) |
+| 5 | Pass | `/tmp/x` created and removed at 02:33:08 with no prompt; `/tmp/x` absent afterwards (`approvals` loads as `False`, which Hermes normalises to "off") |
+| 6 | Pass | P-6CFC909B `create_payment` parked 02:33:45, denied 02:34:30, denial delivered in chat; 0 open rows |
+| 7 | Pass | Dashboard login `TapDash` works (Yaakov) |
+| 8 | Pass | `durable-park-sweep` present |
+| 9 | Pass | `ubuntu` `hermes-gateway` and `hermes-dashboard` disabled and inactive (02:37:47 UTC); `devtunnel-hermes` enabled and active |
+
+After the merge, fast-forward the live clone `/home/hermes/tapdash-agents` to main so the warning comment in `configure_hermes.sh` lands on the path admins run (docs and a comment only; no restart needed).

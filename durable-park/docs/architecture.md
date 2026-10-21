@@ -24,15 +24,35 @@ the root README's [Built on](../../README.md#built-on) table.
    used once; arguments must match the saved ones.
 3. **A crash never causes a silent retry.** If the outcome is unclear the row becomes `unknown` and a person checks.
 
-How strong is the first guarantee today? The plugin, the bridge and the ledger all trust the user `hermes`, which
-is also the user the agent runs as. What stops the agent from writing a fake "approved" row is that it has **no
-file or terminal tools at all** (the tool lockdown, `deploy/hermes_tool_policy.py`). That is a configuration guard,
-not a permission boundary; making it one is on the [backlog](backlog.md).
+How strong is the first guarantee today? **On proto-agents it is not a security boundary.** The plugin, the bridge
+and the ledger all trust the user `hermes`, which is also the user the agent runs as. In v1 (until 2026-10-21) the
+agent had **no file or terminal tools at all** (the v1 tool lockdown, `deploy/hermes_tool_policy.py`); that held the
+first guarantee against an agent that went looking for a way round it, though it was a configuration guard, not a
+permission boundary. It is lifted: Yaakov decided on 2026-10-20 that the one agent gets the full Hermes toolset, and
+since about 02:20 UTC on 2026-10-21 it runs that way (see the [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md)).
+
+What the agent can do now:
+
+- Its terminal and file tools run **on the VM itself** (`terminal.backend: local`) as `hermes`, which has
+  **passwordless sudo**. Hermes's own approvals are off (`approvals.mode: off`).
+- So it can read everything in `/etc/durable-park/`, including the QuickBooks client secret, the refresh token and
+  the withHuman tunnel token in `tunnel.env`; change the code in `/opt/durable-park`; forge ledger rows; and call
+  QuickBooks directly, **bypassing withHuman**.
+- withHuman (durable-park) therefore gates the 12 QuickBooks money-move tool types only when the agent does not
+  deliberately go around it. It is the only approval gate, but it is a convention, not a control.
+- Yaakov accepted this on 2026-10-20 for the exploration phase, on a test VM with a QuickBooks **sandbox** company.
+  A fix is pending his choice between (a) running the agent's terminal and file tools in Hermes's docker backend
+  (recommended), (b) `approvals.deny` patterns as a partial backstop, and (c) accepting it until before real books.
+  Containing the agent's tools is the first item in the [backlog](backlog.md#before-real-books) and is needed
+  before any real credentials.
 
 ## 1. System map
 
-Everything durable-park adds runs on the test VM next to Hermes. The agent never holds QuickBooks credentials:
-QuickBooks is reached only through the withHuman MCP gateway and its tunnel.
+Everything durable-park adds runs on the test VM next to Hermes. By design the agent does not hold QuickBooks
+credentials: QuickBooks is reached only through the withHuman MCP gateway and its tunnel. Under the v1 lockdown
+(until 2026-10-21) that was enforced; on proto-agents today it is only a convention, because the credentials sit in
+`/etc/durable-park/tunnel.env` and the agent's terminal can read them with sudo (see
+[the three guarantees](#the-three-guarantees)).
 
 ```mermaid
 flowchart LR
@@ -263,21 +283,32 @@ replay store is not tied to the withHuman request id.
 
 | Process | Runs as | Code it runs | Listens on | Started by |
 |---|---|---|---|---|
-| Hermes gateway (agent + plugin) | `hermes` | `~/.hermes/plugins/durable-park` -> `/home/hermes/durable-park/plugin/durable_park` (the git clone) | `127.0.0.1:8644` (webhook route `durable-park-wake`) | systemd user unit `hermes-gateway` |
+| Hermes gateway (agent + plugin, Telegram and Teams adapters) | `hermes` | `~/.hermes/plugins/durable-park` -> `/home/hermes/durable-park/plugin/durable_park` (the git clone) | `127.0.0.1:8644` (webhook route `durable-park-wake`), `127.0.0.1:3978` (Teams bot "TapDash Agent") | systemd user unit `hermes-gateway` |
+| Hermes web dashboard | `hermes` | the `hermes` install (`hermes dashboard`, basic-auth user `TapDash`) | `100.99.171.75:9119` (Tailscale only) | systemd user unit `hermes-dashboard` |
+| Teams tunnel | `ubuntu` | Microsoft devtunnel `proto-agents-bot`, forwards to the gateway's `127.0.0.1:3978` | outbound only | systemd user unit `devtunnel-hermes` (user `ubuntu`) |
+| Claude connector "Proto-Agents" | `hermes` | `/home/hermes/hermes-shell-mcp` (shell access for Claude on this VM) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
 | bridge | `hermes` | `/opt/durable-park/bridge/` + `/opt/durable-park/plugin/durable_park/ledger.py` (root-owned copy) | `127.0.0.1:8791` `/wh/bridge` | system unit `durable-park-bridge` |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, every 5 min, no agent |
 | tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` | outbound only | Docker, container `wh-tunnel` |
-| Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge` | 443 | `tailscale funnel --bg` |
+| Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
 
 - The git clone is `/home/hermes/tapdash-agents`; `/home/hermes/durable-park` is a link to its `durable-park/`
   folder, so older paths keep working.
-- The receiver and bridge run from **root-owned copies** in `/opt/durable-park`, so the agent's user cannot change
-  the code that says "approved". Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
+- The receiver and bridge run from **root-owned copies** in `/opt/durable-park`, so the agent's user could not change
+  the code that says "approved" (true under the v1 lockdown, until 2026-10-21; now the agent's user has passwordless
+  sudo and a local terminal, so these copies are no longer a boundary). Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
 - Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`, `bridge_deliveries.db`,
   `formcheck_status.json`, `formcheck_alert_state.json`.
-- The agent's tools are locked down to `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`
-  (`deploy/hermes_tool_policy.py`), so it has no terminal or file access to the ledger.
+- The agent has the full Hermes toolset (terminal, file, browser, ...) and Hermes's own approvals are off
+  (`approvals.mode: off`). Only `tools.tool_search.enabled: off`, `gateway.strict: true` and
+  `gateway.trust_recent_files: false` of the old lockdown were kept (the last two no longer protect the ledger: the
+  agent can read it with its terminal). The v1 lockdown
+  (`deploy/hermes_tool_policy.py`, tools limited to `parked_action_execute`, `clarify` and
+  `mcp__wh__quickbooks__*`) was lifted by hand-editing `~/.hermes/config.yaml`; do not re-run
+  `deploy/configure_hermes.sh` on this VM, it re-applies it ([spec](../../docs/specs/2026-10-20-one-agent-merge-design.md) section 4.1).
+- Two agents ran on the VM until 2026-10-21 (this install and an `ubuntu` user install for Teams and the
+  dashboard). Now it is **one**: the `hermes` install. The `ubuntu` install is stopped, its gateway and dashboard units are disabled (2026-10-21 02:37:47 UTC) and it is kept as an archive.
 
 ## 7. Secrets and who can read them
 
@@ -292,6 +323,8 @@ the repo) and never printed by any script.
 | `bridge_secret` | 0640 root:dpwake | bridge | verifies withHuman's pipeline webhook signature |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
+
+Since 2026-10-21 the agent's terminal tool runs as `hermes`, which has passwordless sudo, so the agent can read every file in this table. See backlog item 0.
 
 Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before-production).
 
