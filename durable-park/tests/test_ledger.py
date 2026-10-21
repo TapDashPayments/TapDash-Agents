@@ -318,3 +318,46 @@ def test_delete_finished_before_keeps_parks_and_young_rows(tmp_path):
     for name in ("executed", "denied", "unknown"):
         assert ledger.get(old[name]) is not None
     assert ledger.get(young.park_id) is not None
+
+
+OLD_SCHEMA = """
+CREATE TABLE parks (
+    park_id TEXT PRIMARY KEY, session_key TEXT NOT NULL, session_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+    tool TEXT NOT NULL, server TEXT NOT NULL, args_json TEXT NOT NULL, args_digest TEXT NOT NULL,
+    call_key TEXT NOT NULL, request_id TEXT, status TEXT NOT NULL, consume_key TEXT, result_json TEXT,
+    note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, executing_at TEXT, notified_at TEXT,
+    gateway_passed_at TEXT, UNIQUE (session_id, tool_call_id));
+"""
+
+
+def test_a_ledger_from_before_decided_by_is_migrated_in_place(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    con = sqlite3.connect(path)
+    con.executescript(OLD_SCHEMA)
+    con.execute("INSERT INTO parks (park_id, session_key, session_id, tool_call_id, tool, server, args_json,"
+                " args_digest, call_key, status, created_at, updated_at)"
+                " VALUES ('P-OLD','k','s','c','t','srv','{}','d','ck','denied','2026-10-20T00:00:00.000000Z',"
+                "'2026-10-20T00:00:00.000000Z')")
+    con.commit()
+    con.close()
+    ledger = Ledger(path)
+    old = ledger.get("P-OLD")
+    assert old.status == "denied" and old.decided_by is None
+    Ledger(path)  # idempotent: a second open (sweep, bridge) finds the column and changes nothing
+    row = ledger.park(session_key="k", session_id="s2", tool_call_id="c2", tool="t", args={}, call_key="x",
+                      server="srv")
+    assert ledger.transition(row.park_id, "parked", "approved", decided_by="Ann (web)")
+    assert ledger.get(row.park_id).decided_by == "Ann (web)"
+    check = sqlite3.connect(path)
+    cols = [r[1] for r in check.execute("PRAGMA table_info(parks)")]
+    check.close()
+    assert cols.count("decided_by") == 1
+
+
+def test_migration_tolerates_a_concurrent_add_column(tmp_path, monkeypatch):
+    """Another process added the column between our PRAGMA and our ALTER: not an error."""
+    path = str(tmp_path / "race.db")
+    Ledger(path)  # the column exists now
+    monkeypatch.setattr(Ledger, "_column_names", staticmethod(lambda con: ["park_id"]))  # a stale PRAGMA read
+    Ledger(path)  # its ALTER hits "duplicate column name": must not raise
