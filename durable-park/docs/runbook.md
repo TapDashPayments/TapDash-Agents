@@ -171,12 +171,13 @@ A second line `durable-park: the form checker is working again.` follows when it
 `durable-park ALERT: withHuman could not be reached (since <time>); every tool call is being refused until it answers again.`
 
 The park hook's circuit breaker opened after 3 consecutive errors from withHuman, so tool calls are refused
-(fail closed) without asking. While open it retries once every 30 seconds. Read `breaker_status.json` next to the
+(fail closed) without asking. Every 30 seconds it lets calls through again until one gets an outcome. Read `breaker_status.json` next to the
 ledger (`open`, `opened_at`, `closed_at`); check the withHuman status page, the `instance_token`, and the VM's
-network (`hermes mcp test wh`). Nothing needs restarting: it closes by itself on the first answer.
+network (`hermes mcp test wh`). Nothing needs restarting: it closes by itself on the first answer. A gateway
+restart while it is open keeps it open but lets the first call through at once, so the close is still recorded.
 
 `durable-park: withHuman answers again (since <time>); tool calls are decided normally.` follows when it closes. If
-the outage was shorter than 5 minutes, both lines arrive together.
+the outage was shorter than 5 minutes, both lines may arrive together.
 
 ## Troubleshooting
 

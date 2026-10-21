@@ -7,7 +7,9 @@ stops hammering the service and refuses at once. Once the cooldown has passed th
 
 The breaker is pure state plus a status file (``breaker_status.json`` next to the ledger) that is rewritten
 only when it opens or closes; the sweep turns that file into one alert on open and one on close. It never
-calls withHuman. A status-file write error is logged and never raised.
+calls withHuman. A status-file write error is logged and never raised. On construction a status file that still
+says open (the gateway restarted while withHuman was unreachable) is adopted as open and half-open at once, so the
+first success records the close.
 """
 
 from __future__ import annotations
@@ -44,6 +46,24 @@ class Breaker:
         self._retry_at = 0.0
         self._opened_at: str | None = None
         self._closed_at: str | None = None
+        self._adopt_status_file()
+
+    def _adopt_status_file(self) -> None:
+        """After a restart, a status file that still says ``open: true`` is adopted as open and half-open at
+        once (``retry_at = now``): the first success writes the close and the sweep sends the recovery line,
+        instead of the file staying open forever. A missing or unreadable file means closed. Never raises."""
+        if not self._path:
+            return
+        try:
+            with open(self._path, encoding="utf-8") as handle:
+                status = json.load(handle)
+        except Exception:  # noqa: BLE001 - missing or corrupt: start closed, as before
+            return
+        if isinstance(status, dict) and status.get("open") is True:
+            self._open = True
+            self._retry_at = self._clock()
+            opened_at = status.get("opened_at")
+            self._opened_at = opened_at if isinstance(opened_at, str) else None
 
     def allow_attempt(self) -> bool:
         with self._lock:

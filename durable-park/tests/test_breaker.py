@@ -118,3 +118,53 @@ def test_no_status_path_still_works(tmp_path):
     for _ in range(3):
         b.record_failure()
     assert b.allow_attempt() is False
+
+
+def _status(tmp_path):
+    return json.loads((tmp_path / STATUS_FILENAME).read_text())
+
+
+def test_restart_with_an_open_status_file_is_half_open_and_closes_on_success(tmp_path):
+    """After a gateway restart the in-memory breaker starts fresh; a status file still saying open must not stay
+    stale forever: adopt open, half-open at once, so the first success writes the close for the sweep."""
+    (tmp_path / STATUS_FILENAME).write_text(json.dumps(
+        {"open": True, "opened_at": "2026-10-21T09:00:00Z", "closed_at": None}))
+    b = make(tmp_path, Clock())
+    assert b.allow_attempt() is True  # half-open immediately
+    b.record_success()
+    status = _status(tmp_path)
+    assert status["open"] is False and status["closed_at"] == "2026-10-21T10:00:00Z"
+    assert status["opened_at"] == "2026-10-21T09:00:00Z"
+
+
+def test_restart_with_an_open_status_file_reopens_on_failure(tmp_path):
+    (tmp_path / STATUS_FILENAME).write_text(json.dumps(
+        {"open": True, "opened_at": "2026-10-21T09:00:00Z", "closed_at": None}))
+    clock = Clock()
+    b = make(tmp_path, clock)
+    for _ in range(3):
+        b.record_failure()
+    assert b.allow_attempt() is False
+    assert _status(tmp_path)["open"] is True
+
+
+def test_restart_with_a_closed_status_file_writes_nothing_on_success(tmp_path):
+    path = tmp_path / STATUS_FILENAME
+    path.write_text(json.dumps({"open": False, "opened_at": "x", "closed_at": "y"}))
+    before = path.read_text()
+    mtime = os.stat(path).st_mtime_ns
+    b = make(tmp_path, Clock())
+    b.record_success()
+    assert path.read_text() == before and os.stat(path).st_mtime_ns == mtime
+
+
+def test_restart_with_a_corrupt_or_missing_status_file_starts_closed(tmp_path):
+    path = tmp_path / STATUS_FILENAME
+    path.write_text("{not json")
+    b = make(tmp_path, Clock())
+    b.record_success()
+    assert path.read_text() == "{not json"  # closed: nothing to record
+    path.unlink()
+    b = make(tmp_path, Clock())
+    b.record_success()
+    assert not path.exists()
