@@ -1,5 +1,7 @@
 # One Agent on proto-agents — Implementation Plan
 
+> **Superseded 2026-10-21:** the v1 lockdown was re-applied on 2026-10-21 at 03:16 UTC, so the full toolset is no longer live. See [the all-tools spec](../specs/2026-10-21-all-tools-withhuman-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn the `hermes` Hermes install on proto-agents into the one agent: every Hermes tool enabled, Hermes built-in approvals off, Teams + dashboard moved in from the `ubuntu` install, `ubuntu` install retired, withHuman/durable-park untouched.

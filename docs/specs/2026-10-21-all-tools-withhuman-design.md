@@ -59,7 +59,7 @@ Assumed (not stated; Yaakov confirms or corrects):
 | sshd: `50-cloud-init.conf` says `PasswordAuthentication yes`, `60-cloudimg-settings.conf` says `no`; effective value **yes** | `sudo grep` of both files; `sudo sshd -T` → `passwordauthentication yes` |
 | `hermes` is in `dpwake`; `ledger.db` is `hermes:hermes 644`; `bridge_secret`/`wake_secret` `root:dpwake 640`; `instance_token` `root:hermes 640` | `id hermes`; `stat` of the files |
 | Live clone `/home/hermes/tapdash-agents` is at `ad4c35d`, 4 commits behind `origin/main` | `git status -sb` in the clone |
-| Open PR #3 (branch `ops/one-agent-merge`) documents the **open** toolset as live (e.g. its architecture.md:299 "now the agent's user has passwordless..."); that is no longer true since the re-lock | worktree `one-agent-merge` at `b354c96` |
+| PR #3 merged at `1847dff` without the item 1 fix (fixed by `docs/relock-truth`) | worktree `one-agent-merge` at `b354c96` |
 
 ## 3. Approaches considered
 
@@ -307,11 +307,8 @@ Open questions (who decides):
 
 ## 8. Work list (ordered; each line: what — why — depends on)
 
-1. Fix PR #3 docs: say the v1 lockdown was re-applied 2026-10-21 03:16 UTC and the full toolset is **not** live — the
-   PR describes a state that no longer exists — depends on nothing.
-2. Merge PR #3; fast-forward the live clone (`sudo -u hermes git -C ~hermes/tapdash-agents pull --ff-only` after
-   4.1, or as hermes before) — the `configure_hermes.sh` warning comment and merged docs must be on the path admins
-   run — depends on 1.
+1. ~~Fix PR #3 docs~~ — done (see §9 D1).
+2. Merge PR #3; fast-forward the live clone — PR merged; fast-forward is Task 2 (see §9 D1).
 3. Clean Setup Phase 1 (§4.1 steps 1–9) — removes root from the agent's user before any tool is opened — depends on 2.
 4. Backlog #3: sweep cancels a `parked` row with no request id after 10 min — "ask every call" opens that window on
    every tool call — depends on nothing; land before 5.
@@ -338,3 +335,28 @@ Open questions (who decides):
 15. Sweep alerts to Teams instead of Telegram — Teams is where Yaakov works — depends on nothing.
 16. Decide the archived `ubuntu` Hermes install (`/home/ubuntu/.hermes`): delete after 3 and 8 pass, or keep as a
     snapshot — housekeeping; it holds Teams secrets — Yaakov decides; depends on 3.
+
+## 9. Amendments from planning (2026-10-21)
+
+Each line: what the spec says → what is true → what this plan does. Approved before Task 1 (2026-10-21).
+
+| # | Spec | Found | Plan |
+|---|---|---|---|
+| D1 | §8 items 1–2: fix PR #3, then merge it | PR #3 was merged at `1847dff` **without** the fix; main now says (before this fix) the full toolset is live. Live clone is 15 commits behind (`5dab848..1847dff`, docs + one comment only) | Task 1 fixes main directly; Task 2 is only the fast-forward |
+| D2 | §4.1 step 7 (SSH) after the connector move | `ubuntu` has a password (`passwd -S` = `P`), ufw allows 22/tcp from anywhere, effective `passwordauthentication yes`, and `ubuntu` has NOPASSWD sudo: a guessed password is root from the internet | Task 3 does SSH **first**. The `ubuntu` password is kept (OVH console fallback); only SSH password login goes off |
+| D3 | §4.1 steps 2–4 | The connector also keeps its OAuth state in `~hermes/.local/share/fastmcp/oauth-proxy/`; `server.py` names hermes on lines 149, 172, 178, 181, 241, 274, 305; `set-github-oauth.sh` says "run as hermes"; the venv has no requirements file | Task 3 copies the OAuth state, rebuilds the venv from `pip freeze`, and patches all seven strings plus `set-github-oauth.sh` |
+| D4 | §4.3 row 9 (anything else → human) | Gateway calls of **non-money** QuickBooks tools arrive with server `quickbooks` and no row approves them, so every QuickBooks read would ask Yaakov | Task 10 adds row **2b**: server `quickbooks` and not money → approve |
+| D5 | §4.3 row 3: server starts with `park:` → approve | Would auto-approve risky DocuSign (or any future gateway server) calls that `DEFAULT_RISKY_TOOLS` parks today | Row 3 is `server equals park:quickbooks`; other gateway servers fall to row 9 (human) until they get a rule |
+| D6 | §4.3 rows 4–7 tool names | Hermes 0.22.2 names: `todo_list` (not `todo*`), `image_generate` (not `image_gen*`), `process_manage`, `cronjob_manage`; there is **no** `send_message` tool; `memory` is one tool. Hooks see the canonical name | Rows use the real names (legacy aliases added to the deny row). Row 5 is dropped. Row 6 (browser) is written when group (c) opens (item 8): until then browser calls hit row 9 (human) |
+| D7 | §4.3 "rule 1 = today's rule 1, narrowed" | Today's rule 2 regex starts with `^(quickbooks__)?`, so it cannot match `mcp__wh__…` names | Row 1 gets its own regex `^mcp__wh__quickbooks__(create\|update\|delete)[_-](…12 types…)$` |
+| D8 | §4.3 "`preview_pipeline` per row" | `preview_pipeline` cannot set `/request/server` (refused as an extra property); server-based rows never match in a preview | Task 10 proves every row offline with a small condition evaluator in the tests, previews the agent/tool half, and Task 13 reads the live audit trace (`request_approval_block.evaluated`) for each row it exercises |
+| D9 | §4.2 "block if another `pre_tool_call` callback is registered **after** durable-park" | Hermes merges `modify` directives from **every** callback over the original args, whatever the order; shell hooks and outbound webhooks also land in the same list | The hook blocks every non-exempt call while **any** other `pre_tool_call` callback is registered, unless it is named in the new setting `observer_hooks` (default empty). Checked on every call |
+| D10 | §4.2 step 5 `Allow` | The SDK returns `Allow` in async mode only when `create` already answers `approved`. Not yet proven for withHuman's pipeline approve | Task 13 step 2 probes it live before go-live and **stops** if `create` answers `pending` |
+| D11 | §4.2 step 5 `Pending` / "already waiting" | A request id stored on a row that is then cancelled makes the sweep re-wake it every 5 min; a wake that lands before the hook's own transition would inject a stray APPROVED/DENIED | Instant decisions store the request id only in the final `parked → allowed|refused` transition; the "already waiting" cancel keeps the id in `note` only; `set_request_id` becomes a CAS. "One waiting park per chat" counts only rows that have a request id or are past `parked` |
+| D12 | §4.2 `ledger_retention_days` "new setting" | The sweep is stdlib-only and cannot read plugin settings | Sweep flag `--retention-days` (default 30), passed by the wrapper `configure_hermes.sh` writes |
+| D13 | §4.2 breaker "3 consecutive transport failures" | The SDK turns transport, credential and protocol failures all into `Deny(status="error")` | The breaker counts every `Deny` with status `error`; its state is a status file the sweep alerts on |
+| D14 | §4.2 `context.platform` | Not in the ledger or the hook kwargs; session keys look like `agent:main:telegram:dm:<id>` | `platform` = third `:` field of `session_key` (`"unknown"` otherwise), so `build_call` stays a pure function of the row (the executor rebuilds the identical request) |
+| D15 | §8 item 7 `apply --allow <toolset>...` | `configure_hermes.sh` and `hermes_mcp.sh` call `apply` with no flags; a flag would be silently dropped on their next run (re-lock) | The allowed list is a root-owned file `/etc/durable-park/allowed_toolsets`; `apply` and `check` read it. Toolsets that need Phase 2 are refused |
+| D16 | §8 item 7 "`check` at every gateway start" | No gateway-start plugin hook exists; a plugin that raises in `register` is unloaded (fails **open**); a failing `ExecStartPre` takes Telegram/Teams and the sweep down | A user-unit drop-in runs the check as `ExecStartPre=-` and writes `tool_policy_status.json`; the plugin fails closed at load when that report is missing, failed or older than 15 min; the sweep alerts |
+| D17 | §4.2 "parallel tool calls run the hook in parallel" | Hermes serialises the `pre_tool_call` stage of a batch behind one lock | No code change; latency adds up per call (the spec's per-call estimate stands) |
+| D18 | §5 #6/#7 test with `web_search` and "a denied tool" | Under the current lockdown only `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` are reachable | Instant approve is proven with a QuickBooks read; instant deny with a temporary pipeline revision that denies one QuickBooks read, then rolled back |
