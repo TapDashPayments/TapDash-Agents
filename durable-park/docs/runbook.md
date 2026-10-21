@@ -131,6 +131,14 @@ The approval was used but no result was recorded (gateway crash, session expired
    `select args_json from parks where park_id='P-XXXXXXXX'`.
 2. If it happened: nothing to do. If not: ask the bot again; that is a new park and a new approval.
 
+### Parked row never got an approval request
+
+`durable-park: P-XXXXXXXX (<tool>) never got an approval request; cancelled after 10 minutes`
+
+The gateway stopped between saving the park and asking withHuman. The sweep cancelled the row (note `no approval
+request after 10 minutes (cancelled by the sweep)`); the action did not run and was never put to an approver. Ask the
+bot again (a new park and a new approval). If this repeats, check why the gateway restarts (`journalctl --user -u hermes-gateway`).
+
 ### Form checker not working
 
 `durable-park ALERT: the form checker is not working - <reason>. Risky actions will be refused until it is fixed.`
@@ -175,19 +183,11 @@ logged.
 
 ### A chat says "already waiting" but nothing is pending in withHuman
 
-Probably a `parked` row without a request id (the gateway died between saving and asking; known v2 gap). Check
-[waiting rows](#health-check); if the row has no `request_id`, cancel it by hand (safe: such a row never reached withHuman):
-
-```sh
-python3 - <<'PY'
-import sqlite3, datetime
-c = sqlite3.connect("/home/hermes/.hermes/plugin-data/durable-park/ledger.db")
-now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-n = c.execute("update parks set status='cancelled', note='cancelled by hand: no request', updated_at=? "
-              "where status='parked' and request_id is null", (now,)).rowcount
-c.commit(); print(n, "row(s) cancelled")
-PY
-```
+Probably a `parked` row without a request id (the gateway died between saving and asking). The sweep cancels such a
+row by itself once it is 10 minutes old and prints
+`durable-park: P-XXXXXXXX (<tool>) never got an approval request; cancelled after 10 minutes`; the chat is free
+again after the next sweep (every 5 minutes). Nothing was ever sent to withHuman for it, so there is nothing to
+approve or deny; ask the bot again. Younger than 10 minutes: wait. To look at one by hand, see [waiting rows](#health-check).
 
 ### The bot never got the decision
 

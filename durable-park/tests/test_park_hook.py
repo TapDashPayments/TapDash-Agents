@@ -442,3 +442,17 @@ def test_replay_of_an_already_parked_call_is_not_rechecked(env):
     again = call(checked_env(env, lambda tool: None), tool, args=GOOD_PAY)
     assert again == first
     assert len(env.provider.requests) == 1
+
+
+def test_request_id_not_attached_to_a_row_the_sweep_cancelled(env, monkeypatch):
+    real = Ledger.set_request_id
+
+    def sweep_got_there_first(self, park_id, request_id):
+        assert self.transition(park_id, "parked", "cancelled", note="cancelled by the sweep")
+        return real(self, park_id, request_id)
+
+    monkeypatch.setattr(Ledger, "set_request_id", sweep_got_there_first)
+    result = call(env.hook, "mcp__wh__quickbooks__create_payment")
+    assert result == {"action": "block", "message": COULD_NOT_OPEN}
+    assert env.provider.only().status == "cancelled"
+    assert env.ledger.list_by_status("parked") == []

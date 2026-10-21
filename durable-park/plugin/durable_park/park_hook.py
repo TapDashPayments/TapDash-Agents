@@ -142,9 +142,19 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
                 park_id = None
                 return _block(ALREADY_WAITING_MESSAGE.format(park_id=earlier.park_id))
 
-            verdict = gate_factory().check(build_call(row))
+            gate = gate_factory()
+            verdict = gate.check(build_call(row))
             if isinstance(verdict, Pending):
-                ledger.set_request_id(row.park_id, verdict.request_id)
+                if not ledger.set_request_id(row.park_id, verdict.request_id):
+                    # The row left `parked` (the sweep cancelled it) while the request was being opened:
+                    # withdraw the request so nobody is asked to approve a call that will never run.
+                    log.warning("approval request for %s could not be attached; cancelling it", row.park_id)
+                    try:
+                        gate.client.cancel(verdict.request_id)
+                    except Exception as exc:  # noqa: BLE001 - the call is blocked either way
+                        log.error("could not cancel orphan request for %s (%s)", row.park_id, type(exc).__name__)
+                    park_id = None
+                    return _block(COULD_NOT_OPEN_MESSAGE)
                 request_opened = True
                 log.info("parked %s tool=%s", row.park_id, tool)
                 return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool))

@@ -4,6 +4,7 @@
 * a ``parked`` row with an approval request          -> post a wake (a decision may have been missed)
 * an ``approved`` row the chat was not told about    -> post a wake (the first injection failed)
 * a denied/expired/cancelled row with a request that the chat was not told about -> post a wake
+* a ``parked`` row with no approval request older than 10 minutes -> cancel it and print one alert line
 * an ``executing`` row older than 10 minutes         -> mark ``unknown`` and print one alert line
 * the gateway's form-check report (``formcheck_status.json`` next to the ledger) missing, older than
   75 minutes or failing on two sweeps in a row        -> print one alert line (and one when it recovers)
@@ -33,6 +34,7 @@ from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
 
 DEFAULT_SECRET_FILE = "/etc/durable-park/wake_secret"
 STALE_EXECUTING = timedelta(minutes=10)
+ORPHAN_PARK = timedelta(minutes=10)  # a parked row with no approval request this old will never get one
 FORMCHECK_STATUS = "formcheck_status.json"
 FORMCHECK_STATE = "formcheck_alert_state.json"
 FORMCHECK_STALE = timedelta(minutes=75)  # the gateway re-checks every 30 minutes
@@ -83,6 +85,25 @@ def _mark_stale_executing(ledger, now: datetime) -> None:
         if ledger.transition(row.park_id, "executing", "unknown", note="no result recorded after 10 minutes"):
             print(f"durable-park: {row.park_id} outcome UNKNOWN \u2014 check {row.tool} in the sandbox "
                   "before retrying", flush=True)
+
+
+def _cancel_orphan_parks(ledger, now: datetime) -> None:
+    """Cancel ``parked`` rows that never got an approval request (the gateway died before asking) so they stop
+    blocking their chat. Never reached withHuman, so nothing can be approved later. The CAS also loses
+    cleanly to a hook that attaches a request at the same moment (``set_request_id`` needs ``parked``)."""
+    for row in ledger.list_by_status("parked"):
+        if row.request_id:
+            continue
+        try:
+            created = datetime.strptime(row.created_at, _STAMP).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if now - created <= ORPHAN_PARK:
+            continue
+        if ledger.transition(row.park_id, "parked", "cancelled",
+                             note="no approval request after 10 minutes (cancelled by the sweep)"):
+            print(f"durable-park: {row.park_id} ({row.tool}) never got an approval request; "
+                  "cancelled after 10 minutes", flush=True)
 
 
 def _wake_targets(ledger) -> list[str]:
@@ -191,6 +212,7 @@ def main(argv=None) -> int:
     ledger = _load_ledger_module().Ledger(args.ledger)
 
     _mark_stale_executing(ledger, datetime.now(timezone.utc))
+    _cancel_orphan_parks(ledger, datetime.now(timezone.utc))
     try:
         _formcheck_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the self-check alert must never stop the sweep

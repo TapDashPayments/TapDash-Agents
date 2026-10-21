@@ -220,10 +220,13 @@ class Ledger:
                 f"SELECT * FROM parks WHERE status IN ({marks}) ORDER BY created_at, rowid", statuses).fetchall()
         return [_row(r) for r in rows]
 
-    def set_request_id(self, park_id: str, request_id: str) -> None:
+    def set_request_id(self, park_id: str, request_id: str) -> bool:
+        """Attach the approval request to a still-``parked`` row that has none; True when it was attached."""
         with self._connect() as con:
-            con.execute("UPDATE parks SET request_id=?, updated_at=? WHERE park_id=?",
-                        (request_id, _now(), park_id))
+            cur = con.execute(
+                "UPDATE parks SET request_id=?, updated_at=? WHERE park_id=? AND status='parked' AND request_id IS NULL",
+                (request_id, _now(), park_id))
+            return cur.rowcount == 1
 
     def mark_notified(self, park_id: str) -> None:
         now = _now()

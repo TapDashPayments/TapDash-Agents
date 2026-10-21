@@ -131,7 +131,7 @@ flowchart LR
 | approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row. |
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
 | bridge | `bridge/app.py` | Answers withHuman's pipeline: "is this exact gateway call an approved park?" |
-| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, alerts when the form checker is broken. |
+| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id after 10 minutes, alerts when the form checker is broken. |
 | tunnel | `deploy/tunnel/` | Runs Intuit's QuickBooks MCP server behind the withHuman gateway (sandbox). |
 
 **The withHuman entry pipeline** (configured in the withHuman app, not in this repo; as of October 2026,
@@ -280,7 +280,7 @@ tool's rules work, and writes `formcheck_status.json`. The sweep alerts once if 
 | Another park is still waiting in the chat | New risky call blocked: "already waiting". A park can wait up to 168 h, and the chat cannot start another risky action until it is decided. | Decide the waiting one |
 
 Known gaps (see the [backlog](backlog.md)): an inject Hermes accepted but
-dropped is never retried; a `parked` row without a request id blocks its chat until handled by hand; the bridge's
+dropped is never retried; the bridge's
 replay store is not tied to the withHuman request id.
 
 ## 6. Where everything runs

@@ -54,6 +54,13 @@ class World:
             self.ledger.mark_notified(row.park_id)
         return row.park_id
 
+    def backdate(self, park_id, minutes):
+        con = sqlite3.connect(self.ledger.path, isolation_level=None)
+        try:
+            con.execute("UPDATE parks SET created_at=? WHERE park_id=?", (stamp(minutes), park_id))
+        finally:
+            con.close()
+
     def post(self, park_id, secret, url=DEFAULT_URL):
         self.posted.append((park_id, secret, url))
         outcome = self.fail.get(park_id, 202)
@@ -69,6 +76,28 @@ class World:
 @pytest.fixture
 def world(tmp_path):
     return World(tmp_path)
+
+
+def test_orphan_parked_row_is_cancelled_after_ten_minutes(world, monkeypatch, capsys):
+    park_id = world.row("parked", request_id=None)
+    world.backdate(park_id, 11)
+    assert world.main(monkeypatch) == 0
+    row = world.ledger.get(park_id)
+    assert row.status == "cancelled"
+    assert row.note == "no approval request after 10 minutes (cancelled by the sweep)"
+    assert (f"durable-park: {park_id} ({TOOL}) never got an approval request; cancelled after 10 minutes"
+            in capsys.readouterr().out)
+
+
+def test_young_or_requested_parked_rows_are_left_alone(world, monkeypatch, capsys):
+    young = world.row("parked", request_id=None)
+    world.backdate(young, 9)
+    requested = world.row("parked")
+    world.backdate(requested, 60)
+    world.main(monkeypatch)
+    assert world.ledger.get(young).status == "parked"
+    assert world.ledger.get(requested).status == "parked"
+    assert "never got" not in capsys.readouterr().out
 
 
 def test_sweep_rewakes_unnotified_approved(world, monkeypatch, capsys):

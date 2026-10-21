@@ -128,6 +128,18 @@ def test_set_request_id_and_mark_notified(tmp_path):
     assert got.notified_at is not None
 
 
+def test_set_request_id_only_once_and_only_while_parked(tmp_path):
+    ledger = make_ledger(tmp_path)
+    row = park(ledger)
+    assert ledger.set_request_id(row.park_id, "r1") is True
+    assert ledger.set_request_id(row.park_id, "r2") is False
+    assert ledger.get(row.park_id).request_id == "r1"
+    other = park(ledger, tool_call_id="call-2")
+    assert ledger.transition(other.park_id, "parked", "cancelled")
+    assert ledger.set_request_id(other.park_id, "r3") is False
+    assert ledger.get(other.park_id).request_id is None
+
+
 def test_find_executing_match_and_gateway_pass_once(tmp_path):
     ledger = make_ledger(tmp_path)
     args = {"amount": 5, "to": "x"}
