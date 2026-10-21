@@ -188,7 +188,9 @@ The sweep alerts once when the report is missing or failed, and once (`durable-p
 again.`) when it passes.
 
 The plugin also writes its own verdict at load, `tool_policy_load.json` next to the ledger (`ok`, `problem`,
-`checked_at`), because the sweep cannot judge a report's age. The sweep alerts once when `ok` is false:
+`checked_at`), because the sweep cannot judge a report's age. Only the gateway process (`hermes gateway run`) writes
+it: the cron sweep and CLI runs fail closed on their own but never overwrite the gateway's verdict. The sweep alerts
+once when `ok` is false:
 
 `durable-park ALERT: the tool policy check did not pass when the plugin loaded — <problem>. Every tool call is refused until an admin fixes it and restarts the gateway.`
 
@@ -202,7 +204,7 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 | `the tool policy check did not write a report` | The check was killed (the 60 s timeout), crashed, or could not write its report; the wrapper then wrote this failing report itself | `journalctl --user -u hermes-gateway` for `tool_policy_check:` lines; run `deploy/hermes_tool_policy.py check --status-file /tmp/x.json` by hand as `hermes` in Hermes's Python and read the error |
 | `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
 | a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
-| `stale` | The gateway started without the drop-in (the report is older than 15 minutes), **or** Hermes re-ran the plugin's `register` more than 15 minutes after the start (`discover_plugins(force=True)`, for example a plugin reload), so the old report aged out: every call is refused although the report says ok | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). This case is only visible through the `tool_policy_load.json` alert above |
+| `stale` | The report was written more than 15 minutes **before the gateway process started** (the gateway started without the drop-in, so no fresh report). The gateway's uptime no longer matters, and a plugin reload inside the running gateway stays fine. A process started more than 15 minutes after the last gateway start (for example a manual `hermes` run) is refused, which is correct: the start check did not run for it (it fails closed but does not write the verdict) | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). Visible through the `tool_policy_load.json` alert above |
 
 Before go-live, time the check once on the VM (`time bash deploy/tool_policy_check.sh` as `hermes`): it must
 finish well under 60 s, because `ExecStartPre` counts toward `TimeoutStartSec`.
@@ -210,7 +212,7 @@ finish well under 60 s, because `ExecStartPre` counts toward `TimeoutStartSec`.
 Fix it, then `systemctl --user restart hermes-gateway` (only when nothing is waiting or running): the check runs
 again at the start. If the report directory is not writable the script cannot replace an old report: it logs
 `durable-park: tool policy report could not be refreshed (directory not writable?)` (journal) and the plugin's
-15-minute staleness check refuses calls once the old report ages out. `systemctl --user show hermes-gateway -p ExecStartPre` shows the drop-in is active.
+15-minute staleness check refuses calls in any process started after the old report aged out. `systemctl --user show hermes-gateway -p ExecStartPre` shows the drop-in is active.
 
 ### withHuman could not be reached
 

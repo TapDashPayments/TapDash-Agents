@@ -155,7 +155,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
 | `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json` and `formcheck_status.json` are written next to it. |
-| `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or older than 15 minutes: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
+| `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
 | `risky_tools` | (retired) | Renamed `form_checked_tools`. If still set, a warning `risky_tools is renamed form_checked_tools; ignoring it` is logged and its value is not used. |
 
 `exempt_tools`, `form_checked_tools` and `observer_hooks` must each be a list of strings (a lone string counts as a
@@ -173,10 +173,13 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
    script both ensure the gateway starts), writing a failing report itself when there is no Python or the check left
    no new report.
 2. Hermes loads the plugin. `register` validates the settings, then reads that report. A problem (missing, failed,
-   older than 15 minutes) registers the fail-closed hook (`POLICY_MESSAGE`; only the default exempt tools pass, never the configured list), the wake
+   written more than 15 minutes before this process started) registers the fail-closed hook (`POLICY_MESSAGE`; only the default exempt tools pass, never the configured list), the wake
    dropper, and an executor that refuses without touching the ledger; nothing else is opened.
-   Either way the plugin writes its own verdict, `tool_policy_load.json` next to the ledger (`ok`, `problem`,
-   `checked_at`; atomic, never raises).
+   Age is judged against this process's own start (`PROCESS_START`, set at import), not the wall clock, so the
+   gateway's uptime does not matter. Every Hermes process loads plugins (the gateway, the 5-minute cron sweep, CLI
+   runs) and each fails closed on its own; only the gateway (`is_gateway_process()`: argv has `gateway run`) writes
+   its verdict, `tool_policy_load.json` next to the ledger (`ok`, `problem`, `checked_at`; atomic, never raises).
+   Other processes log `tool policy: load verdict not written (not the gateway process)` once and write nothing.
 3. Otherwise the ledger opens and the normal hook, wake handler and executor register.
 
 The sweep reads the same report and alerts once on a failure and once on recovery. The report is written only at
@@ -394,7 +397,7 @@ form-checked tool's rules work, and writes `formcheck_status.json`. The sweep al
 | Bridge cannot match the gateway call (args changed, bridge down, bad signature) | withHuman asks a person instead. Never auto-approves. | An approver decides |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
 | Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
-| Tool policy report missing, failed or older than 15 minutes at start | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
+| Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
 | Ledger cannot be opened at start | Every tool call except the exempt ones is blocked; wakes are dropped; no executor tool. | Fix the ledger file |
 | A plugin setting has the wrong type, or loading fails after the ledger opened | Every tool call except `parked_action_execute` and `clarify` is blocked; wakes are dropped. | Fix the setting ([runbook](runbook.md#plugin-settings)), restart the gateway |
 | Another park is still waiting in the chat | A new call that withHuman sends to a person is blocked: "already waiting", and its request is cancelled. Calls withHuman answers at once still run or are refused. A park can wait up to 168 h. | Decide the waiting one |

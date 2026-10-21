@@ -1,5 +1,6 @@
 import hashlib
 import re
+import sys
 from types import SimpleNamespace
 
 import httpx
@@ -21,6 +22,7 @@ from durable_park.formcheck import FormChecker
 from durable_park.park_hook import DEFAULT_FORM_CHECKED_TOOLS, make_pre_tool_call
 
 REAL_POLICY_PROBLEM = policy_problem
+REAL_IS_GATEWAY = durable_park.is_gateway_process if hasattr(durable_park, "is_gateway_process") else None
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +30,13 @@ def _policy_passes(monkeypatch):
     """The register tests are about everything else: a passing tool policy report is assumed (the tests of the
     report itself put the real ``policy_problem`` back)."""
     monkeypatch.setattr(durable_park, "policy_problem", lambda path, now, max_age=None: None)
+
+
+@pytest.fixture(autouse=True)
+def _is_the_gateway(monkeypatch):
+    """The register tests run as the gateway process (the only one that writes the load verdict); the tests of
+    that distinction put their own answer back."""
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: True)
 
 
 SESSION_KEY = "agent:main:telegram:dm:42"
@@ -1158,6 +1167,33 @@ def test_policy_problem(tmp_path):
     assert policy_problem(str(path), now) is not None  # only a real true passes
 
 
+def test_policy_problem_is_judged_against_process_start_not_wall_clock(tmp_path):
+    path = tmp_path / "status.json"
+    start = datetime.now(timezone.utc) - timedelta(hours=3)  # a long-lived gateway
+    now = datetime.now(timezone.utc)
+    write_policy_report(path, age_minutes=180)  # written at the gateway start, 3 hours ago
+    assert policy_problem(str(path), now, process_start=start) is None  # uptime does not matter
+    write_policy_report(path, age_minutes=180 + 14)  # written 14 minutes before this process started
+    assert policy_problem(str(path), now, process_start=start) is None
+    write_policy_report(path, age_minutes=180 + 16)  # 16 minutes before: the start check did not run for it
+    assert policy_problem(str(path), now, process_start=start) == "stale"
+    write_policy_report(path, age_minutes=60)  # written after this process started is fine
+    assert policy_problem(str(path), now, process_start=start) is None
+    write_policy_report(path, age_minutes=-30)  # future-dated beyond a minute is still stale
+    assert policy_problem(str(path), now, process_start=start) == "stale"
+
+
+def test_policy_problem_defaults_to_this_process_start(tmp_path, monkeypatch):
+    path = tmp_path / "status.json"
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(durable_park, "PROCESS_START", now - timedelta(minutes=18))
+    write_policy_report(path, age_minutes=18)  # the 07:57 case: 18 minutes after the gateway start
+    assert policy_problem(str(path), now) is None
+    monkeypatch.setattr(durable_park, "PROCESS_START", now)
+    write_policy_report(path, age_minutes=16)
+    assert policy_problem(str(path), now) == "stale"
+
+
 def test_policy_message_text():
     assert POLICY_MESSAGE == ("durable-park: the tool policy check did not pass at gateway start; tool calls are "
                               "refused until an admin fixes it.")
@@ -1271,3 +1307,48 @@ def test_the_load_verdict_write_never_raises(tmp_path, monkeypatch):
     ctx = FakeCtx(data)
     register(ctx)  # must not raise, and must still fail closed
     assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c")["action"] == "block"
+
+
+def test_is_gateway_process_detects_gateway_run_in_argv(monkeypatch):
+    real = REAL_IS_GATEWAY
+    for argv, expected in [
+        (["hermes", "gateway", "run"], True),
+        (["/x/python", "-m", "hermes_cli.main", "-p", "leaddesk", "gateway", "run", "--replace"], True),
+        (["hermes", "cron", "tick"], False),
+        (["hermes", "config", "set", "gateway", "x"], False),
+        (["hermes", "gateway", "status"], False),
+        (["hermes", "gateway"], False),
+        ([], False),
+    ]:
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.setenv("HERMES_SUPERVISED_CHILD", "1")  # inherited env must not make a cron process the gateway
+        assert real() is expected, argv
+
+
+@pytest.mark.parametrize("gateway", [True, False])
+def test_only_the_gateway_writes_the_load_verdict(tmp_path, monkeypatch, caplog, gateway):
+    monkeypatch.setattr(durable_park, "policy_problem", lambda path, now, max_age=None: "stale")
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: gateway)
+    monkeypatch.setattr(durable_park, "_logged_not_gateway", False)
+    data = tmp_path / "data"
+    data.mkdir()
+    ctx = FakeCtx(data)
+    with caplog.at_level("INFO", logger="durable_park"):
+        register(ctx)
+        register(FakeCtx(data))
+    assert (data / "tool_policy_load.json").exists() is gateway
+    # either way this process still fails closed
+    assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c")["action"] == "block"
+    msgs = [r.getMessage() for r in caplog.records
+            if r.getMessage() == "tool policy: load verdict not written (not the gateway process)"]
+    assert len(msgs) == (0 if gateway else 1)  # once per process
+
+
+def test_a_non_gateway_process_does_not_overwrite_the_gateways_verdict(tmp_path, monkeypatch):
+    monkeypatch.setattr(durable_park, "policy_problem", lambda path, now, max_age=None: "stale")
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: False)
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "tool_policy_load.json").write_text('{"ok": true, "problem": null, "checked_at": "2026-10-21T07:00:00Z"}')
+    register(FakeCtx(data))
+    assert _load_verdict(data)["ok"] is True
