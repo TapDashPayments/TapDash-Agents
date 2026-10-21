@@ -45,7 +45,8 @@ What that means today:
   a Hermes upgrade, a hijack), it could read everything in `/etc/durable-park/`, including the QuickBooks client
   secret, the refresh token and the withHuman tunnel token in `tunnel.env`; change the code in `/opt/durable-park`;
   forge ledger rows; and call QuickBooks directly, **bypassing withHuman**.
-- Even so, durable-park asks withHuman about every tool call except `parked_action_execute` and `clarify`, and
+- Even so, durable-park asks withHuman about every tool call except `parked_action_execute`, `clarify` and the two
+  read-only Tool Search catalog tools (`tool_search`, `tool_describe`, [section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)), and
   withHuman's pipeline decides which need a person; with the lockdown the only non-QuickBooks tool the agent reaches
   is `clarify`. It is an approval gate, not a boundary, while the agent could reach a terminal.
 - Yaakov accepted this on 2026-10-20 for the exploration phase, on a test VM with a QuickBooks **sandbox** company.
@@ -132,7 +133,7 @@ flowchart LR
 | Part | Code | What it does |
 |---|---|---|
 | plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook and middleware registries on every call for other plugins' `pre_tool_call` hooks and `tool_request` / `tool_execution` middleware (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
-| park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`): checks the form (form-checked tools only), saves the call, and asks withHuman once. An instant approval lets the tool run (row `allowed`); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
+| park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); checks the form (form-checked tools only), saves the call, and asks withHuman once. An instant approval lets the tool run (row `allowed`); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
 | ledger | `plugin/durable_park/ledger.py` | SQLite record of every tool call that was asked about and its state. The single source of truth. |
 | wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. |
@@ -150,7 +151,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 
 | Setting | Default | What it does |
 |---|---|---|
-| `exempt_tools` | `["parked_action_execute", "clarify"]` | Tools that are never asked about: anything listed here runs with no approval and no ledger row. The list replaces the default, so keep `parked_action_execute` in it (a warning is logged if it is missing: approved parks could not run). Any other name is logged as an ERROR (`exempt_tools lists <name>: it runs with no approval and no ledger row`); an MCP tool (`mcp__...`) or a name a `form_checked_tools` pattern matches is refused as a bad setting (every call refused, see below). Also used by the fail-closed hook when the ledger cannot open. |
+| `exempt_tools` | `["parked_action_execute", "clarify", "tool_search", "tool_describe"]` | Tools that are never asked about: anything listed here runs with no approval and no ledger row. The list replaces the default, so keep `parked_action_execute` in it (a warning is logged if it is missing: approved parks could not run). Any other name is logged as an ERROR (`exempt_tools lists <name>: it runs with no approval and no ledger row`); an MCP tool (`mcp__...`), `tool_call` (Tool Search's tool runner: never exempt) or a name a `form_checked_tools` pattern matches is refused as a bad setting (every call refused, see below). Also used by the fail-closed hook when the ledger cannot open. |
 | `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
@@ -375,7 +376,9 @@ so no approver is asked about a call QuickBooks would reject. Details and safety
 
 ```mermaid
 flowchart TD
-  start["Tool call"] --> exempt{"Exempt?<br/>parked_action_execute, clarify"}
+  start["Tool call"] --> wrapper{"Named tool_call?<br/>a Tool Search wrapper Hermes<br/>could not unwrap"}
+  wrapper -->|"yes"| bwrapper["Block: tool_call refused<br/>(no row, nobody asked)"]
+  wrapper -->|"no"| exempt{"Exempt?<br/>parked_action_execute, clarify,<br/>tool_search, tool_describe"}
   exempt -->|"yes"| runs0["Tool runs<br/>(no row, nobody asked)"]
   exempt -->|"no"| foreign{"Another plugin hook that<br/>could change the arguments?"}
   foreign -->|"yes"| bforeign["Block: foreign hook<br/>(no row, nobody asked)"]
@@ -422,6 +425,40 @@ flowchart TD
 The background self-check (every 30 minutes, inside the gateway) proves the checker, the registry and every
 form-checked tool's rules work, and writes `formcheck_status.json`. The sweep alerts once if that report is missing, older than
 75 minutes, or failing on two sweeps in a row, and once when it recovers.
+
+## 4b. Hermes Tool Search: the bridge tools in the hook path
+
+Hermes's **Tool Search** (`tools.tool_search.enabled`, Hermes docs `website/docs/user-guide/features/tool-search.md`)
+hides every MCP and plugin tool behind three bridge tools Hermes synthesizes (never registers): `tool_search` and
+`tool_describe` read the session's own tool catalog, and `tool_call` runs a hidden tool. It cuts the schema tokens of
+the 142 QuickBooks tools from tens of thousands to a name listing. It is **off** until an admin turns it on
+([runbook](runbook.md#turn-on-tool-search)). What the park hook receives for each bridge tool, read in Hermes v0.22.3
+and re-run against the real code on the VM (2026-10-21):
+
+| The model calls | `pre_tool_call` receives | durable-park | Hermes code |
+|---|---|---|---|
+| `tool_search` | `tool_name: tool_search`, `args: {queries, limit}`, the call's own id | **Exempt** (`BRIDGE_READ_TOOLS`): no request, no row. It only reads the catalog of the session's own tools; it cannot invoke anything. | `tools/tool_search.py:438-492`, `model_tools.py:726-729` |
+| `tool_describe` | `tool_name: tool_describe`, `args: {names}` | **Exempt**, same reason | `tools/tool_search.py:495-541` |
+| `tool_call` with one valid entry | the **real tool name** (for example `mcp__wh__quickbooks__create_payment`), the entry's `arguments` as the model sent them (a JSON-string `arguments` is parsed to an object; nothing is type-fixed), the outer `tool_call`'s id | Judged exactly like a direct call: form check, one ledger row (`tool` is the real name, `args_digest` the real arguments), one withHuman request, parking. The row and the request are identical to a direct call's. | `agent/tool_executor.py:399-441`, `:460-466` (unwrap before the hook), `tools/tool_search_validation.py:139-170` |
+| `tool_call` Hermes cannot unwrap (a batch of two or more, unparsable `calls`, a core tool such as `clarify`, a `connectors__` name) | `tool_name: tool_call` and the raw `calls` | **Refused** with `BRIDGE_CALL_MESSAGE`, never exempt, no row, nobody asked. Hermes would re-resolve the wrapper later with the hook switched off (`model_tools.py:906-922`), so the wrapper must never pass. | `agent/tool_executor.py:417-422` |
+| `parked_action_execute` through the bridge | the real name | **Exempt**, as when called directly. | as above |
+
+- **The replay still works.** The executor dispatches with `ctx.dispatch_tool`, which is `registry.dispatch(name, args)`
+  (`hermes_cli/plugins.py:670-679`, `tools/registry.py:946-963`). Deferral only changes the tool list shown to the
+  model; every tool stays in the registry under its real name, so a deferred MCP tool is replayed like any other.
+- **Unchanged:** the form check (it reads the schema from the registry, not from the model's tool list), the bridge's
+  tool-name matching (`bridge.app.hermes_tool_name`; withHuman's own call still names the real tool), the ledger and
+  the sweep. One model call is one ledger row because a batch of local tools is rejected by Hermes (one entry per
+  `tool_call`), so no two real calls share an outer call id.
+- **`parked_action_execute` is deferred too** (it is a plugin tool). The model reaches it through `tool_describe` and
+  `tool_call`; the bridge's description lists its exact name. The wake message is unchanged.
+- **The tool policy check judges two lists** (`deploy/hermes_tool_policy.py`, `tool_problems`): the *catalog* (every
+  tool the session can reach, which `tool_call` can invoke) and what the model *sees*. Only the allowed names may be in
+  the catalog (a bridge name there is a leak: Hermes never registers one); the visible list may add all three bridge
+  tools or none. Judging only the visible list would let a forbidden tool hide behind the bridge. The constants
+  (`BRIDGE_TOOL_NAMES` in the script, `BRIDGE_TOOLS` in `park_hook.py`) are pinned equal by a test.
+- `exempt_tools` may not list `tool_call` (a bad setting: every call is refused), and the hook itself drops it from
+  any exempt list it is given.
 
 ## 5. When things go wrong
 
@@ -474,7 +511,8 @@ replay store is not tied to the withHuman request id.
   `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
   `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`.
 - Since 2026-10-21 03:16 UTC the v1 lockdown is applied (`deploy/hermes_tool_policy.py`: tools limited to
-  `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`; 58 platform keys, `check` ok) and Hermes's own
+  `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`, plus Hermes's three Tool Search bridge tools once an admin turns
+  tool search on ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); 58 platform keys, `check` ok) and Hermes's own
   approvals are off (`approvals.mode: off`). `gateway.strict: true` and `gateway.trust_recent_files: false` are set;
   with passwordless sudo they do not protect the ledger. Re-running `deploy/configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies this state and restarts the gateway, so the "no parked/approved/executing row"

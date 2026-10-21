@@ -17,6 +17,11 @@ Hermes knows what to re-verify:
   middleware registry ``ctx._manager._middleware`` (dict of lists keyed by kind, hermes_cli/plugins.py:1183,
   filled unwrapped by ``register_middleware`` at :937-952) for ``tool_request`` / ``tool_execution``
   middleware, which runs after ``pre_tool_call`` (agent/agent_runtime_helpers.py:2619-2624);
+- Tool Search (``tools.tool_search.enabled: on``, checked against v0.22.3): ``pre_tool_call`` gets the REAL tool name
+  and the entry's raw arguments for a single-entry ``tool_call`` (agent/tool_executor.py:399-441, :460-466), the
+  wrapper itself otherwise; the bridge tools are ``tool_search`` / ``tool_describe`` / ``tool_call``
+  (tools/tool_search_catalog.py ``BRIDGE_TOOL_NAMES``); ``tool_call`` reaches only the session's own catalog
+  (model_tools.py:743) and ``handle_function_call`` re-resolves a wrapper with the hook off (model_tools.py:906-922);
 - MCP tool-error wording the executor classifies as failed/unknown (tools/mcp_tool_handlers.py, executor R15),
   and the display failure heuristic (agent/display.py:999-1037).
 """
@@ -35,6 +40,7 @@ DEPENDS_ON = (
     "ctx.register_tool",
     "ctx._manager.iter_hook_callbacks('pre_tool_call') (hermes_cli/plugins_dispatch.py:523)",
     "ctx._manager._middleware['tool_request'/'tool_execution'] (hermes_cli/plugins.py:1183, :937-952)",
+    "Tool Search bridge: pre_tool_call sees the real tool for a single-entry tool_call (agent/tool_executor.py:399-441)",
     "MCP tool-error wording (tools/mcp_tool_handlers.py; executor failed/unknown classification)",
 )
 

@@ -49,3 +49,10 @@ README) so it never depends on Hermes's Python environment.
   check still runs on the raw arguments and the self-check alerts.
 - One status file is shared by all Hermes processes that have the form-checked tools (last writer wins).
 - No per-chat cap on retries after an invalid call (Hermes's own turn limits apply).
+
+## With Hermes Tool Search on
+
+A `tool_call` that wraps a form-checked tool reaches the hook already unwrapped (the real tool name and the model's
+arguments), so it is checked exactly like a direct call, against the rules read from the registry (not from the
+model's tool list, which Tool Search shrinks to the bridge tools). A `tool_call` Hermes could not unwrap never gets
+this far: the hook refuses it first. See [architecture section 4b](architecture.md#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path).

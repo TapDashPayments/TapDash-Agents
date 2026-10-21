@@ -222,6 +222,10 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 | `the tool policy check did not write a report` | The check was killed (the 60 s timeout), crashed, or could not write its report; the wrapper then wrote this failing report itself | `journalctl --user -u hermes-gateway` for `tool_policy_check:` lines; run `deploy/hermes_tool_policy.py check --status-file /tmp/x.json` by hand as `hermes` in Hermes's Python and read the error |
 | `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
 | a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
+| `LEAK tool_call` (or `tool_search`, `tool_describe`) listed without a platform's own tool list changing | A tool registered under a bridge name (Hermes synthesizes the bridge, it never registers it), or `check` is an older version that does not know Tool Search while `tools.tool_search.enabled` is `on` | Update the code and re-run; with an old `check`, set the key back to `off` ([Turn on Tool Search](#turn-on-tool-search)) |
+| `BRIDGE incomplete: <names> missing` | Only some of the three bridge tools are visible | A Hermes change; read `tools/tool_search.py` `bridge_tool_schemas` and `compat.py` |
+| `MISSING parked_action_execute` | The executor is not reachable: not in the tool list and, with Tool Search on, not behind a complete bridge | Check the plugin loaded (`durable-park loaded`), then the two rows above |
+| `LEAK <other name>` while Tool Search is on | The tool is in the session's catalog even if the model's list hides it behind the bridge: `tool_call` could run it | Remove it as for any other leak (`apply`, then `check`) |
 | `stale` | The report was written more than 15 minutes **before the gateway process started** (the gateway started without the drop-in, so no fresh report). The gateway's uptime no longer matters, and a plugin reload inside the running gateway stays fine. A process started more than 15 minutes after the last gateway start (for example a manual `hermes` run) is refused, which is correct: the start check did not run for it (it fails closed but does not write the verdict) | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). Visible through the `tool_policy_load.json` alert above. **In a side process this is not an error:** the cron sweep (every 5 minutes) and CLI runs log `durable-park: tool policy report predates this side process (expected for the cron sweep and CLI runs); refusing every tool call in this process` once, at INFO (it does not reach `errors.log`; look for it in `agent.log`), and still refuse every tool call. Only the gateway's own `stale` is an ERROR |
 | `unreadable checked_at` | The report's `checked_at` is missing or not a `YYYY-MM-DDTHH:MM:SSZ` time. Not a normal aging effect: the report was edited, truncated or written by something else. **ERROR in every process** (the sweep and CLI runs too) | Re-run the start check: `systemctl --user restart hermes-gateway` (only when nothing is waiting or running) writes a fresh report; if it comes back, find what wrote the file |
 | `checked_at in the future` | The report is dated more than a minute ahead of this process's clock: clock skew (check `timedatectl`) or a hand-written report. **ERROR in every process**, never downgraded to the side-process INFO line | Fix the clock, then restart the gateway as above so the start check writes a fresh report |
@@ -344,6 +348,7 @@ The park hook answers a blocked call with one of these (the model sees them and 
 | `durable-park: another plugin hook could change tool arguments after approval (<names>)` | Something other than durable-park registered a `pre_tool_call` callback (a plugin's hook, a `config.yaml` `hooks:` shell hook or an outbound webhook) or `tool_request` / `tool_execution` middleware (or a registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-hook-observer_hooks)) |
 | `durable-park: no chat session; the tool call was refused` | The call came from outside a chat (e.g. `hermes chat -q`). | Use a chat |
 | `durable-park: no tool call id; the tool call was refused` | Hermes passed no session id or call id. | Check the Hermes version (`compat.py`) |
+| `durable-park: "tool_call" was NOT run: it reached the approval check still wrapped` | Tool Search is on and the model sent a `tool_call` Hermes could not unwrap: a batch of two or more entries, unparsable `calls`, a core tool such as `clarify`, a `connectors__` name. Nothing ran, no row, nobody asked. | Nothing; the message tells the model to send exactly one entry for a tool `tool_search` lists |
 | `durable-park: could not open an approval request` | An error in the hook (token file unreadable, arguments that are not strict JSON, ledger error; logged as `park hook failed for tool=...`), or durable-park could not load and refuses every call (a setting of the wrong type, logged as `durable-park setting <name> must be a list of strings`, or `durable-park failed to load`). | Read `~/.hermes/logs/agent.log` |
 
 ### A chat says "already waiting" but nothing is pending in withHuman
@@ -370,7 +375,7 @@ plugins:
   entries:
     durable-park:
       settings:
-        exempt_tools: [parked_action_execute, clarify]   # keep parked_action_execute
+        exempt_tools: [parked_action_execute, clarify, tool_search, tool_describe]   # keep parked_action_execute
         form_checked_tools: ['mcp__wh__quickbooks__(create|update|delete)[_-](payment|bill)']  # optional
         observer_hooks: []                                # module.qualname of reviewed hooks; live values: "Hooks reviewed so far"
         # tool_policy_status: /path/to/tool_policy_status.json   # default: next to the ledger; leave unset
@@ -381,9 +386,10 @@ plugins:
   except `parked_action_execute` and `clarify`; the log says `durable-park setting <name> must be a list of
   strings`. Fix it and restart.
 - `exempt_tools`: anything listed here runs with no approval and no ledger row. Keep it to
-  `parked_action_execute` and `clarify`. Any other name logs an ERROR at every gateway start; an MCP tool
-  (`mcp__...`) or a form-checked tool is refused (`durable-park setting exempt_tools must not list MCP or
-  form-checked tool '<name>'`) and every call is refused until it is removed.
+  `parked_action_execute`, `clarify` and Tool Search's two read-only catalog tools (`tool_search`, `tool_describe`).
+  Any other name logs an ERROR at every gateway start; an MCP tool (`mcp__...`), a form-checked tool or `tool_call`
+  is refused (`durable-park setting exempt_tools must not list MCP, form-checked or tool_call tool '<name>'`) and
+  every call is refused until it is removed.
 - `risky_tools` is retired: it was renamed `form_checked_tools`. If it is still set the gateway log says
   `risky_tools is renamed form_checked_tools; ignoring it`; move the value to `form_checked_tools` and delete it.
 - After the restart, `~/.hermes/logs/agent.log` shows `durable-park loaded: ... exempt tool(s), ... form-checked
@@ -481,6 +487,77 @@ that has to agree:
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
 
 The form check needs nothing: it reads each tool's rules from Hermes automatically.
+
+## Turn on Tool Search
+
+Hermes's Tool Search hides the 142 QuickBooks tool schemas (about 41-60k input tokens in every new chat) behind three
+bridge tools, `tool_search`, `tool_describe` and `tool_call`; the model sees a name listing and loads a schema only
+when it needs it. It is **off** on proto-agents until an admin turns it on. How it fits the hook:
+[architecture section 4b](architecture.md#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path).
+
+**The setting.** One key, in `~/.hermes/config.yaml`, set through Hermes's own CLI as the `hermes` user:
+
+```yaml
+tools:
+  tool_search:
+    enabled: "on"     # was "off"; leave threshold_pct, listing, listing_max_tokens and defer at their defaults
+```
+
+`hermes_tool_policy.py apply` (run by `configure_hermes.sh` and `hermes_mcp.sh`) keeps an `on` an admin set and writes
+`off` for anything else (including `auto`, which Hermes treats as `on`), so a later re-apply does not undo it. Turn it
+off with `hermes config set tools.tool_search.enabled off`.
+
+**Before:**
+
+1. The code of this change is live (a merged branch, [deploy a change](#deploy-a-change)), so the plugin exempts the
+   two catalog tools and refuses a `tool_call` wrapper and the policy check knows the bridge. With older code the
+   check fails (`LEAK tool_call`...) and every call is refused: safe, but nothing works until the code is live.
+2. No ledger row is `parked`, `approved` or `executing` (the query under [Open a toolset](#open-a-toolset), step 1; a
+   restart would strand it).
+
+**Switch on:**
+
+```sh
+cp -p ~/.hermes/config.yaml ~/.hermes/config.yaml.bak-tool-search-$(date -u +%Y%m%dT%H%M%SZ)
+~/.local/bin/hermes config set tools.tool_search.enabled on
+PY=$(python3 -I -c 'import glob,json,os; f=glob.glob(os.path.expanduser("~/.hermes/installs/*/facts.json"))[0]; print(json.load(open(f))["packages"]["venv"]["environment"]+"/bin/python")')
+$PY -I ~/tapdash-agents/durable-park/deploy/hermes_tool_policy.py check | grep -E '^(cli|telegram):|^tool policy'
+```
+
+`check` must end `tool policy: ok on <N> platform keys (...; Tool Search on: the bridge tools are visible on <N> of
+them)`, and the `cli:` line must read `clarify, tool_call, tool_describe, tool_search  (behind the Tool Search bridge:
+parked_action_execute...)`. If it fails, set the key back to `off` (or restore the backup) and read the problem in
+the table under [Tool policy check failed](#tool-policy-check-failed). Then `systemctl --user restart hermes-gateway`
+(the start runs the check again and the plugin refuses every call if it fails).
+
+**Verify** (new chat in Telegram or Teams; the live check, in this order):
+
+1. `~/.hermes/logs/agent.log` shows a `tool_search activated (tier 1)` (or `tier 2`) line `... deferred`; the gateway log has
+   `durable-park loaded` and no `tool policy check failed`.
+2. A read: ask for the QuickBooks company info. The model uses `tool_search` / `tool_describe` / `tool_call`. In the
+   ledger there is **one** row, for `mcp__wh__quickbooks__get_company_info`, and **no row** for `tool_search`,
+   `tool_describe` or `tool_call`:
+
+   ```sh
+   python3 - <<'PY'
+   import sqlite3
+   c = sqlite3.connect("file:/home/hermes/.hermes/plugin-data/durable-park/ledger.db?mode=ro", uri=True)
+   for r in c.execute("select tool, status, count(*) from parks group by tool, status order by tool"):
+       print(r)
+   PY
+   ```
+3. A money move (a sandbox `create_payment`): the chat gets `PARKED P-...: "mcp__wh__quickbooks__create_payment"`
+   (the real name), the withHuman request names the same tool and the same arguments, and the row's tool is that name.
+   Approve it: the wake arrives, the model finds `parked_action_execute` (through `tool_describe` and `tool_call`) and
+   the row ends `executed`. If the model cannot find it, turn tool search off again (an approved row stays approved
+   and runs after the restart) and report it.
+4. `~/.hermes/logs/errors.log` has no `reached the park hook still wrapped` line. One now and then is a malformed call
+   the model retried; a stream of them means the model keeps batching or naming core tools through `tool_call`:
+   look at the chat, not at durable-park.
+5. Cost: a new chat's input tokens (Hermes dashboard, session usage) are far lower than before.
+
+**Turn off:** with no row waiting or running, `hermes config set tools.tool_search.enabled off`, restart the gateway,
+run the [health check](#health-check). Nothing else changes.
 
 ## Open a toolset
 

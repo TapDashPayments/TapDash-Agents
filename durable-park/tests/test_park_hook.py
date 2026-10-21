@@ -1137,6 +1137,7 @@ def test_default_exempt_names_log_no_error(tmp_path, caplog):
     (["parked_action_execute", "clarify", "mcp__github__create_issue"], {}),
     (["parked_action_execute", "mcp__wh__quickbooks__search_customers"], {}),
     (["parked_action_execute", "clarify", "custom_pay"], {"form_checked_tools": [r"custom_pay"]}),
+    (["parked_action_execute", "clarify", "tool_call"], {}),  # Tool Search's tool_call runs hidden tools: never exempt
 ])
 def test_exempt_mcp_or_form_checked_name_is_refused_as_a_bad_setting(tmp_path, caplog, exempt, extra):
     ctx = FakeCtx(tmp_path / "data", {"exempt_tools": exempt, **extra})
@@ -1148,6 +1149,27 @@ def test_exempt_mcp_or_form_checked_name_is_refused_as_a_bad_setting(tmp_path, c
     assert hook(tool_name=exempt[-1], args={}, session_id="s", tool_call_id="c") == {
         "action": "block", "message": COULD_NOT_OPEN}
     assert any("exempt_tools" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+
+
+def test_fail_closed_modes_let_only_the_read_only_bridge_tools_through(tmp_path):
+    """Ledger unusable: every call is refused except the default exempt tools, which now include the two
+    read-only Tool Search catalog tools; tool_call is refused."""
+    ctx = FakeCtx(tmp_path, {"ledger_path": str(tmp_path)})
+    register(ctx)
+    hook = ctx.hooks["pre_tool_call"]
+    for name in ("tool_search", "tool_describe", "clarify", "parked_action_execute"):
+        assert hook(tool_name=name, args={}, session_id="s", tool_call_id="c") is None
+    assert hook(tool_name="tool_call", args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": COULD_NOT_OPEN}
+
+
+def test_default_exempt_setting_logs_no_error_for_the_bridge_read_tools(tmp_path, caplog):
+    ctx = FakeCtx(tmp_path / "data", {"exempt_tools": ["parked_action_execute", "clarify", "tool_search",
+                                                       "tool_describe"]})
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(ctx)
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert "parked_action_execute" in ctx.tools
 
 
 def test_exempt_default_form_checked_tool_is_refused(tmp_path):

@@ -8,7 +8,7 @@ later - and then the exact saved call runs once, in the same chat. It survives r
 Status: **v1 accepted on 2026-10-20**, QuickBooks **sandbox** only, on the test VM `proto-agents`
 ([acceptance results](docs/acceptance-2026-10-20.md)). The v1 tool lockdown was re-applied on proto-agents on 2026-10-21 03:16 UTC
 (the agent reaches only `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*`). durable-park asks withHuman about
-every tool call except `parked_action_execute` and `clarify`, and withHuman's pipeline decides which ones need a person
+every tool call except `parked_action_execute`, `clarify` and the read-only Tool Search catalog tools (`tool_search`, `tool_describe`; Hermes Tool Search is off until an admin turns it on, [runbook](docs/runbook.md#turn-on-tool-search)), and withHuman's pipeline decides which ones need a person
 ([spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
 
 Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only

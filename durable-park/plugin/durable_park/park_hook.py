@@ -22,9 +22,22 @@ from .wake import one_line
 
 log = logging.getLogger("durable_park")
 
-# Tools that are never asked about: the executor of an approved park (its call was approved already) and
-# ``clarify`` (asking the user a question).
-DEFAULT_EXEMPT_TOOLS: tuple[str, ...] = ("parked_action_execute", "clarify")
+# Hermes "Tool Search" (tools.tool_search.enabled: on) hides MCP and plugin tools behind three bridge tools
+# (Hermes v0.22.3 tools/tool_search_catalog.py ``BRIDGE_TOOL_NAMES``; they are synthesized, never registered).
+# ``tool_search`` and ``tool_describe`` only read the session's own tool catalog: nothing runs, so nobody is asked.
+# ``tool_call`` runs a hidden tool and is NEVER exempt: Hermes unwraps a valid single-entry call before this hook
+# runs, so the hook judges the real tool; a ``tool_call`` that still reaches the hook is refused (see
+# ``BRIDGE_CALL_MESSAGE``). deploy/hermes_tool_policy.py keeps its own copy of the three names (it runs
+# standalone in Hermes's Python); tests/test_tool_policy.py pins the two together.
+BRIDGE_SEARCH_TOOL = "tool_search"
+BRIDGE_DESCRIBE_TOOL = "tool_describe"
+BRIDGE_CALL_TOOL = "tool_call"
+BRIDGE_READ_TOOLS: tuple[str, ...] = (BRIDGE_SEARCH_TOOL, BRIDGE_DESCRIBE_TOOL)
+BRIDGE_TOOLS: tuple[str, ...] = (*BRIDGE_READ_TOOLS, BRIDGE_CALL_TOOL)
+
+# Tools that are never asked about: the executor of an approved park (its call was approved already),
+# ``clarify`` (asking the user a question) and the two read-only Tool Search catalog tools.
+DEFAULT_EXEMPT_TOOLS: tuple[str, ...] = ("parked_action_execute", "clarify", *BRIDGE_READ_TOOLS)
 
 # Tools whose arguments are checked against the tool's own rules before withHuman is asked (regex
 # ``fullmatch`` against the Hermes tool name ``mcp__wh__<slug>__<tool>``). Which calls need a person is
@@ -54,6 +67,11 @@ FOREIGN_HOOK_MESSAGE = (
     "is refused until an admin removes it or lists it in observer_hooks."
 )
 COULD_NOT_OPEN_MESSAGE = "durable-park: could not open an approval request; the call was not run"
+BRIDGE_CALL_MESSAGE = (
+    'durable-park: "tool_call" was NOT run: it reached the approval check still wrapped, so the tool it names '
+    "could not be judged. Send exactly one entry, {\"calls\": [{\"name\": <tool>, \"arguments\": {...}}]}, for a "
+    "tool that tool_search lists; a tool already in your tool list is called directly, not through tool_call."
+)
 ALREADY_WAITING_MESSAGE = (
     "durable-park: {park_id} is already waiting for approval in this chat; "
     "this call was not run. Do not retry it; wait until {park_id} is decided."
@@ -120,13 +138,20 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
     it is unreachable. ``foreign_hooks_fn`` (optional) names other plugins' ``pre_tool_call`` hooks that could
     change arguments after approval; while it names any, every non-exempt call is refused."""
     checker = form_checker if form_checker is not None else FormChecker()
-    exempt_names = frozenset(exempt)
+    exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
 
     def is_form_checked(tool_name: str) -> bool:
         return any(p.fullmatch(tool_name) for p in form_checked)
 
     def pre_tool_call(**kw: Any) -> dict[str, str] | None:
         tool = str(kw.get("tool_name") or "")
+        # Step 0: Hermes unwraps a valid single-entry ``tool_call`` before this hook runs, so the hook judges the
+        # real tool. A ``tool_call`` that still arrives here is a wrapper Hermes could not resolve (a batch, bad
+        # JSON, a core or connector name): the tool it names cannot be judged, so it is refused. Nothing is
+        # recorded or asked.
+        if tool == BRIDGE_CALL_TOOL:
+            log.warning("refused %s: it reached the park hook still wrapped", tool)
+            return _block(BRIDGE_CALL_MESSAGE)
         # Step 1: exempt tools are never asked about.
         if tool in exempt_names:
             return None
@@ -287,7 +312,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
 
 def fail_closed_hook(exempt: Iterable[str], message: str = COULD_NOT_OPEN_MESSAGE) -> Callable[..., dict | None]:
     """Hook used when durable-park cannot work (e.g. the ledger is unusable): every non-exempt call is refused."""
-    exempt_names = frozenset(exempt)
+    exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}
 
     def pre_tool_call(**kw: Any) -> dict[str, str] | None:
         tool = str(kw.get("tool_name") or "")

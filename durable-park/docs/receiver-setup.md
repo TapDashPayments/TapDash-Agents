@@ -148,7 +148,8 @@ and after the gateway restart; a failed pre-restart check aborts without restart
   skills, browser*, computer_use, memory, session_search, kanban, vision, web, …). Hermes subtracts it last
   at tool granularity, so it also covers sessions that do not use `platform_toolsets` (TUI coding posture,
   ACP, `HERMES_TUI_TOOLSETS`, cron jobs, subagents); `check` verifies those postures too;
-- `tools.tool_search.enabled: off`;
+- `tools.tool_search.enabled: off` (an admin may turn it on: `apply` keeps an `on`, and `check` then also judges the tools
+  behind Hermes's three bridge tools; [runbook](runbook.md#turn-on-tool-search));
 - `gateway.strict: true`, `gateway.trust_recent_files: false`: a model can make the gateway upload a file
   just by naming it (`MEDIA:/path`) - no tool needed. Non-strict, the ledger was deliverable. Now only the
   Hermes media caches are.
