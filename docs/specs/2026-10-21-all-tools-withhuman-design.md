@@ -308,7 +308,7 @@ Open questions (who decides):
 ## 8. Work list (ordered; each line: what — why — depends on)
 
 1. ~~Fix PR #3 docs~~ — done (see §9 D1).
-2. ~~Merge PR #3; fast-forward the live clone~~ — done (see §9 D1): PR #3 is merged; the fast-forward is Task 2 of the plan.
+2. Merge PR #3; fast-forward the live clone — PR merged; fast-forward is Task 2 (see §9 D1).
 3. Clean Setup Phase 1 (§4.1 steps 1–9) — removes root from the agent's user before any tool is opened — depends on 2.
 4. Backlog #3: sweep cancels a `parked` row with no request id after 10 min — "ask every call" opens that window on
    every tool call — depends on nothing; land before 5.
@@ -338,11 +338,11 @@ Open questions (who decides):
 
 ## 9. Amendments from planning (2026-10-21)
 
-Each line: what the spec says → what is true → what this plan does. **Yaakov approves these before Task 1.**
+Each line: what the spec says → what is true → what this plan does. Approved before Task 1 (2026-10-21).
 
 | # | Spec | Found | Plan |
 |---|---|---|---|
-| D1 | §8 items 1–2: fix PR #3, then merge it | PR #3 was merged at `1847dff` **without** the fix; main now says the full toolset is live. Live clone is 15 commits behind (`5dab848..1847dff`, docs + one comment only) | Task 1 fixes main directly; Task 2 is only the fast-forward |
+| D1 | §8 items 1–2: fix PR #3, then merge it | PR #3 was merged at `1847dff` **without** the fix; main now says (before this fix) the full toolset is live. Live clone is 15 commits behind (`5dab848..1847dff`, docs + one comment only) | Task 1 fixes main directly; Task 2 is only the fast-forward |
 | D2 | §4.1 step 7 (SSH) after the connector move | `ubuntu` has a password (`passwd -S` = `P`), ufw allows 22/tcp from anywhere, effective `passwordauthentication yes`, and `ubuntu` has NOPASSWD sudo: a guessed password is root from the internet | Task 3 does SSH **first**. The `ubuntu` password is kept (OVH console fallback); only SSH password login goes off |
 | D3 | §4.1 steps 2–4 | The connector also keeps its OAuth state in `~hermes/.local/share/fastmcp/oauth-proxy/`; `server.py` names hermes on lines 149, 172, 178, 181, 241, 274, 305; `set-github-oauth.sh` says "run as hermes"; the venv has no requirements file | Task 3 copies the OAuth state, rebuilds the venv from `pip freeze`, and patches all seven strings plus `set-github-oauth.sh` |
 | D4 | §4.3 row 9 (anything else → human) | Gateway calls of **non-money** QuickBooks tools arrive with server `quickbooks` and no row approves them, so every QuickBooks read would ask Yaakov | Task 10 adds row **2b**: server `quickbooks` and not money → approve |

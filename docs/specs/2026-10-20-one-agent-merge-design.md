@@ -1,6 +1,6 @@
 # One agent on proto-agents — merge design
 
-> **Superseded 2026-10-21:** the full toolset was live for about an hour; the v1 lockdown was re-applied at 03:16 UTC. See [the all-tools spec](2026-10-21-all-tools-withhuman-design.md).
+> **Superseded 2026-10-21:** the v1 lockdown was re-applied on 2026-10-21 at 03:16 UTC, so the full toolset is no longer live. See [the all-tools spec](2026-10-21-all-tools-withhuman-design.md).
 
 Date: 2026-10-20 · Status: Implemented 2026-10-21 · Author: Claude (with Yaakov)
 

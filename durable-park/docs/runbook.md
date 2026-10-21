@@ -31,8 +31,8 @@ Rules:
   never reuse it inside. A reused `EOF` once ran the tail of a script on the production host.
 - **Never print a secret.** Secrets are typed in by an admin with `read -rs` (never pasted into chat).
 - Root steps (copying into `/opt`, restarting system units) should be done by an admin in their own terminal. That is
-  a convention, not a block: the Hermes agent and Claude (through the Proto-Agents connector) both run as `hermes`
-  with passwordless sudo, so either can do them.
+  a convention, not a block: the agent has no terminal tool today, so only admins, and Claude through the
+  Proto-Agents connector (which runs as `hermes` with passwordless sudo), do root steps.
 - **One agent, v1 lockdown re-applied (since 2026-10-21 03:16 UTC).** The `hermes` install is the only agent on the VM.
   Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
   `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (58 platform keys; `hermes_tool_policy.py check` ok).
@@ -204,8 +204,8 @@ Example: make DocuSign `createEnvelope` need approval. Every place that has to a
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
    other `mcp__wh__` tool registers. Allow the new server there.
 3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify` and
-   `parked_action_execute`); allow the new prefix, then re-apply it (restarts the gateway: no parked, approved or
-   executing row).
+   `parked_action_execute`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
+   list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
 4. **Risky list**: the plugin parks tools matching `risky_tools` (Hermes setting
    `plugins.entries.durable-park.settings.risky_tools`, default `DEFAULT_RISKY_TOOLS` in
    `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in the default.

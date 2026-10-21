@@ -1,6 +1,6 @@
 # One Agent on proto-agents — Implementation Plan
 
-> **Superseded 2026-10-21:** the full toolset was live for about an hour; the v1 lockdown was re-applied at 03:16 UTC. See [the all-tools spec](../specs/2026-10-21-all-tools-withhuman-design.md).
+> **Superseded 2026-10-21:** the v1 lockdown was re-applied on 2026-10-21 at 03:16 UTC, so the full toolset is no longer live. See [the all-tools spec](../specs/2026-10-21-all-tools-withhuman-design.md).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
