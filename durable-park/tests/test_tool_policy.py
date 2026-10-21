@@ -170,7 +170,6 @@ def test_allowed_tool_names_uses_hermes_definitions(monkeypatch):
     fake = types.ModuleType("model_tools")
     fake.get_tool_definitions = lambda **kw: calls.append(kw) or [{"function": {"name": "web_search"}}]
     monkeypatch.setitem(sys.modules, "model_tools", fake)
-    assert policy.allowed_tool_names([]) == set() and not calls
     assert policy.allowed_tool_names(["web"]) == {"web_search"}
     assert calls[0]["enabled_toolsets"] == ["web"]
 
@@ -225,3 +224,85 @@ def test_check_writes_status_file_when_the_check_crashes(tmp_path, monkeypatch):
     assert policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)]) == 1
     status = json.loads(out.read_text())
     assert status["ok"] is False and "boom" in status["problems"][0]
+
+
+# --- Task 11 review fixes ----------------------------------------------------------------------------------
+
+def test_main_passes_the_allowed_list_from_the_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: None)
+    seen = {}
+    monkeypatch.setattr(policy, "apply", lambda allowed=None: seen.setdefault("apply", allowed) and 0)
+    monkeypatch.setattr(policy, "check", lambda allowed=None, problems=None: seen.setdefault("check", allowed) and 0)
+    allow = tmp_path / "allowed"
+    allow.write_text("web\n")
+    assert policy.main(["apply", "--allow-file", str(allow)]) == 0
+    assert policy.main(["check", "--allow-file", str(allow)]) == 0
+    assert seen == {"apply": ["web"], "check": ["web"]}
+
+
+def _ok_check_stubs(monkeypatch):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: None)
+    monkeypatch.setattr(policy, "check", lambda allowed=None, problems=None: 0)
+
+
+def test_status_file_is_failing_before_check_runs(tmp_path, monkeypatch):
+    out = tmp_path / "status.json"
+    out.write_text(json.dumps({"ok": True, "checked_at": "2026-01-01T00:00:00Z", "problems": [], "allowed": []}))
+    monkeypatch.setattr(policy, "_bootstrap", lambda: None)
+    seen = {}
+
+    def fake_check(allowed=None, problems=None):
+        seen["during"] = json.loads(out.read_text())
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(policy, "check", fake_check)
+    assert policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)]) == 1
+    assert seen["during"]["ok"] is False and seen["during"]["problems"] == ["check did not finish"]
+    assert json.loads(out.read_text())["ok"] is False
+
+
+def test_failed_final_status_write_leaves_the_prewritten_failure(tmp_path, monkeypatch):
+    _ok_check_stubs(monkeypatch)
+    out = tmp_path / "status.json"
+    out.write_text(json.dumps({"ok": True, "checked_at": "x", "problems": [], "allowed": []}))
+    real = policy.write_status
+    calls = []
+
+    def flaky(path, ok, problems, allowed):
+        calls.append(ok)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real(path, ok, problems, allowed)
+
+    monkeypatch.setattr(policy, "write_status", flaky)
+    with pytest.raises(OSError):
+        policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)])
+    status = json.loads(out.read_text())
+    assert status["ok"] is False and status["problems"] == ["check did not finish"]
+
+
+def test_bootstrap_failure_still_leaves_a_failing_status_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: (_ for _ in ()).throw(ImportError("no hermes")))
+    out = tmp_path / "status.json"
+    assert policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)]) == 1
+    status = json.loads(out.read_text())
+    assert status["ok"] is False and "no hermes" in status["problems"][0]
+
+
+def test_interrupt_leaves_a_failing_status_file_and_propagates(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: None)
+    monkeypatch.setattr(policy, "check", lambda allowed=None, problems=None: (_ for _ in ()).throw(KeyboardInterrupt()))
+    out = tmp_path / "status.json"
+    with pytest.raises(KeyboardInterrupt):
+        policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)])
+    assert json.loads(out.read_text())["ok"] is False
+
+
+def test_allowed_tool_names_empty_asks_hermes_for_nothing_selected(monkeypatch):
+    import sys
+    import types
+
+    fake = types.ModuleType("model_tools")
+    fake.get_tool_definitions = lambda **kw: [] if kw["enabled_toolsets"] == [] else [{"function": {"name": "x"}}]
+    monkeypatch.setitem(sys.modules, "model_tools", fake)
+    assert policy.allowed_tool_names([]) == set()

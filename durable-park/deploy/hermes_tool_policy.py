@@ -261,10 +261,10 @@ def effective_tools(platform: str, enabled: list[str] | None | str = "config") -
 
 
 def allowed_tool_names(allowed: list[str]) -> set[str]:
-    """The tool names Hermes defines for the opened toolsets (none for an empty list)."""
-    if not allowed:
-        return set()
+    """The tool names Hermes defines for the opened toolsets."""
     import model_tools
+
+    # An empty list selects nothing (model_tools.py:316-321: only ``None`` means every toolset).
 
     defs = model_tools.get_tool_definitions(enabled_toolsets=list(allowed), quiet_mode=True)
     return {d["function"]["name"] for d in defs}
@@ -381,12 +381,14 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(f"hermes_tool_policy.py: invalid allow file {args.allow_file}: {exc}", file=sys.stderr)
         return 2
-    _bootstrap()
-    if args.command == "apply":
-        return apply(allowed)
-    status_file = args.status_file
+    status_file = getattr(args, "status_file", None)
     problems: list[str] = []
+    if status_file:  # replace any earlier pass first: a crash or a failed final write must not leave a stale ok
+        write_status(status_file, False, ["check did not finish"], allowed)
     try:
+        _bootstrap()
+        if args.command == "apply":
+            return apply(allowed)
         rc = check(allowed, problems)
     except Exception as exc:  # noqa: BLE001 - a crashed check must still leave a failing status file
         if not status_file:
@@ -394,6 +396,10 @@ def main(argv: list[str]) -> int:
         problems.append(f"check crashed: {type(exc).__name__}: {exc}")
         print(problems[-1], file=sys.stderr)
         rc = 1
+    except BaseException:  # SystemExit / KeyboardInterrupt: the pre-written failure stays; refresh its reason
+        if status_file:
+            write_status(status_file, False, ["check interrupted"], allowed)
+        raise
     if status_file:
         write_status(status_file, rc == 0, problems, allowed)
     return rc

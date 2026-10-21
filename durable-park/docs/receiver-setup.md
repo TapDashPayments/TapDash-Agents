@@ -165,7 +165,8 @@ also when the check fails or crashes) for the gateway-start check. Exit codes: 0
 error or invalid allow file. How to open one: [runbook](runbook.md#open-a-toolset).
 
 `check` fails (and the deploy with it) if any tool other than `parked_action_execute`, `clarify`,
-`mcp__wh__quickbooks__*` and the tools of the opened toolsets is reachable on any key or posture, if `parked_action_execute` is missing, or if
+`mcp__wh__quickbooks__*` and the tools of the opened toolsets is reachable on any key or posture, if
+`parked_action_execute` is missing, or if
 the wake secret, the ledger or a freshly written file would be deliverable. `hermes_mcp.sh` also fails if
 the gateway registers any `mcp__wh__` tool outside `mcp__wh__quickbooks__*` (it then stops the gateway). The
 sweep is a no-agent cron script and is not affected.

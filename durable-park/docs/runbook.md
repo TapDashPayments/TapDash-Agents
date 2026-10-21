@@ -341,6 +341,12 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
 2. As admin, add the toolset's name on its own line (for example `web`), save.
    `terminal`, `file`, `code_execution`, `delegation`, `cronjob`, `skills` and `computer_use` are refused until
    Clean Setup Phase 2; a typo is refused too (exit 2, message on stderr, nothing changed).
+   Not Phase-2-gated but still risky: `desktop_ui`, `catalog`, `browser-cdp`, `a2a`, `connections`; open them
+   through the file only after their pipeline rule exists ([spec section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
+   An allow file the `hermes` user cannot read (for example a pre-existing one with mode 600 root:root) makes
+   `apply` exit 2 and the deploy stop (fails closed); fix it with
+   `chgrp hermes` and `chmod 640` on the file (or, if it is empty, re-create it with
+   `install -m 640 -o root -g hermes /dev/null /etc/durable-park/allowed_toolsets`).
 3. Apply and check, as the `hermes` user in Hermes's own Python (or just re-run `deploy/hermes_mcp.sh`, which does both):
    `<hermes env python> -I deploy/hermes_tool_policy.py apply`, then `... check`. `check` must end with
    `tool policy: ok`.
