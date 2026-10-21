@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +31,10 @@ HOOK_REGISTRY_UNAVAILABLE = "<hook registry unavailable>"
 POLICY_STATUS_FILENAME = "tool_policy_status.json"
 POLICY_LOAD_FILENAME = "tool_policy_load.json"
 POLICY_MAX_AGE = timedelta(minutes=15)
+# Hermes loads plugins in every process (gateway, cron sweep, CLI): each has its own start time.
+PROCESS_START = datetime.now(timezone.utc)
+NOT_GATEWAY_MESSAGE = "tool policy: load verdict not written (not the gateway process)"
+_logged_not_gateway = False
 POLICY_MESSAGE = ("durable-park: the tool policy check did not pass at gateway start; tool calls are refused "
                   "until an admin fixes it.")
 NO_POLICY_REPORT = "no tool policy report"
@@ -40,11 +45,26 @@ class BadSetting(ValueError):
     """A plugin setting has the wrong type."""
 
 
-def policy_problem(path: str, now: datetime, max_age: timedelta = POLICY_MAX_AGE) -> str | None:
+def is_gateway_process() -> bool:
+    """True only in ``hermes gateway run``: the adjacent argv pair ``gateway run`` (the match Hermes itself uses
+    to recognise a gateway run, ``hermes_cli/main.py`` ``_argv_is_gateway_run``, wherever global flags such as
+    ``-p <profile>`` put it). The environment is not consulted: ``HERMES_SUPERVISED_CHILD`` may be inherited by
+    the cron sweep and by CLI runs."""
+    argv = sys.argv[1:]
+    return any(a == "gateway" and b == "run" for a, b in zip(argv, argv[1:]))
+
+
+def policy_problem(path: str, now: datetime, max_age: timedelta = POLICY_MAX_AGE,
+                   process_start: datetime | None = None) -> str | None:
     """What is wrong with the tool policy report written at gateway start (deploy/tool_policy_check.sh), or
     ``None`` when it is fresh and passing. Missing, unreadable, invalid or malformed -> "no tool policy report";
-    ``ok`` not exactly true -> the joined ``problems``; ``checked_at`` older than ``max_age`` (or unparsable or
-    in the future by more than a minute) -> "stale"."""
+    ``ok`` not exactly true -> the joined ``problems``; ``checked_at`` more than ``max_age`` BEFORE this process
+    started (``process_start``, default ``PROCESS_START``) -> "stale", as is an unparsable one or one in the
+    future by more than a minute of ``now``. A report written after this process started is fine, so the
+    gateway's uptime does not matter; a process started long after the last gateway start did not have the
+    start check run for it and is refused."""
+    if process_start is None:
+        process_start = PROCESS_START
     try:
         with open(path, encoding="utf-8") as handle:
             report = json.load(handle)
@@ -61,16 +81,15 @@ def policy_problem(path: str, now: datetime, max_age: timedelta = POLICY_MAX_AGE
         checked = datetime.strptime(str(report.get("checked_at")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         return "stale"
-    age = now - checked
-    if age > max_age or age < -timedelta(minutes=1):
+    if checked < process_start - max_age or checked - now > timedelta(minutes=1):
         return "stale"
     return None
 
 
 def write_policy_load(path: str, problem: str | None) -> None:
     """Record this load's own verdict on the tool policy report (``ok``, ``problem``, ``checked_at``) for the
-    sweep, atomically. The sweep cannot judge a report's age itself, so a stale report (the plugin was reloaded
-    more than 15 minutes after the gateway start) would otherwise be invisible to it. Never raises."""
+    sweep, atomically. The sweep cannot judge a report's age itself, so a stale report would otherwise be
+    invisible to it. Called only from the gateway process. Never raises."""
     tmp = None
     try:
         directory = os.path.dirname(os.path.abspath(path))
@@ -221,7 +240,13 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
     if not isinstance(policy_path, str) or not policy_path:
         raise BadSetting(f"setting tool_policy_status must be a path, got {type(policy_path).__name__}")
     problem = policy_problem(str(Path(policy_path).expanduser()), datetime.now(timezone.utc))
-    write_policy_load(str(Path(ledger_path).expanduser().parent / POLICY_LOAD_FILENAME), problem)
+    if is_gateway_process():
+        write_policy_load(str(Path(ledger_path).expanduser().parent / POLICY_LOAD_FILENAME), problem)
+    else:  # the cron sweep and CLI runs fail closed below but must not overwrite the gateway's verdict
+        global _logged_not_gateway
+        if not _logged_not_gateway:
+            _logged_not_gateway = True
+            log.info(NOT_GATEWAY_MESSAGE)
     if problem is not None:
         log.error("durable-park tool policy check failed (%s); refusing every tool call", problem)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS, POLICY_MESSAGE))
