@@ -1,6 +1,6 @@
 # All tools, withHuman decides every call, clean setup — design
 
-Date: 2026-10-21 · Status: Draft for Yaakov's review · Author: Claude (with Yaakov)
+Date: 2026-10-21 · Status: Accepted for the sandbox 2026-10-21; see [durable-park/docs/acceptance-2026-10-21-ask-every-call.md](../../durable-park/docs/acceptance-2026-10-21-ask-every-call.md) · Author: Claude (with Yaakov)
 
 Research this spec rests on (read-only, 2026-10-21, kept outside git): `aap-research.md` (AAP, the stock
 `aap hook hermes`, pipeline rev 8, latency), `clean-setup-research.md` (users, services, files, sudo), and
@@ -248,6 +248,10 @@ The design is `receiver-setup.md` "v2: separate ledger owner"; this section list
   the gateway directly. Accepted: that token cannot approve, so the worst case is denial of service (§7, Q5). When new gateway servers are added, per-agent grants (`set_agent_tool_access`) should list only the servers the agent needs.
 
 ## 5. Verification and acceptance (evidence for each; no claim without it)
+
+Result of rows 6–12 (ask every call): accepted for the sandbox, record in
+[durable-park/docs/acceptance-2026-10-21-ask-every-call.md](../../durable-park/docs/acceptance-2026-10-21-ask-every-call.md).
+Rows 1–5 (Clean Setup Phase 1) and 13–15 were not run.
 
 | Part | # | Claim | Evidence |
 |---|---|---|---|
