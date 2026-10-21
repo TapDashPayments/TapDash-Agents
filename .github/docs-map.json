@@ -32,6 +32,7 @@
         "durable-park/plugin/durable_park/plugin.yaml",
         "durable-park/plugin/durable_park/compat.py",
         "durable-park/plugin/durable_park/gatecall.py",
+        "durable-park/plugin/durable_park/breaker.py",
         "durable-park/plugin/durable_park/wake.py",
         "durable-park/plugin/durable_park/executor.py"
       ],

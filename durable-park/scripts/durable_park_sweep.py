@@ -9,6 +9,8 @@
 * ``allowed``/``refused``/``cancelled`` rows older than ``--retention-days`` (default 30) are deleted, silently
 * the gateway's form-check report (``formcheck_status.json`` next to the ledger) missing, older than
   75 minutes or failing on two sweeps in a row        -> print one alert line (and one when it recovers)
+* the park hook's circuit-breaker report (``breaker_status.json``: withHuman unreachable) opened or closed
+                                                       -> print one alert line for each change
 
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
@@ -41,6 +43,8 @@ FORMCHECK_STATUS = "formcheck_status.json"
 FORMCHECK_STATE = "formcheck_alert_state.json"
 FORMCHECK_STALE = timedelta(minutes=75)  # the gateway re-checks every 30 minutes
 FORMCHECK_BAD_RUNS = 2  # one bad sweep may be a restart in progress
+BREAKER_STATUS = "breaker_status.json"
+BREAKER_STATE = "breaker_alert_state.json"
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -219,6 +223,28 @@ def _formcheck_alert(ledger_path: str, now: datetime) -> None:
     _save_state(state_path, {"bad_runs": bad_runs, "alerted": alerted})
 
 
+def _breaker_alert(ledger_path: str, now: datetime) -> None:
+    """Announce each withHuman outage once when it opens and once when it closes (``now`` is unused: the
+    status file carries its own times). The state file keeps the ``opened_at``/``closed_at`` already announced,
+    so an outage that opened and closed between two sweeps still prints both lines."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    status = _load_state(os.path.join(directory, BREAKER_STATUS))  # missing or unreadable -> {}
+    opened_at, closed_at = status.get("opened_at"), status.get("closed_at")
+    state_path = os.path.join(directory, BREAKER_STATE)
+    state = _load_state(state_path)
+    announced = dict(state)
+    if isinstance(opened_at, str) and opened_at and opened_at != state.get("opened_at"):
+        print(f"durable-park ALERT: withHuman could not be reached (since {_clean(opened_at, 40)}); "
+              "every tool call is being refused until it answers again.", flush=True)
+        announced["opened_at"] = opened_at
+    if status.get("open") is False and isinstance(closed_at, str) and closed_at and closed_at != state.get("closed_at"):
+        print(f"durable-park: withHuman answers again (since {_clean(closed_at, 40)}); "
+              "tool calls are decided normally.", flush=True)
+        announced["closed_at"] = closed_at
+    if announced != state:
+        _save_state(state_path, announced)
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -237,6 +263,10 @@ def main(argv=None) -> int:
         _formcheck_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the self-check alert must never stop the sweep
         _err(f"form-check alert failed ({type(exc).__name__})")
+    try:
+        _breaker_alert(args.ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - the breaker alert must never stop the sweep
+        _err(f"breaker alert failed ({type(exc).__name__})")
     status = 0
     targets = _wake_targets(ledger)
     if targets:

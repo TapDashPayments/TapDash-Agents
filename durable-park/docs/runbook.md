@@ -163,6 +163,18 @@ Risky calls are blocked (fail closed) until it is fixed. Read `formcheck_status.
 
 A second line `durable-park: the form checker is working again.` follows when it recovers.
 
+### withHuman could not be reached
+
+`durable-park ALERT: withHuman could not be reached (since <time>); every tool call is being refused until it answers again.`
+
+The park hook's circuit breaker opened after 3 consecutive errors from withHuman, so tool calls are refused
+(fail closed) without asking. While open it retries once every 30 seconds. Read `breaker_status.json` next to the
+ledger (`open`, `opened_at`, `closed_at`); check the withHuman status page, the `instance_token`, and the VM's
+network (`hermes mcp test wh`). Nothing needs restarting: it closes by itself on the first answer.
+
+`durable-park: withHuman answers again (since <time>); tool calls are decided normally.` follows when it closes. If
+the outage was shorter than 5 minutes, both lines arrive together.
+
 ## Troubleshooting
 
 ### An approver was asked twice for one action

@@ -388,3 +388,50 @@ def test_formcheck_broken_state_file_does_not_stop_the_sweep(world, monkeypatch,
     world.row("approved")
     assert world.main(monkeypatch) == 0
     assert len(world.posted) == 1
+
+
+OPEN_ALERT = ("durable-park ALERT: withHuman could not be reached (since {at}); every tool call is being "
+              "refused until it answers again.")
+CLOSE_NOTE = "durable-park: withHuman answers again (since {at}); tool calls are decided normally."
+
+
+def write_breaker(tmp_path, *, open_, opened_at="2026-10-21T10:00:00Z", closed_at=None):
+    (tmp_path / "breaker_status.json").write_text(json.dumps(
+        {"open": open_, "opened_at": opened_at, "closed_at": closed_at}))
+
+
+def test_breaker_alert_once_on_open_once_on_close(world, monkeypatch, capsys, tmp_path):
+    write_breaker(tmp_path, open_=True)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == OPEN_ALERT.format(at="2026-10-21T10:00:00Z") and second == ""
+    write_breaker(tmp_path, open_=False, closed_at="2026-10-21T10:07:00Z")
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.strip() == CLOSE_NOTE.format(at="2026-10-21T10:07:00Z") and fourth == ""
+
+
+def test_breaker_opened_and_closed_between_sweeps_prints_both(world, monkeypatch, capsys, tmp_path):
+    write_breaker(tmp_path, open_=False, closed_at="2026-10-21T10:03:00Z")
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [OPEN_ALERT.format(at="2026-10-21T10:00:00Z"),
+                                  CLOSE_NOTE.format(at="2026-10-21T10:03:00Z")]
+    assert second == ""
+
+
+def test_breaker_reopened_later_alerts_again(world, monkeypatch, capsys, tmp_path):
+    write_breaker(tmp_path, open_=True)
+    runs(world, monkeypatch, capsys, 1)
+    write_breaker(tmp_path, open_=False, closed_at="2026-10-21T10:07:00Z")
+    runs(world, monkeypatch, capsys, 1)
+    write_breaker(tmp_path, open_=True, opened_at="2026-10-21T11:00:00Z", closed_at="2026-10-21T10:07:00Z")
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.strip() == OPEN_ALERT.format(at="2026-10-21T11:00:00Z")
+
+
+def test_no_breaker_file_prints_nothing(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 2) == ["", ""]
+
+
+def test_breaker_broken_status_or_state_does_not_stop_the_sweep(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "breaker_status.json").write_text("{not json")
+    (tmp_path / "breaker_alert_state.json").write_text("[1")
+    assert runs(world, monkeypatch, capsys, 1) == [""]
