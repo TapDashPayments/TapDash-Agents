@@ -30,7 +30,9 @@ write_failing() {
 fail_report() {
     write_failing "$1" || {
         log "durable-park: tool policy report could not be refreshed (directory not writable?)"
-        command -v logger >/dev/null 2>&1 && logger -t durable-park "tool policy report could not be refreshed" || true
+        if command -v logger >/dev/null 2>&1; then
+            logger -t durable-park "tool policy report could not be refreshed" || true
+        fi
     }
 }
 
@@ -46,7 +48,9 @@ print(json.load(open(facts[0]))["packages"]["venv"]["environment"] + "/bin/pytho
 
 main() {
     local py rc start
-    py=$(hermes_python) && [[ -x "$py" ]] || { log "hermes python not found"; fail_report "hermes python not found"; return 0; }
+    if ! py=$(hermes_python) || [[ ! -x "$py" ]]; then
+        log "hermes python not found"; fail_report "hermes python not found"; return 0
+    fi
     start=$(date +%s)
     rc=0
     timeout 60 "$py" -I "$REPO/deploy/hermes_tool_policy.py" check --status-file "$STATUS" || rc=$?
