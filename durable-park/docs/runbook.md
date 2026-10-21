@@ -548,13 +548,19 @@ the table under [Tool policy check failed](#tool-policy-check-failed). Then `sys
    ```
 3. A money move (a sandbox `create_payment`): the chat gets `PARKED P-...: "mcp__wh__quickbooks__create_payment"`
    (the real name), the withHuman request names the same tool and the same arguments, and the row's tool is that name.
-   Approve it: the wake arrives, the model finds `parked_action_execute` (through `tool_describe` and `tool_call`) and
-   the row ends `executed`. If the model cannot find it, turn tool search off again (an approved row stays approved
-   and runs after the restart) and report it.
-4. `~/.hermes/logs/errors.log` has no `reached the park hook still wrapped` line. One now and then is a malformed call
+   Approve it: the wake arrives (its text ends the executor instruction with "If parked_action_execute is not in your
+   tool list, call it through tool_call."), the model finds `parked_action_execute` (through `tool_describe` and
+   `tool_call`) and the row ends `executed`. If the model cannot find it, turn tool search off again (an approved row
+   stays approved and runs after the restart) and report it.
+4. **Run one approved park end to end and confirm it runs once.** With the park from step 3 approved, wait for the
+   chat's answer, then run the ledger query above: that park's row must read `executed` (not `approved`, not
+   `executing`, not `unknown`) and QuickBooks (the sandbox) shows exactly one payment for it. Ask the model in the
+   same chat to run it again: `parked_action_execute` must answer `... is already running or done` and nothing new
+   appears in QuickBooks. Any other result: turn tool search off again and report it.
+5. `~/.hermes/logs/errors.log` has no `reached the park hook still wrapped` line. One now and then is a malformed call
    the model retried; a stream of them means the model keeps batching or naming core tools through `tool_call`:
    look at the chat, not at durable-park.
-5. Cost: a new chat's input tokens (Hermes dashboard, session usage) are far lower than before.
+6. Cost: a new chat's input tokens (Hermes dashboard, session usage) are far lower than before.
 
 **Turn off:** with no row waiting or running, `hermes config set tools.tool_search.enabled off`, restart the gateway,
 run the [health check](#health-check). Nothing else changes.

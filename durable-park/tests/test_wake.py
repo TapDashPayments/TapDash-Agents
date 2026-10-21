@@ -98,7 +98,8 @@ def test_approved_wake_injects_once(env):
     assert done.status == "approved" and done.note == "ok to go" and done.notified_at
     assert env.injected == [(
         f'[durable-park] {row.park_id} was APPROVED in withHuman. Call parked_action_execute with park_id '
-        f'"{row.park_id}" now to run it exactly as saved. Do not call "{TOOL}" directly.', SESSION_KEY)]
+        f'"{row.park_id}" now to run it exactly as saved. If parked_action_execute is not in your tool list, '
+        f'call it through tool_call. Do not call "{TOOL}" directly.', SESSION_KEY)]
     # duplicate wake (receiver retry, sweep): skipped, nothing injected, no new provider read
     before = len(env.provider.calls)
     assert env.wake(row.park_id) == SKIP

@@ -102,6 +102,7 @@ def test_approved_path_names_the_person_too(env):
     assert env.injected == [(
         f'[durable-park] {row.park_id} was APPROVED in withHuman by Yaakov Yehuda (android). Call '
         f'parked_action_execute with park_id "{row.park_id}" now to run it exactly as saved. '
+        f'If parked_action_execute is not in your tool list, call it through tool_call. '
         f'Do not call "{TOOL}" directly.', SESSION_KEY)]
 
 

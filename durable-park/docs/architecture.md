@@ -451,7 +451,11 @@ and re-run against the real code on the VM (2026-10-21):
   the sweep. One model call is one ledger row because a batch of local tools is rejected by Hermes (one entry per
   `tool_call`), so no two real calls share an outer call id.
 - **`parked_action_execute` is deferred too** (it is a plugin tool). The model reaches it through `tool_describe` and
-  `tool_call`; the bridge's description lists its exact name. The wake message is unchanged.
+  `tool_call`; the bridge's description lists its exact name. Hermes rejects a hidden tool called by its own name as an
+  invalid tool name (`agent/agent_init.py:1127`: the valid names come from the visible list only), so the APPROVED wake
+  text (`APPROVED_TEXT` in `wake.py`) says "If parked_action_execute is not in your tool list, call it through
+  tool_call." between its instruction to call `parked_action_execute` and its "Do not call <tool> directly"; the
+  DENIED and EXPIRED texts need no tool.
 - **The tool policy check judges two lists** (`deploy/hermes_tool_policy.py`, `tool_problems`): the *catalog* (every
   tool the session can reach, which `tool_call` can invoke) and what the model *sees*. Only the allowed names may be in
   the catalog (a bridge name there is a leak: Hermes never registers one); the visible list may add all three bridge

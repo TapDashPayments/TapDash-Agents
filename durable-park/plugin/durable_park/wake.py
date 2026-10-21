@@ -43,7 +43,8 @@ _DECIDED = ("approved", "denied", "expired", "cancelled")
 
 APPROVED_TEXT = (
     '[durable-park] {park_id} was APPROVED in withHuman{by}. Call parked_action_execute with park_id "{park_id}" '
-    'now to run it exactly as saved. Do not call "{tool}" directly.')
+    'now to run it exactly as saved. If parked_action_execute is not in your tool list, call it through tool_call. '
+    'Do not call "{tool}" directly.')
 DENIED_TEXT = (
     '[durable-park] {park_id} ("{tool}") was {status} in withHuman{by}{note}. It did not run. '
     "Tell the user and continue without it.")
