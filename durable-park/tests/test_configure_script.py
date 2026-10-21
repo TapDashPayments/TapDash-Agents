@@ -256,6 +256,7 @@ def test_drop_in_path_rewrite_uses_the_checkout():
     assert "ExecStartPre=-/bin/bash /srv/checkout/deploy/tool_policy_check.sh" in out
     assert "ExecStartPost=/bin/bash /srv/checkout/deploy/plugin_load_check.sh" in out
     assert "%h/durable-park" not in out
+    assert "ExecStartPre=-/bin/rm -f -- %h/.hermes/plugin-data/durable-park/plugin_load.json" in out  # untouched
     assert "Environment=DURABLE_PARK_POLICY_STATUS=%h/.hermes/" in out  # %h stays for systemd
     assert 'trap \'rm -f "$dropin_tmp"\' EXIT' in SCRIPT.read_text()
 

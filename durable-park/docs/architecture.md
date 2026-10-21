@@ -193,16 +193,20 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
    from `register`. A plugin that fails to import, or overruns `plugins.load_timeout_seconds` (default 10 s;
    `hermes_cli/plugins_loader.py:40-60`, `:525-537`), is disposed with all its hooks and never writes it.
 5. systemd then runs the drop-in's `ExecStartPost=` (no `-`): `deploy/plugin_load_check.sh` polls once a second, up to
-   `DURABLE_PARK_LOAD_TIMEOUT` seconds (default 120), for a `plugin_load.json` whose `pid` is the unit's `$MAINPID`.
+   `DURABLE_PARK_LOAD_TIMEOUT` seconds (default 30; Hermes's own load deadline is 10 s and the live load takes about 2 s), for a `plugin_load.json` whose `pid` is the unit's `$MAINPID`.
    Found (any mode, `refusing-*` included: the plugin is live and refusing) it prints one line and exits 0. Not found
    it prints `durable-park ALERT: the plugin did not load in this gateway ...` and exits 1, so systemd stops the
    gateway and no tool call runs unchecked. The drop-in's `StartLimitIntervalSec=600` / `StartLimitBurst=3` stop the
-   restart loop after 3 starts in 10 minutes.
+   restart loop after 3 starts in 10 minutes (manual and graceful restarts count too).
 
-Limits: a plugin whose `register` finishes just after the deadline can still write its proof although Hermes
-disposed it (the check then passes; the toolset lockdown is the cover, and the sweep cannot see it either); and
-the sweep runs as a Hermes cron inside the gateway, so a gateway the check stopped cannot alert (the bot going
-silent is the signal).
+The proof is written only when this load was not abandoned (`ctx._load_abandoned`, set by Hermes's
+`run_with_load_deadline`, `hermes_cli/plugins_loader.py:142-148`; after it every `ctx.register_*` is a silent no-op,
+`plugins.py:1100-1121`) and one of the plugin's own `pre_tool_call` callbacks is in `ctx._manager.iter_hook_callbacks`
+(`plugins_dispatch.py:523`); an unreadable registry means no proof. The one remaining window is a load that finishes
+between Hermes's `is_alive()` check and its dispose step (microseconds). Before each start the drop-in's first
+`ExecStartPre` deletes the old proof, so one left by an earlier process with a reused pid cannot match. The sweep
+runs as a Hermes cron inside the gateway, so a gateway the check stopped cannot alert (the bot going silent is the
+signal).
 
 The sweep reads the same report and alerts once on a failure and once on recovery. The report is written only at
 start, so a long-running gateway does not make it stale for the sweep (the plugin judges age at load). The sweep

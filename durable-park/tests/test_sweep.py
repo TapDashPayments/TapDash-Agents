@@ -620,3 +620,30 @@ def test_a_failing_load_proof_alert_does_not_stop_the_sweep(world, monkeypatch, 
     world.row("approved")
     assert world.main(monkeypatch) == 0
     assert len(world.posted) == 1
+
+
+def _run_mainpid(monkeypatch, env):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(cmd, 0, stdout="4242\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    for key in ("XDG_RUNTIME_DIR",):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert REAL_MAINPID() == 4242
+    return seen
+
+
+def test_gateway_mainpid_sets_xdg_runtime_dir_when_unset(monkeypatch):
+    import os
+    seen = _run_mainpid(monkeypatch, {})
+    assert seen["env"]["XDG_RUNTIME_DIR"] == f"/run/user/{os.getuid()}"
+
+
+def test_gateway_mainpid_keeps_an_existing_xdg_runtime_dir(monkeypatch):
+    seen = _run_mainpid(monkeypatch, {"XDG_RUNTIME_DIR": "/run/user/77"})
+    assert seen.get("env") is None  # inherit as is

@@ -92,6 +92,36 @@ def test_a_bad_timeout_setting_falls_back_to_the_default(tmp_path):
     assert result.returncode == 0 and took < 1.5
 
 
+def test_the_default_timeout_is_30_seconds():
+    text = SCRIPT.read_text()
+    assert "TIMEOUT=${DURABLE_PARK_LOAD_TIMEOUT:-30}" in text
+    assert "TIMEOUT=30" in text  # the fallback for a non-numeric value
+    assert "120" not in text
+
+
+def test_missing_python_fails_fast_with_the_alert(tmp_path):
+    result, took = run_check(tmp_path, proof=good(), timeout="20",
+                             extra_env={"DURABLE_PARK_PYTHON": str(tmp_path / "no-such-python")})
+    assert result.returncode == 1 and result.stdout.strip() == ALERT.format(pid=4242)
+    assert took < 3  # no polling when it cannot work
+
+
+def test_the_timeout_counts_wall_time_not_loop_turns(tmp_path):
+    # a slow parser must not stretch the wait: a python that sleeps 2 s per call, timeout 3 s
+    slow = tmp_path / "slow-python"
+    slow.write_text("#!/bin/sh\nsleep 2\nexit 1\n")
+    slow.chmod(0o755)
+    result, took = run_check(tmp_path, proof=good(), timeout="3", extra_env={"DURABLE_PARK_PYTHON": str(slow)})
+    assert result.returncode == 1 and took < 8
+
+
+def test_unset_home_does_not_break_the_script(tmp_path):
+    env = {"PATH": "/usr/bin:/bin", "MAINPID": "4242", "DURABLE_PARK_LOAD_TIMEOUT": "1"}  # no HOME, no proof path
+    result = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1 and "unbound variable" not in result.stderr
+    assert result.stdout.strip() == ALERT.format(pid=4242)
+
+
 def test_script_syntax_and_shellcheck():
     subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
     assert SCRIPT.read_text().startswith("#!/usr/bin/env bash\n")
@@ -120,4 +150,7 @@ def test_drop_in_runs_the_check_and_limits_restarts():
     assert unit_at < service_at
     assert lines.index("StartLimitBurst=3") < service_at
     assert lines.index("ExecStartPost=/bin/bash %h/durable-park/deploy/plugin_load_check.sh") > service_at
+    rm = "ExecStartPre=-/bin/rm -f -- %h/.hermes/plugin-data/durable-park/plugin_load.json"
+    check = "ExecStartPre=-/bin/bash %h/durable-park/deploy/tool_policy_check.sh"
+    assert lines.index(rm) < lines.index(check)  # the stale proof is gone before anything else runs
     assert re.search(r"^ExecStartPre=-/bin/bash %h/durable-park/deploy/tool_policy_check\.sh$", conf, re.M)

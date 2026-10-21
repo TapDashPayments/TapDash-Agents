@@ -327,9 +327,12 @@ def _gateway_mainpid() -> int | None:
     """MainPID of the ``hermes-gateway`` user unit, or ``None`` when it cannot be learned (systemctl missing,
     failing, timing out, printing junk, or ``0`` = no main process). ``None`` means the load-proof alert stays
     silent: this must never make the sweep fail."""
+    env = None
+    if not os.environ.get("XDG_RUNTIME_DIR"):  # a cron job may lack it; systemctl --user needs it
+        env = {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}
     try:
         done = subprocess.run(["systemctl", "--user", "show", GATEWAY_UNIT, "-p", "MainPID", "--value"],
-                              capture_output=True, text=True, timeout=SYSTEMCTL_TIMEOUT, check=False)
+                              capture_output=True, text=True, timeout=SYSTEMCTL_TIMEOUT, check=False, env=env)
         if done.returncode != 0:
             return None
         pid = int(done.stdout.strip())

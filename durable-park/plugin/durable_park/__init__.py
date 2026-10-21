@@ -142,6 +142,21 @@ def write_plugin_load(path: str, mode: str, hooks: list[str]) -> None:
         log.warning("durable-park could not write %s (%s)", PLUGIN_LOAD_FILENAME, type(exc).__name__)
 
 
+def _own_hook_live(ctx: Any, own: set[int]) -> bool:
+    """True only when this load was not abandoned and one of our own ``pre_tool_call`` callbacks is in Hermes's
+    registry. Hermes v0.22.2 ``run_with_load_deadline`` (hermes_cli/plugins_loader.py:142-148) abandons a worker
+    that overran ``plugins.load_timeout_seconds`` and calls ``ctx._abandon_load()`` (plugins.py:241), after which
+    every ``ctx.register_*`` is a silent no-op (plugins.py:1100-1121) while ``register`` keeps running to its end.
+    ``PluginManager.iter_hook_callbacks`` (hermes_cli/plugins_dispatch.py:523) is the registry read. Any doubt
+    (unreadable registry, no manager) answers False: no proof, and the start check then fails closed."""
+    try:
+        if getattr(ctx, "_load_abandoned", False):
+            return False
+        return any(id(cb) in own for cb in ctx._manager.iter_hook_callbacks("pre_tool_call"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _proof_directory(ctx: Any) -> str | None:
     """Where the load proof goes (next to the ledger) when ``register`` is already on its failure path: the
     ``ledger_path`` setting's directory, else the plugin data dir, else ``None`` (no proof; the check fails)."""
@@ -271,14 +286,24 @@ def register(ctx) -> None:
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         directory = _proof_directory(ctx) if is_gateway_process() else None
         if directory is not None:  # LAST: the refusing hook is registered
-            write_plugin_load(os.path.join(directory, PLUGIN_LOAD_FILENAME), "refusing-error", registered)
+            _write_load_proof(ctx, own, os.path.join(directory, PLUGIN_LOAD_FILENAME), "refusing-error", registered)
 
 
-def _write_load_proof(ledger_path: str, mode: str, registered: list[str]) -> None:
-    """The load proof next to the ledger, in the gateway process only (the cron sweep and CLI runs must not
-    write it: the check wants the gateway's pid)."""
-    if is_gateway_process():
-        write_plugin_load(str(Path(ledger_path).expanduser().parent / PLUGIN_LOAD_FILENAME), mode, registered)
+def _proof_path(ledger_path: str) -> str:
+    return str(Path(ledger_path).expanduser().parent / PLUGIN_LOAD_FILENAME)
+
+
+def _write_load_proof(ctx: Any, own: set[int], proof_path: str, mode: str, registered: list[str]) -> None:
+    """The load proof, in the gateway process only (the cron sweep and CLI runs must not write it: the check
+    wants the gateway's pid), and only when our own ``pre_tool_call`` hook is really live (``_own_hook_live``):
+    otherwise a warning and no proof."""
+    if not is_gateway_process():
+        return
+    if not _own_hook_live(ctx, own):
+        log.warning("durable-park: its pre_tool_call hook is not registered in Hermes (load abandoned or "
+                    "registry unreadable); not writing %s", PLUGIN_LOAD_FILENAME)
+        return
+    write_plugin_load(proof_path, mode, registered)
 
 
 def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]) -> None:
@@ -312,7 +337,7 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
         ctx.register_tool(
             name=EXECUTOR_TOOL, toolset="durable_park", schema=EXECUTE_SCHEMA,
             handler=make_refusing_executor(POLICY_MESSAGE), description=EXECUTE_SCHEMA["description"])
-        _write_load_proof(ledger_path, "refusing-policy", registered)  # LAST
+        _write_load_proof(ctx, own, _proof_path(ledger_path), "refusing-policy", registered)  # LAST
         return
     try:
         Path(ledger_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -321,7 +346,7 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
         log.error("durable-park ledger unavailable (%s); refusing every tool call", type(exc).__name__)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS))
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
-        _write_load_proof(ledger_path, "refusing-error", registered)  # LAST
+        _write_load_proof(ctx, own, _proof_path(ledger_path), "refusing-error", registered)  # LAST
         return
 
     base_url = ctx.get_config("aap_base_url", DEFAULT_AAP_BASE_URL)
@@ -375,5 +400,5 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
         description=EXECUTE_SCHEMA["description"])
     log.info("durable-park loaded: ledger=%s, %d exempt tool(s), %d form-checked pattern(s), %d observer "
              "hook(s), aap=%s", ledger_path, len(exempt), len(form_checked), len(observers), base_url)
-    _write_load_proof(ledger_path, "asking", registered)  # LAST: the asking hook is registered
+    _write_load_proof(ctx, own, _proof_path(ledger_path), "asking", registered)  # LAST: the asking hook is registered
 

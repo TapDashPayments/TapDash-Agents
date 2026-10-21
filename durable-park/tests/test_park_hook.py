@@ -1412,13 +1412,12 @@ def test_register_writes_the_load_proof_when_the_policy_refuses(tmp_path, monkey
 
 
 def test_register_writes_the_load_proof_when_the_ledger_is_unavailable(tmp_path):
-    ctx = FakeCtx(tmp_path, {"ledger_path": str(tmp_path)})  # a directory, not a database file
+    data = tmp_path / "data"
+    (data / "ledger.db").mkdir(parents=True)  # a directory, not a database file
+    ctx = FakeCtx(tmp_path, {"ledger_path": str(data / "ledger.db")})
     register(ctx)
     assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c")["action"] == "block"
-    # the proof lives next to the (broken) ledger path: its parent
-    proof = json.loads((tmp_path.parent / "plugin_load.json").read_text())
-    assert proof["mode"] == "refusing-error" and "pre_tool_call" in proof["hooks"]
-    (tmp_path.parent / "plugin_load.json").unlink()
+    _assert_proof(data, "refusing-error", ctx)
 
 
 def test_register_writes_the_load_proof_on_the_except_path(tmp_path):
@@ -1472,3 +1471,45 @@ def test_a_failed_load_proof_write_is_logged_not_raised(tmp_path, caplog):
         register(ctx)  # must not raise
     assert "pre_tool_call" in ctx.hooks
     assert any("could not write plugin_load.json" in r.getMessage() for r in caplog.records)
+
+
+class NoopHookCtx(FakeCtx):
+    """What Hermes gives an abandoned load: register_hook silently does nothing."""
+
+    def register_hook(self, name, callback):
+        pass
+
+
+@pytest.mark.parametrize("config", [{}, {"exempt_tools": 5}], ids=["asking", "except-path"])
+def test_no_load_proof_when_the_load_was_abandoned(tmp_path, config, with_session, fake_withhuman, caplog):
+    # Hermes run_with_load_deadline (hermes_cli/plugins_loader.py:142-148) set ctx._load_abandoned after the
+    # deadline; register() still ran to its end, but its registrations were ignored.
+    data = tmp_path / "data"
+    ctx = FakeCtx(data, {"token_file": fake_withhuman.token, **config})
+    ctx._load_abandoned = True
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(ctx)
+    assert not (data / "plugin_load.json").exists()
+    assert any("not writing plugin_load.json" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("config", [{}, {"exempt_tools": 5}], ids=["asking", "except-path"])
+def test_no_load_proof_when_our_hook_never_reached_the_registry(tmp_path, config, with_session, fake_withhuman):
+    data = tmp_path / "data"
+    ctx = NoopHookCtx(data, {"token_file": fake_withhuman.token, **config})
+    register(ctx)
+    assert not (data / "plugin_load.json").exists()
+
+
+def test_no_load_proof_when_the_hook_registry_is_unreadable(tmp_path, with_session, fake_withhuman):
+    data = tmp_path / "data"
+    register(FakeCtx(data, {"token_file": fake_withhuman.token}, manager=False))
+    assert not (data / "plugin_load.json").exists()  # fail closed: nothing proves the hook is live
+
+
+def test_no_load_proof_when_only_a_foreign_hook_is_registered(tmp_path, with_session, fake_withhuman):
+    data = tmp_path / "data"
+    ctx = NoopHookCtx(data, {"token_file": fake_withhuman.token})
+    ctx.hook_lists["pre_tool_call"] = [foreign_hook]  # someone else's hook is there, ours is not
+    register(ctx)
+    assert not (data / "plugin_load.json").exists()
