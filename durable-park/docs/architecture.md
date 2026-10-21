@@ -225,6 +225,10 @@ Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) and its middleware registry
 (`ctx._manager._middleware["tool_request"]` and `["tool_execution"]`, `hermes_cli/plugins.py:1183`; no public
 accessor exists) on every call; durable-park's own callbacks are recognised by object identity. The dependency is listed in `compat.py`, so a Hermes upgrade warns to re-verify it: one WARNING in the gateway process's log (`hermes gateway run`), and only an INFO in any other process that loads the plugin (the 5-minute cron sweep, CLI runs), so the sweep does not put a line in `errors.log` every few minutes.
 
+The tested Hermes version is v0.22.3 (`SUPPORTED_HERMES_VERSION` in `compat.py`; live approve -> run-once re-test on
+2026-10-21, see [the record](acceptance-2026-10-21-hermes-0.22.3.md)). The Hermes source line numbers in this document and in
+`compat.py` were read on v0.22.2 and have not been re-read.
+
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
 configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 UTC; rev 8 is the rollback for the old code only, and rev 10 was a temporary test deny, now deactivated). Every rule for agent
 `proto-agents` also requires that agent; blocks run in order and the first to decide ends the pipeline.
