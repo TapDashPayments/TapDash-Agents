@@ -6,7 +6,7 @@ Date: 2026-10-20 · Status: Implemented 2026-10-21 · Author: Claude (with Yaako
 
 - Two agents are still the plan, built one at a time. Right now: **one agent** on proto-agents.
 - That agent gets **every tool** Hermes offers (terminal, files, browser, Teams, Telegram, QuickBooks via withHuman, ...).
-- **withHuman is the only gate.** Hermes's own built-in approval prompts are off.
+- **withHuman is the only gate.** Hermes's own built-in approval prompts are off. (as a policy; not yet a security boundary — see §8)
 - **First phase: allow everything** on the Hermes side so Yaakov can see what the agent actually uses, then lock down as he chooses.
 - **withHuman side is not touched.** The existing rule (12 QuickBooks money-move tool types are parked for approval) stays as is. No step backwards.
 - Per-person profiles with different permissions come later. Not in this spec.
@@ -20,7 +20,7 @@ Two Hermes 0.22.2 installs on the VPS `proto-agents` (100.99.171.75), built by t
 | Created | Oct 19, 7:29pm ET | Oct 20, 2:45pm ET |
 | What it is | durable-park / withHuman approvals prototype (v1 accepted Oct 20) | Teams bot "TapDash Agent" + web dashboard |
 | Channels | Telegram, webhook (durable-park wake) | Teams, via devtunnel `proto-agents-bot` → port 3978 |
-| Tools | **locked down**: `platform_toolsets` = `[durable_park, clarify, wh]` on every platform; `agent.disabled_toolsets` adds browser-cdp, browser-use, file, skills, terminal, vision (before 2026-10-21; see §4.1 and §10) | stock defaults |
+| Tools | **locked down**: `platform_toolsets` = `[durable_park, clarify, wh]` on every platform; `agent.disabled_toolsets` adds 35 toolsets (file, terminal, browser, skills, vision, web, memory, … — full list in `durable-park/deploy/hermes_tool_policy.py` FORBIDDEN_TOOLSETS) (before 2026-10-21; see §4.1 and §10) | stock defaults |
 | Hermes approvals | not set (= `smart`) | `mode: off` |
 | Dashboard | none | `hermes dashboard --host 100.99.171.75 --port 9119`, basic-auth user `TapDash` |
 | Model | `meituan/longcat-2.5-preview:free` | `upstage/solar-mini4:free` |
@@ -141,6 +141,6 @@ Cutover at 02:20 UTC on 2026-10-21 (gateway on venv `58c7a333`, Telegram and Tea
 | 6 | Pass | P-6CFC909B `create_payment` parked 02:33:45, denied 02:34:30, denial delivered in chat; 0 open rows |
 | 7 | Pass | Dashboard login `TapDash` works (Yaakov) |
 | 8 | Pass | `durable-park-sweep` present |
-| 9 | Pass | `ubuntu` `hermes-gateway` and `hermes-dashboard` disabled and inactive (02:4x UTC); `devtunnel-hermes` enabled and active |
+| 9 | Pass | `ubuntu` `hermes-gateway` and `hermes-dashboard` disabled and inactive (02:37:47 UTC); `devtunnel-hermes` enabled and active |
 
 After the merge, fast-forward the live clone `/home/hermes/tapdash-agents` to main so the warning comment in `configure_hermes.sh` lands on the path admins run (docs and a comment only; no restart needed).

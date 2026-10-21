@@ -51,7 +51,7 @@ Side effect: every `hermes` CLI command prints `Command helper: applied 1 secret
 `Config ref '${env:DURABLE_PARK_WAKE_SECRET}' ... is not set` line (the CLI reads config before the
 secret source runs; the gateway gets the real value, verified with a signed test wake).
 
-## Deploy (Step 5, admin or AI agent, re-runnable)
+## Deploy (Step 5, admin or AI agent, re-runnable on a VM that should have the lockdown; NOT on proto-agents)
 
 > **Do not run this on proto-agents.** The script re-applies the v1 tool lockdown, which was lifted there (decided
 > 2026-10-20, live 2026-10-21). See the warning under [Agent tool policy](#agent-tool-policy-v1-fix-for-the-ledger-bypass-lifted-on-proto-agents)

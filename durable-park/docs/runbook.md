@@ -227,7 +227,7 @@ Several secrets were pasted into chat during testing (approved for testing only)
   `/home/hermes/merge-backup-20261021T021246Z/` (`hermes/` and `ubuntu/`). To go back: `systemctl --user disable --now hermes-dashboard`, copy
   `hermes/config.yaml` and `hermes/.env` over `~/.hermes/`, restart `hermes-gateway` (locked-down tools again, no
   Teams), then start the `ubuntu` user's `hermes-gateway` and `hermes-dashboard` units (they are disabled and stopped:
-  `enable --now` them) and check Telegram and the dashboard login. They were disabled on 2026-10-21 at 02:4x UTC, so
+  `enable --now` them) and check Telegram and the dashboard login. They were disabled on 2026-10-21 at 02:37:47 UTC, so
   nothing restarts them at boot until you do this. The config rollback does not undo the venv switch: the install's
   `facts.json` now points at venv `58c7a333` (the Teams packages) and the old venv `e74ec07b` still exists. Only with nothing `parked`, `approved` or
   `executing`. Plan: [docs/plans/2026-10-20-one-agent-merge.md](../../docs/plans/2026-10-20-one-agent-merge.md).

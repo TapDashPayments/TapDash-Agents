@@ -308,7 +308,7 @@ replay store is not tied to the withHuman request id.
   `mcp__wh__quickbooks__*`) was lifted by hand-editing `~/.hermes/config.yaml`; do not re-run
   `deploy/configure_hermes.sh` on this VM, it re-applies it ([spec](../../docs/specs/2026-10-20-one-agent-merge-design.md) section 4.1).
 - Two agents ran on the VM until 2026-10-21 (this install and an `ubuntu` user install for Teams and the
-  dashboard). Now it is **one**: the `hermes` install. The `ubuntu` install is stopped, its gateway and dashboard units are disabled (2026-10-21 02:4x UTC) and it is kept as an archive.
+  dashboard). Now it is **one**: the `hermes` install. The `ubuntu` install is stopped, its gateway and dashboard units are disabled (2026-10-21 02:37:47 UTC) and it is kept as an archive.
 
 ## 7. Secrets and who can read them
 
@@ -323,6 +323,8 @@ the repo) and never printed by any script.
 | `bridge_secret` | 0640 root:dpwake | bridge | verifies withHuman's pipeline webhook signature |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
+
+Since 2026-10-21 the agent's terminal tool runs as `hermes`, which has passwordless sudo, so the agent can read every file in this table. See backlog item 0.
 
 Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before-production).
 

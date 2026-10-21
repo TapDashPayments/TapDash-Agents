@@ -169,10 +169,13 @@ want=['TEAMS_CLIENT_ID','TEAMS_CLIENT_SECRET','TEAMS_TENANT_ID','TEAMS_ALLOWED_U
 lines=[l for l in src if l.split('=',1)[0] in want]
 assert [l.split('=',1)[0] for l in lines]==want, [l.split('=',1)[0] for l in lines]
 dst=pathlib.Path('/home/hermes/.hermes/.env'); txt=dst.read_text()
-assert 'TEAMS_' not in txt
+assert not re.search(r'^TEAMS_[A-Z_]+=', txt, re.M)
 dst.write_text(txt.rstrip('\n')+'\n\n# Teams bot "TapDash Agent" (moved from the ubuntu install, 2026-10-20)\n'+'\n'.join(lines)+'\nTEAMS_HOST=127.0.0.1\n')
 print('appended', [l.split('=',1)[0] for l in lines]+['TEAMS_HOST'])
 ENVCOPY_4b9e`
+
+(As executed: the original guard tripped on commented `# TEAMS_*` template lines in .env and was narrowed to active `TEAMS_*=` lines.)
+
 Expected: `appended ['TEAMS_CLIENT_ID', 'TEAMS_CLIENT_SECRET', 'TEAMS_TENANT_ID', 'TEAMS_ALLOWED_USERS', 'TEAMS_HOST']`.
 
 - [ ] **Step 4: Verify keys only**
