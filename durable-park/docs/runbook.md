@@ -111,9 +111,8 @@ PY
    | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger`, which runs `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (step 4b copies both trees recursively, removes files the repo no longer has, restarts the bridge, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge). By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401`. |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
-   | `deploy/` (units, policy, Hermes config) | On proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
+   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
-   | `deploy/withhuman/entry-pipeline.json` | in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (with today's code it changes nothing: park requests still reach a human, gateway rows match rev 8) |
 
    Rollback: revert the code first (git checkout the previous `main`, restart the gateway with 0 active rows); never
    re-activate rev 8 while this code runs - rev 8 auto-approves every `hermes`/`mcp:` request.
@@ -366,8 +365,8 @@ asked (and which ones the form self-check watches).
 Example: put a new gateway server's write tool (say DocuSign `createEnvelope`) through the full path. Every place
 that has to agree:
 
-1. **withHuman**: register the server (e.g. slug `docusign`) and grant it to agent `proto-agents`
-   ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
+1. **withHuman**: register the server (e.g. slug `docusign`) and grant it to agent `proto-agents`, granting only the
+   gateway servers the agent needs (spec section 7, Q5) ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
    sends its `park:docusign` request to a person, and add it to pipeline **rule 2**, so the bridge decides its
    replays ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
@@ -440,6 +439,16 @@ Several secrets were pasted into chat during testing (approved for testing only)
 
 ## Rollback
 
+- **A pipeline rule sends everything to a human, or approves too much (withHuman)**: `activate_pipeline_revision`
+  to the previous revision (seconds). Never activate rev 8 while the ask-every-call code is live: rev 8 with that
+  code auto-approves `hermes`/`mcp:` calls. The audit entry shows which block decided, so fix that rule.
+- **Clean Setup Phase 1 (spec section 6, row 4.1; not yet run)**. Keep an open session for the whole change.
+  - Connector unit: over `tailscale ssh ubuntu@proto-agents`, restore the previous unit file, `sudo systemctl daemon-reload`,
+    then `sudo systemctl restart hermes-shell-mcp`.
+  - sshd: run `sudo sshd -t` before any reload; revert the one line in `/etc/ssh/sshd_config.d/50-cloud-init.conf`;
+    keep the open session until `sudo sshd -T` shows the right value.
+  - Temporary sudo for hermes: recreate `/etc/sudoers.d/90-hermes` with `sudo install -m 440`, fix the step so it runs
+    as ubuntu, then delete the file again.
 - **The one-agent merge (2026-10-21)**: the configs, units and ledger from before the cutover are in
   `/home/hermes/merge-backup-20261021T021246Z/` (`hermes/` and `ubuntu/`). To go back: `systemctl --user disable --now hermes-dashboard`, copy
   `hermes/config.yaml` and `hermes/.env` over `~/.hermes/`, restart `hermes-gateway` (locked-down tools again, no

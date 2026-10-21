@@ -195,7 +195,7 @@ Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) and its middleware registry
 accessor exists) on every call; durable-park's own callbacks are recognised by object identity. The dependency is listed in `compat.py`, so a Hermes upgrade warns to re-verify it.
 
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
-configured in the withHuman app; as of October 2026, rev N (to be saved; see Task 13)). Every rule for agent
+configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 UTC; rev 8 is the rollback for the old code only, and rev 10 was a temporary test deny, now deactivated). Every rule for agent
 `proto-agents` also requires that agent; blocks run in order and the first to decide ends the pipeline.
 
 | Order | Block | When | Then |
