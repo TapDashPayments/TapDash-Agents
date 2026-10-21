@@ -468,6 +468,18 @@ def test_policy_alert_once_and_recovery(world, monkeypatch, capsys, tmp_path):
     assert third.strip() == POLICY_OK and fourth == ""
 
 
+def test_policy_failed_report_gives_one_alert_and_one_recovery(world, monkeypatch, capsys, tmp_path):
+    # the plugin refuses at load because the report failed, so its load verdict repeats the same failure
+    write_policy(tmp_path, ok=False, problems=["terminal is open"])
+    write_load(tmp_path, ok=False, problem="the tool policy check failed")
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == POLICY_ALERT.format(problems="terminal is open") and second == ""
+    write_policy(tmp_path, ok=True)
+    write_load(tmp_path, ok=True)
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.strip() == POLICY_OK and fourth == ""
+
+
 def test_policy_alert_when_the_report_is_missing_or_unreadable(world, monkeypatch, capsys, tmp_path):
     (tmp_path / "tool_policy_status.json").unlink()
     first, second = runs(world, monkeypatch, capsys, 2)

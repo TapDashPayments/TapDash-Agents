@@ -188,8 +188,9 @@ again.`) when it passes.
 
 The plugin also writes its own verdict at load, `tool_policy_load.json` next to the ledger (`ok`, `problem`,
 `checked_at`), because the sweep cannot judge a report's age. Only the gateway process (`hermes gateway run`) writes
-it: the cron sweep and CLI runs fail closed on their own but never overwrite the gateway's verdict. The sweep alerts
-once when `ok` is false:
+it: the cron sweep and CLI runs fail closed on their own but never overwrite the gateway's verdict. The sweep sends
+this alert only when the start-time report passed, so a failed report gives one alert (the one above), not two. It
+alerts once when `ok` is false (the report went stale, or the plugin judged it differently):
 
 `durable-park ALERT: the tool policy check did not pass when the plugin loaded — <problem>. Every tool call is refused until an admin fixes it and restarts the gateway.`
 
