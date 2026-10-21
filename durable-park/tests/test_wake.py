@@ -421,9 +421,10 @@ def test_register_installs_wake_hook_before_anything_that_can_fail(tmp_path):
             raise RuntimeError("tool registry broke")
 
     ctx = Boom(tmp_path)
-    with pytest.raises(RuntimeError):
-        register(ctx)
+    register(ctx)  # never raises: Hermes would drop every hook; it falls back to refusing instead
     assert "pre_gateway_dispatch" in ctx.hooks
+    assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s",
+                                      tool_call_id="c")["action"] == "block"
 
 
 def test_register_fail_closed_still_drops_wake_events(tmp_path):

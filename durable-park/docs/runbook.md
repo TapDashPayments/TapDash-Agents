@@ -216,10 +216,10 @@ The park hook answers a blocked call with one of these (the model sees them and 
 | `durable-park: withHuman could not be reached` | withHuman did not answer (or the breaker is open); row `refused`, nothing ran. | See [withHuman could not be reached](#withhuman-could-not-be-reached); ask again later |
 | `durable-park: P-... is already waiting for approval in this chat` | Another call of this chat waits for a person or is running; this call's request was cancelled. | Decide the waiting one ([below](#a-chat-says-already-waiting-but-nothing-is-pending-in-withhuman)) |
 | `durable-park: P-... is already <status>; this call was not run again` | The model replayed a call id that was already decided (`allowed`, `refused`, `denied`, ...). | Nothing |
-| `durable-park: another plugin hook could change tool arguments after approval (<names>)` | A Hermes plugin registered its own `pre_tool_call` hook (or the hook registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-plugins-hook-observer_hooks)) |
+| `durable-park: another plugin hook could change tool arguments after approval (<names>)` | Something other than durable-park registered a `pre_tool_call` callback: a plugin's hook, a `config.yaml` `hooks:` shell hook or an outbound webhook (or the hook registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-hook-observer_hooks)) |
 | `durable-park: no chat session; the tool call was refused` | The call came from outside a chat (e.g. `hermes chat -q`). | Use a chat |
 | `durable-park: no tool call id; the tool call was refused` | Hermes passed no session id or call id. | Check the Hermes version (`compat.py`) |
-| `durable-park: could not open an approval request` | An error in the hook (token file unreadable, arguments that are not strict JSON, ledger error); logged as `park hook failed for tool=...`. | Read `~/.hermes/logs/agent.log` |
+| `durable-park: could not open an approval request` | An error in the hook (token file unreadable, arguments that are not strict JSON, ledger error; logged as `park hook failed for tool=...`), or durable-park could not load and refuses every call (a setting of the wrong type, logged as `durable-park setting <name> must be a list of strings`, or `durable-park failed to load`). | Read `~/.hermes/logs/agent.log` |
 
 ### A chat says "already waiting" but nothing is pending in withHuman
 
@@ -250,24 +250,40 @@ plugins:
         observer_hooks: []                                # module.qualname of reviewed hooks
 ```
 
+- `exempt_tools`, `form_checked_tools` and `observer_hooks` must be lists of strings. A wrong type (a number,
+  `true`, a mapping, an empty `observer_hooks:` that YAML reads as null) makes durable-park refuse every call
+  except `parked_action_execute` and `clarify`; the log says `durable-park setting <name> must be a list of
+  strings`. Fix it and restart.
 - `risky_tools` is retired: it was renamed `form_checked_tools`. If it is still set the gateway log says
   `risky_tools is renamed form_checked_tools; ignoring it`; move the value to `form_checked_tools` and delete it.
 - After the restart, `~/.hermes/logs/agent.log` shows `durable-park loaded: ... exempt tool(s), ... form-checked
   pattern(s), ... observer hook(s)`.
 
-### Allow another plugin's hook (`observer_hooks`)
+### Allow another hook (`observer_hooks`)
 
-durable-park refuses every non-exempt call while any other plugin has a `pre_tool_call` hook, because such a hook
-can return a `modify` directive and change a call's arguments after withHuman approved them. To allow a hook that
-only watches:
+durable-park refuses every non-exempt call while anything else has a `pre_tool_call` callback in Hermes's hook
+registry, because such a callback can return a `modify` directive and change a call's arguments after withHuman
+approved them. Three things put one there, each with its own name format:
 
-1. Find its name in the refusal or the log line `foreign pre_tool_call hook(s) present (<module.qualname>)`.
-2. **Read the callback's code** (the plugin's `register` and the function itself), including everything it calls.
+| Source | Name in the refusal and the log |
+|---|---|
+| another Hermes plugin's `ctx.register_hook("pre_tool_call", ...)` | `<module>.<qualname>` of its function, e.g. `my_plugin.hooks.on_tool` |
+| a `config.yaml` `hooks:` shell hook for `pre_tool_call` (Hermes `agent/shell_hooks.py:376`) | `agent.shell_hooks.shell_hook[pre_tool_call:<command>]` |
+| a `config.yaml` outbound webhook subscribed to `pre_tool_call` (Hermes `agent/outbound_webhooks.py:236`) | `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name`, else its URL |
+
+Outbound webhooks only notify: the callback queues a POST and always returns `None`, so it can never change
+arguments and is safe to list. Shell hooks can return any directive their command prints (including `modify`), and
+the name holds the whole command, so review the script.
+
+To allow one:
+
+1. Find its name in the refusal or the log line `foreign pre_tool_call hook(s) present (<name>)`.
+2. **Read the callback's code**: for a plugin, its `register` and the function, including everything it calls;
+   for a shell hook, the command and the script it runs.
 3. **Confirm it never returns `modify`** (or any directive other than `None`, or `block`), on any path, including
-   errors. If you cannot confirm it, do not list it: remove or disable the plugin instead.
-4. Add its exact `module.qualname` to `observer_hooks`, restart the gateway, and check one call is asked about
-   normally again.
-5. Re-do this review whenever that plugin is updated.
+   errors. If you cannot confirm it, do not list it: remove or disable it instead.
+4. Add its exact name to `observer_hooks`, restart the gateway, and check one call is asked about normally again.
+5. Re-do this review whenever that plugin, script or command changes.
 
 `<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook registry
 (e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.

@@ -26,19 +26,24 @@ HOOK_REGISTRY_UNAVAILABLE = "<hook registry unavailable>"
 RISKY_TOOLS_RENAMED = "risky_tools is renamed form_checked_tools; ignoring it"
 
 
-def _names(value: Any) -> list[str]:
-    """A setting that is a list of strings (a lone string counts as a one-item list)."""
-    if value is None:
-        return []
+class BadSetting(ValueError):
+    """A plugin setting has the wrong type."""
+
+
+def _names(key: str, value: Any) -> list[str]:
+    """A list-of-strings setting (a lone string counts as a one-item list). Anything else - a number, a boolean,
+    a mapping, null, a list holding a non-string - raises ``BadSetting``; ``register`` then refuses every call."""
     if isinstance(value, str):
         return [value]
-    return [str(item) for item in value]
+    if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        return list(value)
+    raise BadSetting(f"setting {key} must be a list of strings, got {type(value).__name__}")
 
 
-def _compile_form_checked(patterns: Any) -> list[re.Pattern]:
+def _compile_form_checked(patterns: list[str]) -> list[re.Pattern]:
     compiled: list[re.Pattern] = []
     invalid = False
-    for pattern in _names(patterns):
+    for pattern in patterns:
         try:
             compiled.append(re.compile(pattern))
         except re.error as exc:
@@ -80,7 +85,7 @@ def foreign_pre_tool_call_hooks(ctx: Any, own: set[int], allowed: set[str]) -> l
 
 
 def _exempt_tools(ctx: Any) -> tuple[str, ...]:
-    exempt = tuple(_names(ctx.get_config("exempt_tools", list(DEFAULT_EXEMPT_TOOLS))))
+    exempt = tuple(_names("exempt_tools", ctx.get_config("exempt_tools", list(DEFAULT_EXEMPT_TOOLS))))
     if EXECUTOR_TOOL not in exempt:
         log.warning("exempt_tools does not list %s: approved parks will be asked about again and cannot run",
                     EXECUTOR_TOOL)
@@ -89,14 +94,38 @@ def _exempt_tools(ctx: Any) -> tuple[str, ...]:
 
 def register(ctx) -> None:
     """Hermes plugin entry point: the ``pre_tool_call`` hook (asks withHuman about every non-exempt call), the
-    ``parked_action_execute`` tool and the ``pre_gateway_dispatch`` wake handler."""
+    ``parked_action_execute`` tool and the ``pre_gateway_dispatch`` wake handler.
+
+    Never raises: when ``register`` raises, Hermes v0.22.2 disposes every registration of the plugin and carries
+    on with no ``pre_tool_call`` hook at all (hermes_cli/plugins_loader.py:525-537), so every tool would run
+    unchecked. Any error (a setting of the wrong type, a wiring failure) instead registers a hook that refuses
+    every call except ``DEFAULT_EXEMPT_TOOLS`` and drops wakes."""
     compat.check_hermes_version(log)  # warns (never refuses) on a Hermes other than v0.22.2
-    exempt = _exempt_tools(ctx)
     own: set[int] = set()  # ids of the hook callbacks this register passed to ctx.register_hook
 
     def register_hook(name: str, callback: Any) -> None:
         own.add(id(callback))
         ctx.register_hook(name, callback)
+
+    try:
+        _register(ctx, own, register_hook)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never leave Hermes without a blocking hook
+        if isinstance(exc, BadSetting):
+            log.error("durable-park %s; refusing every tool call", exc)
+        else:
+            log.error("durable-park failed to load (%s); refusing every tool call", type(exc).__name__)
+        register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS))
+        register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
+
+
+def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
+    if ctx.get_config("risky_tools", None) is not None:
+        log.warning(RISKY_TOOLS_RENAMED)
+    # Every list setting is validated before anything is registered (BadSetting -> refuse everything).
+    exempt = _exempt_tools(ctx)
+    form_checked = _compile_form_checked(
+        _names("form_checked_tools", ctx.get_config("form_checked_tools", list(DEFAULT_FORM_CHECKED_TOOLS))))
+    observers = frozenset(_names("observer_hooks", ctx.get_config("observer_hooks", [])))
 
     ledger_path = ctx.get_config("ledger_path", str(Path(ctx.state.data_dir) / "ledger.db"))
     try:
@@ -108,14 +137,9 @@ def register(ctx) -> None:
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         return
 
-    if ctx.get_config("risky_tools", None) is not None:
-        log.warning(RISKY_TOOLS_RENAMED)
-    form_checked = _compile_form_checked(ctx.get_config("form_checked_tools", list(DEFAULT_FORM_CHECKED_TOOLS)))
-    observers = frozenset(_names(ctx.get_config("observer_hooks", [])))
     base_url = ctx.get_config("aap_base_url", DEFAULT_AAP_BASE_URL)
     token_file = ctx.get_config("token_file", DEFAULT_TOKEN_FILE)
     state_dir = Path(ledger_path).expanduser().parent
-
     # Register the wake hook first so a later registration failure can never leave wakes reaching the agent.
     wake_client_factory = make_async_client_factory(base_url, token_file)
 

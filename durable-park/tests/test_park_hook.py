@@ -211,7 +211,9 @@ def test_parked_row_without_request_does_not_make_the_chat_busy(env):
 
 class FakeCtx:
     """A Hermes PluginContext stand-in. ``_manager.iter_hook_callbacks`` mirrors Hermes v0.22.2
-    (hermes_cli/plugins_dispatch.py:523): a snapshot tuple of the callables registered for a hook."""
+    (hermes_cli/plugins_dispatch.py:523): a snapshot tuple of the callables registered for a hook.
+    It imitates Hermes's unwrapped callback storage (``register_hook`` appends the callable itself, so ``id()``
+    identifies durable-park's own hooks); ``compat.DEPENDS_ON`` is the guard if Hermes ever changes that."""
 
     def __init__(self, data_dir, config=None, *, manager=True):
         self.config = config or {}
@@ -457,6 +459,57 @@ def test_hook_and_executor_share_one_gate(tmp_path, monkeypatch):
     assert len(holders) == 1 and gets == [holders[0], holders[0]]
     assert isinstance(factories["breaker"], Breaker)
     assert factories["breaker"]._path == str(tmp_path / "data" / "breaker_status.json")
+
+
+BAD_SETTINGS = [
+    ("exempt_tools", 5), ("exempt_tools", {"clarify": True}), ("exempt_tools", ["clarify", 3]),
+    ("exempt_tools", None), ("observer_hooks", True), ("observer_hooks", {"a": "b"}),
+    ("form_checked_tools", 7), ("form_checked_tools", [r"mcp__x", None]),
+]
+
+
+def _assert_fails_closed_with_default_exempt(ctx):
+    hook = ctx.hooks["pre_tool_call"]
+    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": COULD_NOT_OPEN}
+    for exempt in ("clarify", "parked_action_execute"):
+        assert hook(tool_name=exempt, args={}, session_id="s", tool_call_id="c") is None
+    assert "pre_gateway_dispatch" in ctx.hooks  # wakes never reach the agent
+
+
+@pytest.mark.parametrize("key, value", BAD_SETTINGS)
+def test_bad_setting_type_fails_closed(tmp_path, key, value, caplog):
+    """A setting of the wrong type must never make register raise: Hermes would drop every registration and
+    run with no pre_tool_call hook (hermes_cli/plugins_loader.py:525-537), i.e. every tool unchecked."""
+    ctx = FakeCtx(tmp_path / "data", {key: value})
+    with caplog.at_level("ERROR", logger="durable_park"):
+        register(ctx)  # does not raise
+    _assert_fails_closed_with_default_exempt(ctx)
+    assert any(key in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+    assert ctx.tools == {}
+
+
+@pytest.mark.parametrize("target", ["durable_park.GateHolder", "durable_park.make_pre_tool_call",
+                                    "durable_park.make_executor"])
+def test_error_after_the_ledger_opens_fails_closed(tmp_path, monkeypatch, target):
+    def boom(*a, **kw):
+        raise RuntimeError("wiring broke")
+
+    monkeypatch.setattr(target, boom)
+    ctx = FakeCtx(tmp_path / "data")
+    register(ctx)  # does not raise
+    for cb in ctx.hook_lists["pre_tool_call"]:  # every pre_tool_call hook Hermes would run
+        if cb(tool_name="web_search", args={}, session_id="s", tool_call_id="c") is not None:
+            break
+    else:
+        raise AssertionError("no hook blocked web_search")
+    _assert_fails_closed_with_default_exempt(ctx)
+
+
+def test_risky_tools_warns_even_when_the_ledger_fails(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(FakeCtx(tmp_path, {"ledger_path": str(tmp_path), "risky_tools": ["x"]}))
+    assert "risky_tools is renamed form_checked_tools; ignoring it" in [r.getMessage() for r in caplog.records]
 
 
 def test_risky_tools_setting_warns(tmp_path, monkeypatch, caplog):
