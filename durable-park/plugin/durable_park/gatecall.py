@@ -135,13 +135,16 @@ def make_gate(base_url: str, token: str, *, client: Client | None = None) -> Gat
 
 class GateHolder:
     """One shared ``Gate``, rebuilt when the token file changes (``(st_mtime_ns, st_size)``). Thread-safe.
-    The token is read only when (re)building and is never logged; ``OSError`` propagates."""
+    The token is read only when (re)building and is never logged; ``OSError`` propagates. A replaced gate's
+    client (SDK ``Client.close()`` closes its httpx client) is closed one rebuild later, never at once: a call
+    that took the old gate just before the change may still be using it."""
 
     def __init__(self, base_url: str, token_file: str):
         self._base_url = base_url
         self._token_file = token_file
         self._lock = threading.Lock()
         self._gate: Gate | None = None
+        self._retired: Gate | None = None
         self._stamp: tuple[int, int] | None = None
 
     def get(self) -> Gate:
@@ -151,6 +154,12 @@ class GateHolder:
             if self._gate is None or stamp != self._stamp:
                 with open(self._token_file, encoding="utf-8") as handle:
                     token = handle.read().strip()
-                self._gate = make_gate(self._base_url, token)
+                new_gate = make_gate(self._base_url, token)
+                if self._retired is not None:
+                    try:
+                        self._retired.client.close()
+                    except Exception:  # noqa: BLE001 - closing an old client must never fail a call
+                        pass
+                self._retired, self._gate = self._gate, new_gate
                 self._stamp = stamp
             return self._gate

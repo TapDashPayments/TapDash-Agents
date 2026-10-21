@@ -112,6 +112,22 @@ def test_gate_holder_reuses_and_rebuilds_on_token_change(tmp_path):
         holder.get()
 
 
+def test_gate_holder_closes_a_retired_client_one_rebuild_later(tmp_path):
+    """A rebuilt gate's old httpx client is closed, but only at the NEXT rebuild: a call that got the old gate
+    just before the token changed may still be using it."""
+    token_file = tmp_path / "token"
+    token_file.write_text("tok-1")
+    holder = GateHolder("http://127.0.0.1:1", str(token_file))
+    first = holder.get()
+    token_file.write_text("tok-22")
+    second = holder.get()
+    assert not first.client._http.is_closed  # retired, maybe still in use
+    token_file.write_text("tok-333")
+    holder.get()
+    assert first.client._http.is_closed
+    assert not second.client._http.is_closed
+
+
 def test_gate_pending_then_allow_then_consumed(tmp_path):
     row = make_row(tmp_path)
     provider = FakeProvider(auto=None)
