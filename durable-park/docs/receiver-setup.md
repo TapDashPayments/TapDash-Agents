@@ -53,6 +53,10 @@ secret source runs; the gateway gets the real value, verified with a signed test
 
 ## Deploy (Step 5, admin or AI agent, re-runnable)
 
+> **Do not run this on proto-agents.** The script re-applies the v1 tool lockdown, which was lifted there (decided
+> 2026-10-20, live 2026-10-21). See the warning under [Agent tool policy](#agent-tool-policy-v1-fix-for-the-ledger-bypass-lifted-on-proto-agents)
+> and the [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md) section 4.1. It is re-runnable only on a VM that should have the lockdown.
+
 ```sh
 sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh
 ```
@@ -121,7 +125,9 @@ in the same gateway (since 2026-10-21), so only the `durable-park-sweep` cron jo
 
 ## Agent tool policy (v1 fix for the ledger bypass; lifted on proto-agents)
 
-> **Status:** on 2026-10-20 Yaakov decided the one agent on proto-agents gets the full Hermes toolset, and since
+> **Status:** what is true now: the agent's terminal and file tools run on the VM as `hermes` with passwordless sudo,
+> so the threat described below is **not prevented** on proto-agents (accepted for the sandbox phase; see
+> [architecture](architecture.md#the-three-guarantees)). History: on 2026-10-20 Yaakov decided the one agent on proto-agents gets the full Hermes toolset, and since
 > about 02:20 UTC on 2026-10-21 it runs that way: `platform_toolsets` and `known_plugin_toolsets` are removed from
 > `~/.hermes/config.yaml`, `agent.disabled_toolsets` is `[]` (Hermes stock) and `approvals.mode` is `off`.
 > `tools.tool_search.enabled: off`, `gateway.strict: true` and `gateway.trust_recent_files: false` were kept. **Do not

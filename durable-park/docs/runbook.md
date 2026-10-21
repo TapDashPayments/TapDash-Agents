@@ -16,7 +16,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 | What | How |
 |---|---|
 | VM | `proto-agents` (OVH VPS, Ubuntu 26.04, Hermes v0.22.2). Admins: `tailscale ssh ubuntu@proto-agents` (passwordless sudo). |
-| AI agents (e.g. Claude) | Through the Hermes Server connector, piping scripts into `/tmp/dp-tools/vm` (runs as `hermes`) or `/tmp/dp-tools/vmroot` (root) on the jump host. |
+| AI agents (e.g. Claude) | Current route: the Proto-Agents connector (see the last row), which runs as `hermes` with passwordless sudo. Older route (jump host, production; not for this VM): through the Hermes Server connector, piping scripts into `/tmp/dp-tools/vm` (runs as `hermes`) or `/tmp/dp-tools/vmroot` (root) on the jump host. |
 | Repo on the VM | `/home/hermes/tapdash-agents` (a clone of this repo). `/home/hermes/durable-park` links to its `durable-park/` folder. |
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
 | Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where alerts go). |
@@ -30,11 +30,16 @@ Rules:
 - When piping scripts through the connector, give every heredoc a **unique** delimiter (e.g. `<<'XEOF_7'`) and
   never reuse it inside. A reused `EOF` once ran the tail of a script on the production host.
 - **Never print a secret.** Secrets are typed in by an admin with `read -rs` (never pasted into chat).
-- Root steps (copying into `/opt`, restarting system units) are done by an admin in their own terminal. AI agents
-  are blocked from them by design.
+- Root steps (copying into `/opt`, restarting system units) should be done by an admin in their own terminal. That is
+  a convention, not a block: the Hermes agent and Claude (through the Proto-Agents connector) both run as `hermes`
+  with passwordless sudo, so either can do them.
 - **One agent, full toolset (since 2026-10-21).** The `hermes` install is the only agent on the VM. It has every Hermes
   tool and Hermes's own approvals are off, so durable-park (the 12 QuickBooks money-move tool types) is the **only**
-  approval gate; terminal and file actions are not gated. Why: [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md). The old `ubuntu` user's
+  approval gate; terminal and file actions are not gated. **This is not a security boundary today:** the agent's terminal runs locally
+  as `hermes` (passwordless sudo), so it can read `/etc/durable-park/*` (QuickBooks secret and refresh token, withHuman
+  tunnel token), change `/opt/durable-park`, forge ledger rows and call QuickBooks directly, bypassing withHuman.
+  Accepted by Yaakov on 2026-10-20 for the exploration phase on a QuickBooks sandbox; containing the agent's tools
+  comes before real credentials ([backlog](backlog.md#before-real-books)). Why: [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md). The old `ubuntu` user's
   Hermes install (gateway and dashboard units) is stopped and kept as an archive; do not start it next to this one.
 - **Restarting `hermes-gateway` also restarts the Teams bot** (and briefly drops Telegram). The dashboard is its own unit
   and keeps running. The "no `parked`, `approved` or `executing` row" rule below still applies before any restart.
@@ -98,7 +103,7 @@ PY
    | any file in `bridge/` | root, admin: copy each changed file, e.g. `sudo install -m 0644 -o root -g root /home/hermes/durable-park/bridge/app.py /opt/durable-park/bridge/app.py`, then `sudo systemctl restart durable-park-bridge` |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
-   | `deploy/` (units, policy, Hermes config) | **Not on proto-agents since 2026-10-20:** `configure_hermes.sh` re-applies the v1 tool lockdown. Edit `~/.hermes/config.yaml` by hand (keep comments), then `systemctl --user restart hermes-gateway`. |
+   | `deploy/` (units, policy, Hermes config) | **Not on proto-agents (decided 2026-10-20, live 2026-10-21):** `configure_hermes.sh` re-applies the v1 tool lockdown. Edit `~/.hermes/config.yaml` by hand (keep comments), then `systemctl --user restart hermes-gateway`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
@@ -219,10 +224,12 @@ Several secrets were pasted into chat during testing (approved for testing only)
 ## Rollback
 
 - **The one-agent merge (2026-10-21)**: the configs, units and ledger from before the cutover are in
-  `/home/hermes/merge-backup-20261021T021246Z/` (`hermes/` and `ubuntu/`). To go back: stop `hermes-dashboard`, copy
+  `/home/hermes/merge-backup-20261021T021246Z/` (`hermes/` and `ubuntu/`). To go back: `systemctl --user disable --now hermes-dashboard`, copy
   `hermes/config.yaml` and `hermes/.env` over `~/.hermes/`, restart `hermes-gateway` (locked-down tools again, no
   Teams), then start the `ubuntu` user's `hermes-gateway` and `hermes-dashboard` units (they are disabled and stopped:
-  `enable --now` them) and check Telegram and the dashboard login. Only with nothing `parked`, `approved` or
+  `enable --now` them) and check Telegram and the dashboard login. They were disabled on 2026-10-21 at 02:4x UTC, so
+  nothing restarts them at boot until you do this. The config rollback does not undo the venv switch: the install's
+  `facts.json` now points at venv `58c7a333` (the Teams packages) and the old venv `e74ec07b` still exists. Only with nothing `parked`, `approved` or
   `executing`. Plan: [docs/plans/2026-10-20-one-agent-merge.md](../../docs/plans/2026-10-20-one-agent-merge.md).
 - **Code**: `git revert <commit>` in the clone, push, then make it live as in [Deploy a change](#deploy-a-change).
   For the bridge and receiver that includes copying the reverted files to `/opt/durable-park` again: the root

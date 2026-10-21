@@ -61,7 +61,7 @@ running on the test VM.
 | Bridge | Our custom service that withHuman's pipeline calls: "is this exactly the approved call?" Answers yes once, else asks a person | [`durable-park/bridge/`](durable-park/bridge/) |
 | Receiver | Takes withHuman's signed "decision made" webhook and wakes the plugin; also does one-time provisioning | [`durable-park/receiver/`](durable-park/receiver/) |
 | Sweep | Runs every 5 minutes: safety net for stuck rows, and the alerts | [`durable-park/scripts/`](durable-park/scripts/) |
-| Tool lockdown and deploy | The v1 lockdown that limited what the agent can call (lifted on proto-agents on 2026-10-20); systemd units; tunnel image build | [`durable-park/deploy/`](durable-park/deploy/) |
+| Tool lockdown and deploy | The v1 lockdown that limited what the agent can call (lifted on proto-agents: decided 2026-10-20, live 2026-10-21); systemd units; tunnel image build | [`durable-park/deploy/`](durable-park/deploy/) |
 | Docs check | Keeps docs and diagrams in step with code (pre-push hook and CI) | [`tools/docs_check/`](tools/docs_check/) |
 
 ## What is in this repo

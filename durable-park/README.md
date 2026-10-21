@@ -6,9 +6,16 @@ stopped and saved, an approver approves or denies it in [withHuman](https://with
 later - and then the exact saved call runs once, in the same chat. It survives restarts and never retries on its own.
 
 Status: **v1 accepted on 2026-10-20**, QuickBooks **sandbox** only, on the test VM `proto-agents`
-([acceptance results](docs/acceptance-2026-10-20.md)). Since 2026-10-20 the proto-agents agent runs with the full
+([acceptance results](docs/acceptance-2026-10-20.md)). Since 2026-10-21 (decided 2026-10-20) the proto-agents agent runs with the full
 Hermes toolset (the v1 tool lockdown was lifted, [spec](../docs/specs/2026-10-20-one-agent-merge-design.md)):
 durable-park gates QuickBooks money moves only.
+
+**Known risk, accepted for now:** on proto-agents the agent's terminal and file tools run on the VM itself as a user
+with passwordless sudo, so a determined or hijacked agent can read every secret in `/etc/durable-park/` (including
+the QuickBooks credentials), forge ledger rows and call QuickBooks directly, bypassing withHuman. durable-park
+therefore gates QuickBooks money moves only when the agent does not go around it; it is not a security boundary
+yet. Yaakov accepted this on 2026-10-20 for the QuickBooks sandbox exploration phase. Containing the agent's tools
+is the first item in the [backlog](docs/backlog.md#before-real-books), before any real books.
 
 ## How it works
 
@@ -43,7 +50,7 @@ The open-source and third-party pieces it is built on (versions, licenses, links
 | `bridge/` | The gateway bridge service (withHuman's pipeline asks it "is this call approved?"). |
 | `receiver/` | The webhook receiver (withHuman tells it a decision was made) and one-time provisioning. |
 | `scripts/` | The 5-minute sweep (safety net and alerts), run by Hermes cron. |
-| `deploy/` | Deploy script, systemd units, the v1 tool lockdown (not applied on proto-agents since 2026-10-20), the QuickBooks tunnel container. |
+| `deploy/` | Deploy script, systemd units, the v1 tool lockdown (not applied on proto-agents: decided 2026-10-20, live 2026-10-21), the QuickBooks tunnel container. |
 | `tests/` | Unit tests (no network). `tests/live/` holds manual tests for the VM. |
 | `docs/` | Architecture, runbook and setup guides (below). |
 
