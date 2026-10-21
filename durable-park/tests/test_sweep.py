@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import subprocess
 import sys
@@ -321,13 +322,22 @@ def test_sweep_runs_without_the_sdk_from_any_cwd_through_a_symlink(world, tmp_pa
     stale = world.row("executing", executing_minutes_ago=20)
     link = tmp_path / "linked_sweep.py"
     link.symlink_to(SCRIPT)
+    # The subprocess runs the real sweep, so the autouse ``_no_gateway_pid`` patch does not reach it: a fake
+    # ``systemctl`` first on its PATH stands in for a failing one (MainPID unknown -> no load-proof alert). Without
+    # it, a VM with a live gateway would add a "no durable-park load proof" alert for the test's temp directory.
+    fake_bin = tmp_path / "fake_bin"
+    fake_bin.mkdir()
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text("#!/bin/sh\nexit 1\n")
+    fake_systemctl.chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
     # Hermes's cron runs the script with its own interpreter: the SDK and httpx must not be needed
     code = ("import runpy, sys; sys.modules['agentapprovalprotocol'] = None; sys.modules['httpx'] = None; "
             "sys.argv = [sys.argv[1], *sys.argv[2:]]; runpy.run_path(sys.argv[0], run_name='__main__')")
     done = subprocess.run(
         [sys.executable, "-I", "-c", code, str(link), "--ledger", world.ledger.path,
          "--wake-secret-file", str(world.secret_file)],
-        cwd=tmp_path, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        cwd=tmp_path, env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert done.returncode == 0, done.stderr
     assert done.stdout == f"durable-park: {stale} outcome UNKNOWN — check {TOOL} in the sandbox before retrying\n"
     assert done.stderr == ""
