@@ -264,6 +264,8 @@ def allowed_tool_names(allowed: list[str]) -> set[str]:
     """The tool names Hermes defines for the opened toolsets."""
     import model_tools
 
+    # HERMES_KANBAN_TASK (which makes Hermes add kanban tools, model_tools.py:322-324) is never set for the gateway:
+    # only a kanban worker has it, so the definitions below are exactly the toolsets' own tools.
     # An empty list selects nothing (model_tools.py:316-321: only ``None`` means every toolset).
 
     defs = model_tools.get_tool_definitions(enabled_toolsets=list(allowed), quiet_mode=True)
@@ -384,7 +386,11 @@ def main(argv: list[str]) -> int:
     status_file = getattr(args, "status_file", None)
     problems: list[str] = []
     if status_file:  # replace any earlier pass first: a crash or a failed final write must not leave a stale ok
-        write_status(status_file, False, ["check did not finish"], allowed)
+        try:
+            write_status(status_file, False, ["check did not finish"], allowed)
+        except OSError as exc:  # cannot record a failure: report one, run nothing
+            print(f"hermes_tool_policy.py: cannot write status file {status_file}: {exc}", file=sys.stderr)
+            return 1
     try:
         _bootstrap()
         if args.command == "apply":

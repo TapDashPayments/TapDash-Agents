@@ -306,3 +306,12 @@ def test_allowed_tool_names_empty_asks_hermes_for_nothing_selected(monkeypatch):
     fake.get_tool_definitions = lambda **kw: [] if kw["enabled_toolsets"] == [] else [{"function": {"name": "x"}}]
     monkeypatch.setitem(sys.modules, "model_tools", fake)
     assert policy.allowed_tool_names([]) == set()
+
+
+def test_unwritable_status_directory_is_a_failed_check(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: (_ for _ in ()).throw(AssertionError("must not start")))
+    monkeypatch.setattr(policy, "check", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not check")))
+    out = tmp_path / "no-such-dir" / "status.json"
+    assert policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)]) == 1
+    assert "status file" in capsys.readouterr().err
+    assert not out.exists()
