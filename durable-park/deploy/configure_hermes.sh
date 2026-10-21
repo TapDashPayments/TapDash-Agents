@@ -258,7 +258,7 @@ cat >"$wrapper" <<WRAPPER
 # durable-park sweep for Hermes cron (every 5m, --no-agent). Written by deploy/configure_hermes.sh; edits
 # are overwritten. A real file because cron refuses symlinks out of ~/.hermes/scripts and cannot pass
 # arguments. The sweep uses the standard library only.
-exec /usr/bin/python3 -I $REPO/scripts/durable_park_sweep.py --ledger $LEDGER --wake-secret-file $ETC/wake_secret
+exec /usr/bin/python3 -I $REPO/scripts/durable_park_sweep.py --ledger $LEDGER --wake-secret-file $ETC/wake_secret --retention-days 30
 WRAPPER
 install -m 0750 -o "$HERMES_USER" -g "$HERMES_USER" "$wrapper" "$SWEEP_WRAPPER"
 rm -f "$wrapper"

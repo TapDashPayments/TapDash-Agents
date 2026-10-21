@@ -1,4 +1,4 @@
-"""Check a risky call's arguments against the tool's own input rules before it is parked.
+"""Check a form-checked call's arguments against the tool's own input rules before withHuman is asked.
 
 The rules are the JSON Schema Hermes registered for the tool (the same schema the model is shown), read
 fresh on every call. A call that breaks them is refused with the first problem found, so the model can fix
@@ -229,8 +229,8 @@ _CANARY_RULES = {"type": "object", "required": ["a"], "additionalProperties": Fa
 
 
 def run_selfcheck(checker: FormChecker, names_fn: Callable[[], Iterable[str]],
-                  risky: list[re.Pattern]) -> dict:
-    """Prove the check works end to end: the validator, the rules lookup, and every risky tool's rules."""
+                  form_checked: list[re.Pattern]) -> dict:
+    """Prove the check works end to end: the validator, the rules lookup, and every form-checked tool's rules."""
     problems: list[str] = []
     canary = FormChecker(lambda _tool: _CANARY_RULES, coerce_fn=lambda _tool, args: args)
     try:
@@ -245,7 +245,7 @@ def run_selfcheck(checker: FormChecker, names_fn: Callable[[], Iterable[str]],
     error: Exception | None = None
     for _attempt in range(2):  # the registry can change while it is read (MCP re-registration)
         try:
-            names = sorted(n for n in list(names_fn()) if any(p.fullmatch(n) for p in risky))
+            names = sorted(n for n in list(names_fn()) if any(p.fullmatch(n) for p in form_checked))
             break
         except Exception as exc:  # noqa: BLE001
             error = exc
@@ -254,7 +254,7 @@ def run_selfcheck(checker: FormChecker, names_fn: Callable[[], Iterable[str]],
         problems.append(f"could not read the tool registry ({type(error).__name__})")
     else:
         if not names:
-            problems.append("no risky tools are registered (is the gateway connected?)")
+            problems.append("no form-checked tools are registered (is the gateway connected?)")
     for name in names:
         try:
             checker.prepare(name)
@@ -282,33 +282,33 @@ def write_status(path: str, status: dict) -> None:
         raise
 
 
-def selfcheck_loop(checker: FormChecker, names_fn: Callable[[], Iterable[str]], risky: list[re.Pattern],
+def selfcheck_loop(checker: FormChecker, names_fn: Callable[[], Iterable[str]], form_checked: list[re.Pattern],
                    status_path: str, *, interval: float = 1800.0, wait_timeout: float = 600.0,
                    poll: float = 10.0, sleep: Callable[[float], None] = time.sleep,
                    clock: Callable[[], float] = time.monotonic, iterations: int | None = None) -> None:
-    """Wait until risky tools are registered (MCP discovery is asynchronous), then check and write the
-    status every ``interval`` seconds. A process that never sees a risky tool (a short-lived Hermes helper
+    """Wait until form-checked tools are registered (MCP discovery is asynchronous), then check and write the
+    status every ``interval`` seconds. A process that never sees a form-checked tool (a short-lived Hermes helper
     without the gateway's MCP servers) writes nothing: it cannot speak for the gateway, and a missing or
     stale report is itself alerted on by the sweep. Never raises."""
     deadline = clock() + wait_timeout
     seen = False
     while not seen and clock() < deadline:
         try:
-            seen = any(any(p.fullmatch(n) for p in risky) for n in names_fn())
+            seen = any(any(p.fullmatch(n) for p in form_checked) for n in names_fn())
         except Exception:  # noqa: BLE001
             seen = False
         if not seen:
             sleep(poll)
     if not seen:
-        log.info("durable-park form self-check: no risky tools in this process; not reporting")
+        log.info("durable-park form self-check: no form-checked tools in this process; not reporting")
         return
     done = 0
     while iterations is None or done < iterations:
         try:
-            status = run_selfcheck(checker, names_fn, risky)
+            status = run_selfcheck(checker, names_fn, form_checked)
             write_status(status_path, status)
             if status["ok"]:
-                log.info("durable-park form check ok: %d risky tool(s)", status["tools_checked"])
+                log.info("durable-park form check ok: %d form-checked tool(s)", status["tools_checked"])
             else:
                 log.error("durable-park form check FAILED: %s", "; ".join(status["problems"]))
         except Exception as exc:  # noqa: BLE001
@@ -328,7 +328,7 @@ def _selfcheck_thread_alive() -> bool:
     return any(t.name == THREAD_NAME and t.is_alive() for t in threading.enumerate())
 
 
-def start_selfcheck(checker: FormChecker, risky: list[re.Pattern], status_path: str) -> bool:
+def start_selfcheck(checker: FormChecker, form_checked: list[re.Pattern], status_path: str) -> bool:
     """Start the background self-check once per Hermes process. Returns False outside Hermes."""
     global _started
     try:
@@ -339,6 +339,6 @@ def start_selfcheck(checker: FormChecker, risky: list[re.Pattern], status_path: 
         if _started or _selfcheck_thread_alive():
             return False
         _started = True
-        threading.Thread(target=selfcheck_loop, args=(checker, registry_tool_names, risky, status_path),
+        threading.Thread(target=selfcheck_loop, args=(checker, registry_tool_names, form_checked, status_path),
                          name=THREAD_NAME, daemon=True).start()
     return True

@@ -128,6 +128,18 @@ def test_set_request_id_and_mark_notified(tmp_path):
     assert got.notified_at is not None
 
 
+def test_set_request_id_only_once_and_only_while_parked(tmp_path):
+    ledger = make_ledger(tmp_path)
+    row = park(ledger)
+    assert ledger.set_request_id(row.park_id, "r1") is True
+    assert ledger.set_request_id(row.park_id, "r2") is False
+    assert ledger.get(row.park_id).request_id == "r1"
+    other = park(ledger, tool_call_id="call-2")
+    assert ledger.transition(other.park_id, "parked", "cancelled")
+    assert ledger.set_request_id(other.park_id, "r3") is False
+    assert ledger.get(other.park_id).request_id is None
+
+
 def test_find_executing_match_and_gateway_pass_once(tmp_path):
     ledger = make_ledger(tmp_path)
     args = {"amount": 5, "to": "x"}
@@ -245,3 +257,64 @@ def test_digest_normalization_never_changes_the_saved_args():
     original = {"Amount": 2.0, "withhuman_context": "c"}
     normalize_args(original)
     assert original == {"Amount": 2.0, "withhuman_context": "c"}
+
+
+def _backdate_updated(ledger, park_id, days):
+    from datetime import datetime, timedelta, timezone
+    at = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    con = sqlite3.connect(ledger.path, isolation_level=None)
+    try:
+        con.execute("UPDATE parks SET updated_at=? WHERE park_id=?", (at, park_id))
+    finally:
+        con.close()
+
+
+def test_parked_can_finish_allowed_or_refused(tmp_path):
+    ledger = make_ledger(tmp_path)
+    a = park(ledger, tool_call_id="a")
+    r = park(ledger, tool_call_id="r")
+    assert ledger.transition(a.park_id, "parked", "allowed", request_id="req-a", note="auto-approved") is True
+    assert ledger.transition(r.park_id, "parked", "refused", request_id="req-r", note="auto-denied") is True
+    got_a, got_r = ledger.get(a.park_id), ledger.get(r.park_id)
+    assert (got_a.status, got_a.request_id, got_a.note) == ("allowed", "req-a", "auto-approved")
+    assert (got_r.status, got_r.request_id, got_r.note) == ("refused", "req-r", "auto-denied")
+    with pytest.raises(ValueError):
+        ledger.transition(a.park_id, "allowed", "executing")
+    with pytest.raises(ValueError):
+        ledger.transition(r.park_id, "refused", "executing")
+
+
+def test_allowed_and_refused_are_not_active(tmp_path):
+    ledger = make_ledger(tmp_path)
+    a = park(ledger, tool_call_id="a")
+    r = park(ledger, tool_call_id="r")
+    p = park(ledger, tool_call_id="p")
+    ledger.transition(a.park_id, "parked", "allowed")
+    ledger.transition(r.park_id, "parked", "refused")
+    assert [x.park_id for x in ledger.active_for_session("tg:1")] == [p.park_id]
+
+
+def test_delete_finished_before_keeps_parks_and_young_rows(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    ledger = make_ledger(tmp_path)
+    old = {}
+    for name, path in {"allowed": ["allowed"], "refused": ["refused"], "cancelled": ["cancelled"],
+                       "executed": ["approved", "executing", "executed"], "denied": ["denied"],
+                       "unknown": ["approved", "executing", "unknown"]}.items():
+        row = park(ledger, tool_call_id=name)
+        prev = "parked"
+        for nxt in path:
+            assert ledger.transition(row.park_id, prev, nxt)
+            prev = nxt
+        _backdate_updated(ledger, row.park_id, 31)
+        old[name] = row.park_id
+    young = park(ledger, tool_call_id="young")
+    ledger.transition(young.park_id, "parked", "allowed")
+    _backdate_updated(ledger, young.park_id, 29)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert ledger.delete_finished_before(cutoff) == 3
+    for name in ("allowed", "refused", "cancelled"):
+        assert ledger.get(old[name]) is None
+    for name in ("executed", "denied", "unknown"):
+        assert ledger.get(old[name]) is not None
+    assert ledger.get(young.park_id) is not None

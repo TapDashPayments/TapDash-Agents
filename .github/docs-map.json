@@ -32,6 +32,7 @@
         "durable-park/plugin/durable_park/plugin.yaml",
         "durable-park/plugin/durable_park/compat.py",
         "durable-park/plugin/durable_park/gatecall.py",
+        "durable-park/plugin/durable_park/breaker.py",
         "durable-park/plugin/durable_park/wake.py",
         "durable-park/plugin/durable_park/executor.py"
       ],
@@ -78,6 +79,11 @@
         "durable-park/docs/receiver-setup.md",
         "durable-park/docs/gateway-setup.md"
       ]
+    },
+    {
+      "name": "withHuman entry pipeline file",
+      "code": ["durable-park/deploy/withhuman/*.json"],
+      "docs": ["durable-park/docs/architecture.md"]
     },
     {
       "name": "QuickBooks tunnel",

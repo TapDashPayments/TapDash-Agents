@@ -11,6 +11,12 @@ Hermes knows what to re-verify:
 - ``ctx.inject_message(content, session_key=)`` + ``allow_gateway_injection`` (hermes_cli/plugins.py:603-630);
 - ``ctx.dispatch_tool`` skipping ``pre_tool_call`` (hermes_cli/plugins.py:674-683, tools/registry.py:893-921);
 - ``ctx.register_tool`` (plugin toolset on by default, hermes_cli/tools_config.py:510-517);
+- the hook registry, read for the foreign-hook guard: ``ctx._manager`` (hermes_cli/plugins.py:235) and
+  ``PluginManager.iter_hook_callbacks("pre_tool_call")`` returning the registered callables unwrapped
+  (hermes_cli/plugins_dispatch.py:523, stored by ``register_hook`` at hermes_cli/plugins.py:933), and the
+  middleware registry ``ctx._manager._middleware`` (dict of lists keyed by kind, hermes_cli/plugins.py:1183,
+  filled unwrapped by ``register_middleware`` at :937-952) for ``tool_request`` / ``tool_execution``
+  middleware, which runs after ``pre_tool_call`` (agent/agent_runtime_helpers.py:2619-2624);
 - MCP tool-error wording the executor classifies as failed/unknown (tools/mcp_tool_handlers.py, executor R15),
   and the display failure heuristic (agent/display.py:999-1037).
 """
@@ -27,6 +33,8 @@ DEPENDS_ON = (
     "ctx.inject_message (session_key=, allow_gateway_injection)",
     "ctx.dispatch_tool (must not re-run pre_tool_call)",
     "ctx.register_tool",
+    "ctx._manager.iter_hook_callbacks('pre_tool_call') (hermes_cli/plugins_dispatch.py:523)",
+    "ctx._manager._middleware['tool_request'/'tool_execution'] (hermes_cli/plugins.py:1183, :937-952)",
     "MCP tool-error wording (tools/mcp_tool_handlers.py; executor failed/unknown classification)",
 )
 

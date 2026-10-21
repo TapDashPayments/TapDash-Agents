@@ -1,0 +1,444 @@
+{
+  "default_escalation_path": "notify-yaakov-yehuda",
+  "blocks": [
+    {
+      "id": "pa-park-money",
+      "name": "Park: QuickBooks money move",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "a97a4099-e533-412e-b98a-eb993e51e6f2",
+          "all": [
+            {
+              "id": "59642196-100d-4e70-84e8-29e58b78a2fa",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "df576a44-a244-42e3-b530-7648106a56db",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:quickbooks"
+            },
+            {
+              "id": "5141edc9-bdb1-4204-9e09-0ca6c4b3387f",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^mcp__wh__quickbooks__(create|update|delete)[_-](payment|bill_payment|transfer|deposit|journal_entry|refund_receipt|sales_receipt|credit_memo|vendor_credit|purchase|invoice|bill)$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-money-outcome",
+            "name": "Park: QuickBooks money move",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "human",
+              "reason": "Parked durable-park action: approve to let the agent run it exactly once.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "block-06ebcdd6",
+      "name": "proto-agents risky QuickBooks",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "e5a5422a-13b0-43db-b141-80a828bd50d4",
+          "all": [
+            {
+              "id": "e9497130-c119-4887-b1fa-e414db40255a",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "99db7f5b-2c27-4d17-839f-bb2bc0fdec98",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "quickbooks"
+            },
+            {
+              "id": "18ca8de9-75fc-46b7-9645-39927857ece4",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(quickbooks__)?(create|update|delete)[_-](payment|bill_payment|transfer|deposit|journal_entry|refund_receipt|sales_receipt|credit_memo|vendor_credit|purchase|invoice|bill)$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "block-ad4daeb4",
+            "name": "durable-park-bridge",
+            "type": "webhook",
+            "enabled": true,
+            "timeout": "5s",
+            "max_attempts": 3,
+            "config": {
+              "endpoint_key": "durable-park-bridge",
+              "allowed_outcomes": [
+                "human",
+                "approve"
+              ],
+              "include": {
+                "agent_reasoning": false,
+                "context": false,
+                "previous_metadata": false
+              },
+              "reason": "durable-park bridge: approves only a call matching an approved park; anything else goes to Yaakov.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ],
+        "reason": ""
+      }
+    },
+    {
+      "id": "pa-gateway-other",
+      "name": "Gateway: QuickBooks, not a money move",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "7d9338fc-a6cd-4489-a16c-c7aabf94d49f",
+          "all": [
+            {
+              "id": "6ec6974a-87b1-4d88-b9e1-0fec86226b32",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "710edce8-f6e1-444a-8613-a82f17ddebb1",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "quickbooks"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-gateway-other-outcome",
+            "name": "Gateway: QuickBooks, not a money move",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "QuickBooks call that is not a money move; durable-park already asked about it as park:quickbooks."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-park-quickbooks-other",
+      "name": "Park: QuickBooks other",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "348da42a-f505-4c8e-9f31-c9f7ed2398f9",
+          "all": [
+            {
+              "id": "de0944c7-5184-4272-9cdd-97d6abf1a118",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "b810e53a-586f-42af-9583-d14007694a72",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:quickbooks"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-quickbooks-other-outcome",
+            "name": "Park: QuickBooks other",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "QuickBooks read or non-money write; the gateway decides the real call again."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-hermes-read",
+      "name": "Hermes: read-only tools",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "21420256-9cb2-4649-9b90-ca6f072ee620",
+          "all": [
+            {
+              "id": "18341a4d-351d-4120-8ef5-4fd7f6690a48",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "4647615d-94e4-40bd-9bcc-dcf87a1bc652",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "hermes"
+            },
+            {
+              "id": "43bd0563-f3c9-40c4-b299-39fc0d5db9b7",
+              "field": "/request/tool",
+              "operator": "in",
+              "value": [
+                "web_search",
+                "web_extract",
+                "vision_analyze",
+                "memory",
+                "session_search",
+                "todo_list",
+                "kanban_list",
+                "kanban_show",
+                "kanban_attachments",
+                "skills_list",
+                "skill_view",
+                "image_generate"
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-hermes-read-outcome",
+            "name": "Hermes: read-only tools",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "No side effect outside the chat."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-hermes-local-deny",
+      "name": "Hermes: local machine tools",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "5b20f222-3190-4421-8c25-562fb8db8d80",
+          "all": [
+            {
+              "id": "768e351f-e3d1-45e4-a28d-05491de7678a",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "3c2c88f6-ef92-4e72-9672-ce028236941b",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "hermes"
+            },
+            {
+              "id": "81ce39c9-780f-4f33-b937-52aaed4ccf9d",
+              "field": "/request/tool",
+              "operator": "in",
+              "value": [
+                "terminal",
+                "execute_code",
+                "process_manage",
+                "process",
+                "write_file",
+                "patch",
+                "read_file",
+                "search_files",
+                "delegate_task",
+                "cronjob_manage",
+                "cronjob",
+                "skill_manage"
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-hermes-local-deny-outcome",
+            "name": "Hermes: local machine tools",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "deny",
+              "reason": "Local machine tools stay off until the ledger has its own owner (Clean Setup Phase 2)."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-mcp-human",
+      "name": "New MCP server",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "fa0557b3-4c35-4f2f-8f97-49e8a2a874b4",
+          "all": [
+            {
+              "id": "dfb0eac1-8191-4216-b998-3b84da844e32",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "ca4ea6df-db9d-4a0c-bd63-b81474ef51ae",
+              "field": "/request/server",
+              "operator": "starts_with",
+              "value": [
+                "mcp:"
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-mcp-human-outcome",
+            "name": "New MCP server",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "human",
+              "reason": "New MCP server: a person decides until it has a rule.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-default-human",
+      "name": "proto-agents default",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "a5a360c7-c555-4724-84d9-98502b72d6a4",
+          "all": [
+            {
+              "id": "969d3333-2de5-4aa4-9bf6-5501cf563d35",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-default-human-outcome",
+            "name": "proto-agents default",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "human",
+              "reason": "No rule for this proto-agents tool; a person decides.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes Agent",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "55ca73c4-ad89-4a29-8966-825e48ba57b4",
+          "any": [
+            {
+              "id": "d3603274-548a-5cf5-8884-cd89358c9fb8",
+              "field": "/request/tool",
+              "operator": "contains",
+              "value": "Stripe"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "hermes-approve-the-rest",
+            "name": "Ask a human",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "human",
+              "reason": "This tool requires a human to approve prior to running.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ],
+        "reason": "No rule for Hermes Agent decided this request, so it waits for a person.",
+        "escalation_path": "notify-yaakov-yehuda",
+        "ask_agent_owner": true
+      }
+    },
+    {
+      "id": "approve-every-call",
+      "name": "Approve every call",
+      "type": "outcome",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "outcome": "approve",
+        "reason": "No rule sent this call to a person."
+      }
+    }
+  ]
+}

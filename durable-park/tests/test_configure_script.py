@@ -46,7 +46,7 @@ def test_never_creates_the_bridge_secret_and_never_echoes_secret_files():
     "platforms.webhook.extra.rate_limit 120", "ROUTE=durable-park-wake", "routes.$ROUTE.deliver\" log",
     "FUNNEL_PATH=/aap/events", "RECEIVER_LOCAL=http://127.0.0.1:8790/aap/events",
     "tailscale funnel --bg --set-path=\"$FUNNEL_PATH\" \"$RECEIVER_LOCAL\"",
-    "agentapprovalprotocol==0.3.3", "cron create \"every 5m\" --no-agent", "--deliver telegram",
+    "agentapprovalprotocol==0.3.3", "cron create \"every 5m\" --no-agent", "--deliver telegram", "--retention-days 30",
     "hermes_cli plugins enable", "systemctl enable --quiet \"$UNIT\"",
     "BRIDGE_FUNNEL_PATH=/wh/bridge", "BRIDGE_LOCAL=http://127.0.0.1:8791/wh/bridge",
     "tailscale funnel --bg --set-path=\"$BRIDGE_FUNNEL_PATH\" \"$BRIDGE_LOCAL\"",

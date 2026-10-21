@@ -12,14 +12,14 @@ from durable_park import register
 from durable_park import wake as wake_mod
 from durable_park.gatecall import make_gate
 from durable_park.ledger import Ledger
-from durable_park.park_hook import DEFAULT_RISKY_TOOLS, make_pre_tool_call
+from durable_park.park_hook import DEFAULT_FORM_CHECKED_TOOLS, make_pre_tool_call
 from durable_park.wake import WAKE_CHAT_NAME, handle_wake, make_async_client_factory
 
 SESSION_KEY = "agent:main:telegram:dm:42"
 TOOL = "mcp__wh__quickbooks__create_payment"
 ARGS = {"amount": 5, "customer": "C-1"}
 SKIP = {"action": "skip", "reason": "durable-park wake"}
-RISKY = [re.compile(p) for p in DEFAULT_RISKY_TOOLS]
+RISKY = [re.compile(p) for p in DEFAULT_FORM_CHECKED_TOOLS]
 
 
 def wake_event(park_id, *, chat_name=WAKE_CHAT_NAME, platform="webhook", payload="default"):
@@ -37,7 +37,7 @@ def env(tmp_path):
     provider = FakeProvider(auto=None)
     hook = make_pre_tool_call(
         ledger, lambda: make_gate(BASE_URL, TOKEN, client=provider.client(retry_budget=0.5)), RISKY,
-        lambda: SESSION_KEY)
+        session_key_fn=lambda: SESSION_KEY)
     injected = []
     box = SimpleNamespace(result=True, factory_calls=0)
 
@@ -227,6 +227,29 @@ def test_parked_without_request_id_is_skipped(env):
     assert env.ledger.get(row.park_id).status == "parked"
 
 
+@pytest.mark.parametrize("status", ["allowed", "refused"])
+def test_wake_for_allowed_or_refused_row_injects_nothing(env, status):
+    """withHuman decided the call at once; the hook already answered the model. A wake must stay silent."""
+    row = env.ledger.park(session_key=SESSION_KEY, session_id="s", tool_call_id="c", tool=TOOL, args=ARGS,
+                          call_key="k", server="park:quickbooks")
+    assert env.ledger.transition(row.park_id, "parked", status, request_id="req-1", note="withHuman: x")
+    before = env.ledger.get(row.park_id)
+    assert env.wake(row.park_id) == SKIP
+    assert env.injected == [] and env.box.factory_calls == 0
+    after = env.ledger.get(row.park_id)
+    assert after.status == status and after.notified_at is None and after.notified_at == before.notified_at
+
+
+def test_wake_before_instant_finish_is_left_alone(env):
+    """A wake that lands while the hook is still between the verdict and its own transition changes nothing."""
+    row = env.ledger.park(session_key=SESSION_KEY, session_id="s", tool_call_id="c", tool=TOOL, args=ARGS,
+                          call_key="k", server="park:quickbooks")
+    assert env.wake(row.park_id) == SKIP
+    assert env.injected == [] and env.box.factory_calls == 0
+    after = env.ledger.get(row.park_id)
+    assert after.status == "parked" and after.request_id is None and after.updated_at == row.updated_at
+
+
 @pytest.mark.parametrize("status", ["executing", "executed", "failed", "unknown"])
 def test_wake_for_a_row_past_approval_does_nothing(env, status):
     row = env.park()
@@ -398,9 +421,10 @@ def test_register_installs_wake_hook_before_anything_that_can_fail(tmp_path):
             raise RuntimeError("tool registry broke")
 
     ctx = Boom(tmp_path)
-    with pytest.raises(RuntimeError):
-        register(ctx)
+    register(ctx)  # never raises: Hermes would drop every hook; it falls back to refusing instead
     assert "pre_gateway_dispatch" in ctx.hooks
+    assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s",
+                                      tool_call_id="c")["action"] == "block"
 
 
 def test_register_fail_closed_still_drops_wake_events(tmp_path):

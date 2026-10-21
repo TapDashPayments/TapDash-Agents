@@ -41,7 +41,7 @@ class World:
         if request_id:
             self.ledger.set_request_id(row.park_id, f"{request_id}-{self.n}")
         path = {"parked": [], "approved": ["approved"], "denied": ["denied"], "expired": ["expired"],
-                "cancelled": ["cancelled"], "executing": ["approved", "executing"],
+                "cancelled": ["cancelled"], "allowed": ["allowed"], "executing": ["approved", "executing"],
                 "executed": ["approved", "executing", "executed"]}[status]
         previous = "parked"
         for nxt in path:
@@ -53,6 +53,20 @@ class World:
         if notified:
             self.ledger.mark_notified(row.park_id)
         return row.park_id
+
+    def backdate(self, park_id, minutes):
+        con = sqlite3.connect(self.ledger.path, isolation_level=None)
+        try:
+            con.execute("UPDATE parks SET created_at=? WHERE park_id=?", (stamp(minutes), park_id))
+        finally:
+            con.close()
+
+    def age(self, park_id, days):
+        con = sqlite3.connect(self.ledger.path, isolation_level=None)
+        try:
+            con.execute("UPDATE parks SET updated_at=? WHERE park_id=?", (stamp(days * 24 * 60), park_id))
+        finally:
+            con.close()
 
     def post(self, park_id, secret, url=DEFAULT_URL):
         self.posted.append((park_id, secret, url))
@@ -69,6 +83,28 @@ class World:
 @pytest.fixture
 def world(tmp_path):
     return World(tmp_path)
+
+
+def test_orphan_parked_row_is_cancelled_after_ten_minutes(world, monkeypatch, capsys):
+    park_id = world.row("parked", request_id=None)
+    world.backdate(park_id, 11)
+    assert world.main(monkeypatch) == 0
+    row = world.ledger.get(park_id)
+    assert row.status == "cancelled"
+    assert row.note == "no approval request after 10 minutes (cancelled by the sweep)"
+    assert (f"durable-park: {park_id} ({TOOL}) never got an approval request; cancelled after 10 minutes"
+            in capsys.readouterr().out)
+
+
+def test_young_or_requested_parked_rows_are_left_alone(world, monkeypatch, capsys):
+    young = world.row("parked", request_id=None)
+    world.backdate(young, 9)
+    requested = world.row("parked")
+    world.backdate(requested, 60)
+    world.main(monkeypatch)
+    assert world.ledger.get(young).status == "parked"
+    assert world.ledger.get(requested).status == "parked"
+    assert "never got" not in capsys.readouterr().out
 
 
 def test_sweep_rewakes_unnotified_approved(world, monkeypatch, capsys):
@@ -225,6 +261,40 @@ def test_sweep_blank_secret_is_an_error(world, monkeypatch, capsys):
     assert world.posted == [] and "wake secret" in capsys.readouterr().err
 
 
+def test_retention_days_flag(world, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exc:
+        sweep.parse_args(["--ledger", "/x/ledger.db", "--retention-days", "0"])
+    assert exc.value.code == 2
+    assert sweep.parse_args(["--ledger", "/x/ledger.db"]).retention_days == 30
+    old = world.row("allowed", request_id="r")
+    world.age(old, 31)
+    fresh = world.row("allowed", request_id="r")
+    assert world.main(monkeypatch) == 0
+    assert world.ledger.get(old) is None
+    assert world.ledger.get(fresh) is not None
+    assert capsys.readouterr().out == ""
+
+
+def test_retention_error_does_not_stop_the_sweep(world, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("disk")
+    monkeypatch.setattr(sweep, "_apply_retention", boom)
+    assert world.main(monkeypatch) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "retention failed (RuntimeError)" in captured.err
+
+
+def test_orphan_cancel_error_does_not_stop_the_sweep(world, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(sweep, "_cancel_orphan_parks", boom)
+    parked = world.row("parked", request_id="req-1")
+    assert world.main(monkeypatch) == 0
+    assert parked in [p for p, _, _ in world.posted]  # the wakes still went out
+    assert "orphan cancel failed (RuntimeError)" in capsys.readouterr().err
+
+
 def test_sweep_defaults_match_the_deployment():
     args = sweep.parse_args(["--ledger", "/x/ledger.db"])
     assert args.wake_secret_file == "/etc/durable-park/wake_secret"
@@ -328,3 +398,50 @@ def test_formcheck_broken_state_file_does_not_stop_the_sweep(world, monkeypatch,
     world.row("approved")
     assert world.main(monkeypatch) == 0
     assert len(world.posted) == 1
+
+
+OPEN_ALERT = ("durable-park ALERT: withHuman could not be reached (since {at}); every tool call is being "
+              "refused until it answers again.")
+CLOSE_NOTE = "durable-park: withHuman answers again (since {at}); tool calls are decided normally."
+
+
+def write_breaker(tmp_path, *, open_, opened_at="2026-10-21T10:00:00Z", closed_at=None):
+    (tmp_path / "breaker_status.json").write_text(json.dumps(
+        {"open": open_, "opened_at": opened_at, "closed_at": closed_at}))
+
+
+def test_breaker_alert_once_on_open_once_on_close(world, monkeypatch, capsys, tmp_path):
+    write_breaker(tmp_path, open_=True)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == OPEN_ALERT.format(at="2026-10-21T10:00:00Z") and second == ""
+    write_breaker(tmp_path, open_=False, closed_at="2026-10-21T10:07:00Z")
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.strip() == CLOSE_NOTE.format(at="2026-10-21T10:07:00Z") and fourth == ""
+
+
+def test_breaker_opened_and_closed_between_sweeps_prints_both(world, monkeypatch, capsys, tmp_path):
+    write_breaker(tmp_path, open_=False, closed_at="2026-10-21T10:03:00Z")
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [OPEN_ALERT.format(at="2026-10-21T10:00:00Z"),
+                                  CLOSE_NOTE.format(at="2026-10-21T10:03:00Z")]
+    assert second == ""
+
+
+def test_breaker_reopened_later_alerts_again(world, monkeypatch, capsys, tmp_path):
+    write_breaker(tmp_path, open_=True)
+    runs(world, monkeypatch, capsys, 1)
+    write_breaker(tmp_path, open_=False, closed_at="2026-10-21T10:07:00Z")
+    runs(world, monkeypatch, capsys, 1)
+    write_breaker(tmp_path, open_=True, opened_at="2026-10-21T11:00:00Z", closed_at="2026-10-21T10:07:00Z")
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.strip() == OPEN_ALERT.format(at="2026-10-21T11:00:00Z")
+
+
+def test_no_breaker_file_prints_nothing(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 2) == ["", ""]
+
+
+def test_breaker_broken_status_or_state_does_not_stop_the_sweep(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "breaker_status.json").write_text("{not json")
+    (tmp_path / "breaker_alert_state.json").write_text("[1")
+    assert runs(world, monkeypatch, capsys, 1) == [""]

@@ -4,9 +4,14 @@
 * a ``parked`` row with an approval request          -> post a wake (a decision may have been missed)
 * an ``approved`` row the chat was not told about    -> post a wake (the first injection failed)
 * a denied/expired/cancelled row with a request that the chat was not told about -> post a wake
+* a ``parked`` row with no request id attached older than 10 minutes -> cancel it and print one alert line
+  (a request may still be open at withHuman; approving it does nothing)
 * an ``executing`` row older than 10 minutes         -> mark ``unknown`` and print one alert line
+* ``allowed``/``refused``/``cancelled`` rows older than ``--retention-days`` (default 30) are deleted, silently
 * the gateway's form-check report (``formcheck_status.json`` next to the ledger) missing, older than
   75 minutes or failing on two sweeps in a row        -> print one alert line (and one when it recovers)
+* the park hook's circuit-breaker report (``breaker_status.json``: withHuman unreachable) opened or closed
+                                                       -> print one alert line for each change
 
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
@@ -33,10 +38,14 @@ from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
 
 DEFAULT_SECRET_FILE = "/etc/durable-park/wake_secret"
 STALE_EXECUTING = timedelta(minutes=10)
+ORPHAN_PARK = timedelta(minutes=10)  # a parked row with no request id this old will never get one attached
+DEFAULT_RETENTION_DAYS = 30
 FORMCHECK_STATUS = "formcheck_status.json"
 FORMCHECK_STATE = "formcheck_alert_state.json"
 FORMCHECK_STALE = timedelta(minutes=75)  # the gateway re-checks every 30 minutes
 FORMCHECK_BAD_RUNS = 2  # one bad sweep may be a restart in progress
+BREAKER_STATUS = "breaker_status.json"
+BREAKER_STATE = "breaker_alert_state.json"
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -50,11 +59,23 @@ def _load_ledger_module():
     return module
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="durable-park sweep (Hermes cron --no-agent script)")
     parser.add_argument("--ledger", required=True, help="path of the ledger SQLite file")
     parser.add_argument("--wake-secret-file", default=DEFAULT_SECRET_FILE)
     parser.add_argument("--wake-url", default=DEFAULT_WAKE_URL)
+    parser.add_argument("--retention-days", type=_positive_int, default=DEFAULT_RETENTION_DAYS,
+                        help="delete allowed/refused/cancelled rows not updated for this many days (>= 1)")
     return parser.parse_args(argv)
 
 
@@ -83,6 +104,34 @@ def _mark_stale_executing(ledger, now: datetime) -> None:
         if ledger.transition(row.park_id, "executing", "unknown", note="no result recorded after 10 minutes"):
             print(f"durable-park: {row.park_id} outcome UNKNOWN \u2014 check {row.tool} in the sandbox "
                   "before retrying", flush=True)
+
+
+def _cancel_orphan_parks(ledger, now: datetime) -> None:
+    """Cancel ``parked`` rows with no request id attached so they stop blocking their chat. Usually the gateway
+    died before asking, but a request MAY exist at withHuman: the gateway died between withHuman answering
+    ``Pending`` and ``set_request_id``, or a cancel of a request created before an error failed. Such a request
+    can stay open there; approving it does nothing (the row is ``cancelled``, so the bridge and the executor
+    fail closed). The CAS also loses cleanly to a hook that attaches a request at the same moment
+    (``set_request_id`` needs ``parked``)."""
+    for row in ledger.list_by_status("parked"):
+        if row.request_id:
+            continue
+        try:
+            created = datetime.strptime(row.created_at, _STAMP).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if now - created <= ORPHAN_PARK:
+            continue
+        if ledger.transition(row.park_id, "parked", "cancelled",
+                             note="no approval request after 10 minutes (cancelled by the sweep)"):
+            print(f"durable-park: {row.park_id} ({row.tool}) never got an approval request; "
+                  "cancelled after 10 minutes", flush=True)
+
+
+def _apply_retention(ledger, now: datetime, days: int) -> None:
+    """Delete finished rows with nothing left to decide (``allowed``, ``refused``, ``cancelled``) once they are
+    ``days`` old. Prints nothing; SQLite keeps the freed pages for reuse (the file shrinks only on VACUUM)."""
+    ledger.delete_finished_before((now - timedelta(days=days)).strftime(_STAMP))
 
 
 def _wake_targets(ledger) -> list[str]:
@@ -178,6 +227,28 @@ def _formcheck_alert(ledger_path: str, now: datetime) -> None:
     _save_state(state_path, {"bad_runs": bad_runs, "alerted": alerted})
 
 
+def _breaker_alert(ledger_path: str, now: datetime) -> None:
+    """Announce each withHuman outage once when it opens and once when it closes (``now`` is unused: the
+    status file carries its own times). The state file keeps the ``opened_at``/``closed_at`` already announced,
+    so an outage that opened and closed between two sweeps still prints both lines."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    status = _load_state(os.path.join(directory, BREAKER_STATUS))  # missing or unreadable -> {}
+    opened_at, closed_at = status.get("opened_at"), status.get("closed_at")
+    state_path = os.path.join(directory, BREAKER_STATE)
+    state = _load_state(state_path)
+    announced = dict(state)
+    if isinstance(opened_at, str) and opened_at and opened_at != state.get("opened_at"):
+        print(f"durable-park ALERT: withHuman could not be reached (since {_clean(opened_at, 40)}); "
+              "every tool call is being refused until it answers again.", flush=True)
+        announced["opened_at"] = opened_at
+    if status.get("open") is False and isinstance(closed_at, str) and closed_at and closed_at != state.get("closed_at"):
+        print(f"durable-park: withHuman answers again (since {_clean(closed_at, 40)}); "
+              "tool calls are decided normally.", flush=True)
+        announced["closed_at"] = closed_at
+    if announced != state:
+        _save_state(state_path, announced)
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -192,9 +263,17 @@ def main(argv=None) -> int:
 
     _mark_stale_executing(ledger, datetime.now(timezone.utc))
     try:
+        _cancel_orphan_parks(ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+        _err(f"orphan cancel failed ({type(exc).__name__})")
+    try:
         _formcheck_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the self-check alert must never stop the sweep
         _err(f"form-check alert failed ({type(exc).__name__})")
+    try:
+        _breaker_alert(args.ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - the breaker alert must never stop the sweep
+        _err(f"breaker alert failed ({type(exc).__name__})")
     status = 0
     targets = _wake_targets(ledger)
     if targets:
@@ -211,6 +290,10 @@ def main(argv=None) -> int:
                     continue
                 if not 200 <= code < 300:
                     _err(f"wake {park_id} returned HTTP {code}")
+    try:
+        _apply_retention(ledger, datetime.now(timezone.utc), args.retention_days)
+    except Exception as exc:  # noqa: BLE001 - housekeeping must never stop the sweep
+        _err(f"retention failed ({type(exc).__name__})")
     return status
 
 

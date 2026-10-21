@@ -38,7 +38,7 @@ answering non-2xx (e.g. 401 before provisioning).
 | `~hermes/.hermes/plugin-data/durable-park/ledger.db` | hermes | the plugin | the ledger (`plugins.entries.durable-park.settings.ledger_path`; the sweep and the bridge use the same path) |
 | `~hermes/.hermes/plugin-data/durable-park/bridge_deliveries.db` | hermes | the bridge | per-delivery answers, for withHuman's retries |
 | `~hermes/.hermes/plugin-data/durable-park/formcheck_status.json`, `formcheck_alert_state.json` | hermes | the gateway's form self-check / the sweep | form checker health and the alert state |
-| `~hermes/.hermes/scripts/durable_park_sweep.sh` | hermes 0750 | configure_hermes.sh | cron wrapper: `exec /usr/bin/python3 -I <repo>/scripts/durable_park_sweep.py --ledger <ledger> --wake-secret-file /etc/durable-park/wake_secret` |
+| `~hermes/.hermes/scripts/durable_park_sweep.sh` | hermes 0750 | configure_hermes.sh | cron wrapper: `exec /usr/bin/python3 -I <repo>/scripts/durable_park_sweep.py --ledger <ledger> --wake-secret-file /etc/durable-park/wake_secret --retention-days 30` |
 
 The webhook route's secret in `config.yaml` is the reference `${env:DURABLE_PARK_WAKE_SECRET}`. Hermes's
 `command` secret source (`secrets.command.command: /opt/durable-park/libexec/hermes-secrets`, a root-owned

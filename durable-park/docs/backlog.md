@@ -10,7 +10,6 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 | 0 | **Contain the agent's tools:** decided: Clean Setup Phase 1 ([spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1) then Phase 2 before local tools; docker backend and `approvals.deny` dropped. Must be done before any real credentials. | The user `hermes` has passwordless sudo and Hermes approvals are off. The v1 lockdown (re-applied 2026-10-21 03:16 UTC) withholds file and terminal tools, but it is a configuration guard: an agent that got such a tool could read `/etc/durable-park/*` (QuickBooks secret and refresh token, withHuman tunnel token), change `/opt/durable-park`, forge ledger rows and call QuickBooks directly, bypassing withHuman. Accepted by Yaakov on 2026-10-20 for the sandbox exploration phase. |
 | 1 | Rotate every secret ([runbook](runbook.md#rotate-secrets-before-production)) | Some were pasted into chat during testing. |
 | 2 | Retry a decision whose chat message Hermes accepted but dropped (acceptance Important #2) | Otherwise an approved action can sit unannounced and block the chat. |
-| 3 | Clean up a `parked` row that never got a request id (Important #3) | Otherwise the chat stays blocked until someone fixes it by hand ([runbook](runbook.md#a-chat-says-already-waiting-but-nothing-is-pending-in-withhuman)). |
 | 4 | Decide which QuickBooks write tools need approval (Important #4) | Today only 12 money types do; 32 other writes (customers, vendors, items, accounts...) are approved automatically. |
 | 5 | Tie the bridge's stored answers to the withHuman request id (Important #5) | Defence in depth; today it relies on withHuman never reusing a delivery key. |
 | 6 | Check the agent's tool lockdown at every gateway start, not only at deploy (Important #6). Open again: the lockdown is applied on proto-agents; planned as spec §8 item 7. | A Hermes upgrade or setting change could quietly give the agent file or terminal tools again. |
@@ -32,3 +31,4 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 - `2.0` and `2` treated as the same amount (minor).
 - Form check before parking.
 - Docs, diagrams and the docs-update check (Important #7).
+- A `parked` row that never got a request id is cancelled by the sweep after 10 minutes (Important #3).

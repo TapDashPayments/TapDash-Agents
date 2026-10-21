@@ -1,6 +1,7 @@
-"""SQLite ledger of parked tool calls.
+"""SQLite ledger of the tool calls durable-park asked withHuman about.
 
-One row per risky tool call that was held for a human decision. All state
+One row per tool call that was asked about (exempt tools get none): decided at once (``allowed``/``refused``),
+or held for a human decision (``parked`` and on). All state
 changes go through ``Ledger.transition`` (a compare-and-swap on ``status``)
 so concurrent hooks, the sweep and the gateway bridge cannot race a row
 into two states.
@@ -21,9 +22,10 @@ from typing import Any, Iterator
 ACTIVE_STATUSES = ("parked", "approved", "executing")
 
 # Allowed (from_status -> to_status) edges. ``executing -> expired`` is used
-# only when the approval gate refuses before anything ran.
+# only when the approval gate refuses before anything ran. ``allowed``/``refused`` are terminal rows for calls
+# withHuman decided instantly (nothing parked, nothing to execute later).
 TRANSITIONS: dict[str, frozenset[str]] = {
-    "parked": frozenset({"approved", "denied", "expired", "cancelled"}),
+    "parked": frozenset({"approved", "denied", "expired", "cancelled", "allowed", "refused"}),
     "approved": frozenset({"executing"}),
     "executing": frozenset({"executed", "failed", "unknown", "expired"}),
 }
@@ -220,10 +222,23 @@ class Ledger:
                 f"SELECT * FROM parks WHERE status IN ({marks}) ORDER BY created_at, rowid", statuses).fetchall()
         return [_row(r) for r in rows]
 
-    def set_request_id(self, park_id: str, request_id: str) -> None:
+    def set_request_id(self, park_id: str, request_id: str) -> bool:
+        """Attach the approval request to a still-``parked`` row that has none; True when it was attached."""
         with self._connect() as con:
-            con.execute("UPDATE parks SET request_id=?, updated_at=? WHERE park_id=?",
-                        (request_id, _now(), park_id))
+            cur = con.execute(
+                "UPDATE parks SET request_id=?, updated_at=? WHERE park_id=? AND status='parked' AND request_id IS NULL",
+                (request_id, _now(), park_id))
+            return cur.rowcount == 1
+
+    def delete_finished_before(self, cutoff: str) -> int:
+        """Delete ``allowed``/``refused``/``cancelled`` rows last updated before ``cutoff`` (the ledger's own
+        ``%Y-%m-%dT%H:%M:%S.%fZ`` stamp, compared as a string); returns the count. Rows that carry a decision
+        or an outcome someone may still need to look up (executed, denied, expired, failed, unknown) stay."""
+        with self._connect() as con:
+            cur = con.execute(
+                "DELETE FROM parks WHERE status IN ('allowed','refused','cancelled') AND updated_at < ?",
+                (cutoff,))
+            return cur.rowcount
 
     def mark_notified(self, park_id: str) -> None:
         now = _now()

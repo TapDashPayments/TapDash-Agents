@@ -6,7 +6,10 @@ stopped and saved, an approver approves or denies it in [withHuman](https://with
 later - and then the exact saved call runs once, in the same chat. It survives restarts and never retries on its own.
 
 Status: **v1 accepted on 2026-10-20**, QuickBooks **sandbox** only, on the test VM `proto-agents`
-([acceptance results](docs/acceptance-2026-10-20.md)).
+([acceptance results](docs/acceptance-2026-10-20.md)). The v1 tool lockdown was re-applied on proto-agents on 2026-10-21 03:16 UTC
+(the agent reaches only `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*`). durable-park asks withHuman about
+every tool call except `parked_action_execute` and `clarify`, and withHuman's pipeline decides which ones need a person
+([spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
 
 Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
 `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (58 platform keys; `hermes_tool_policy.py check` ok).
@@ -45,6 +48,14 @@ flowchart LR
 6. QuickBooks gets the call. The ledger records the result.
 
 The full picture - every component, arrow, state and failure path: **[docs/architecture.md](docs/architecture.md)**.
+
+Settings (`exempt_tools`, `form_checked_tools`, `observer_hooks`, `aap_base_url`, `token_file`, `ledger_path`)
+live in `plugins.entries.durable-park.settings` in Hermes's `config.yaml`: [table](docs/architecture.md#plugin-settings),
+[how to change them](docs/runbook.md#plugin-settings). The old `risky_tools` setting is ignored with a warning. If
+anything else registers a `pre_tool_call` callback (another plugin, a `config.yaml` shell hook or outbound webhook) or
+`tool_request` / `tool_execution` middleware,
+every tool call is refused until an admin reviews it and lists it in `observer_hooks`. A setting of the wrong type
+also refuses every call (never fails open).
 The open-source and third-party pieces it is built on (versions, licenses, links):
 [Built on](../README.md#built-on).
 

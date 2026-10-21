@@ -1,9 +1,14 @@
+import copy
 import hashlib
+
+import pytest
 
 from agentapprovalprotocol import Allow, Deny, Pending
 from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
-from durable_park.gatecall import build_call, make_gate
+from agentapprovalprotocol._gate import submission
+from durable_park.gatecall import (
+    GateHolder, build_call, make_gate, platform_of, redact_arguments, server_label)
 from durable_park.ledger import Ledger
 
 
@@ -20,15 +25,107 @@ def make_row(tmp_path):
     )
 
 
-def test_build_call_is_stable(tmp_path):
+def test_build_call_context_and_resume(tmp_path):
     row = make_row(tmp_path)
-    one, two = build_call(row), build_call(row)
-    assert one == two
-    assert one.key == row.call_key
-    assert one.tool == "mcp__wh__quickbooks__create_payment"
-    assert dict(one.arguments) == {"amount": 12.5, "customer": {"id": "7"}}
-    assert one.server == "park:quickbooks"
-    assert dict(one.resume) == {"framework": "hermes", "park_id": row.park_id, "session_key": row.session_key}
+    call = build_call(row)
+    assert call.key == row.call_key
+    assert call.tool == "mcp__wh__quickbooks__create_payment"
+    assert dict(call.arguments) == {"amount": 12.5, "customer": {"id": "7"}}
+    assert call.server == "park:quickbooks"
+    assert dict(call.context) == {
+        "args_sha256": row.args_digest, "platform": "telegram", "session_key": "agent:main:telegram:dm:42"}
+    assert dict(call.resume) == {"framework": "hermes", "park_id": row.park_id, "session_key": row.session_key}
+
+
+def test_build_call_is_pure_function_of_row(tmp_path):
+    row = make_row(tmp_path)
+    gate = make_gate(BASE_URL, TOKEN, client=FakeProvider(auto=None).client())
+    bodies = [submission(build_call(row), gate.timeout, gate.context) for _ in range(2)]
+    assert bodies[0] == bodies[1]
+
+
+def test_build_call_marks_truncation(tmp_path):
+    ledger = Ledger(str(tmp_path / "ledger.db"))
+    row = ledger.park(session_key="agent:main:slack:dm:1", session_id="s", tool_call_id="c", tool="web_search",
+                      args={"q": "x" * 20000}, call_key="k" * 64, server="hermes")
+    call = build_call(row)
+    assert len(call.arguments["q"]) == 1024
+    assert call.context["args_truncated"] is True
+    assert call.context["args_sha256"] == row.args_digest
+
+
+def test_non_json_arguments_raise(tmp_path):
+    ledger = Ledger(str(tmp_path / "ledger.db"))
+    row = ledger.park(session_key="agent:main:telegram:dm:1", session_id="s", tool_call_id="c", tool="web_search",
+                      args={"x": float("nan")}, call_key="n" * 64, server="hermes")
+    with pytest.raises(ValueError):
+        build_call(row)
+
+
+@pytest.mark.parametrize("tool,label", [
+    ("mcp__wh__quickbooks__create_payment", "park:quickbooks"),
+    ("mcp__wh__docusign__createEnvelope", "park:docusign"),
+    ("mcp__github__get_issue", "mcp:github"),
+    ("mcp__my_srv__x_y", "mcp:my_srv"),
+    ("web_search", "hermes"),
+    ("connectors__slack__post", "hermes"),
+])
+def test_server_label(tool, label):
+    assert server_label(tool) == label
+
+
+def test_platform_of():
+    assert platform_of("agent:main:telegram:dm:8169087659") == "telegram"
+    assert platform_of("") == "unknown"
+    assert platform_of("x:y") == "unknown"
+
+
+def test_redaction_any_depth_and_case():
+    args = {"Password": "p", "nested": {"api_key": "k", "list": [{"access_token": "t"}]}, "amount": 5}
+    snapshot = copy.deepcopy(args)
+    out, truncated = redact_arguments(args)
+    assert out == {"Password": "[redacted]", "nested": {"api_key": "[redacted]",
+                                                        "list": [{"access_token": "[redacted]"}]}, "amount": 5}
+    assert args == snapshot
+    assert truncated is False
+
+
+def test_truncation_over_16_kib():
+    out, truncated = redact_arguments({"body": "x" * 20000, "n": 1})
+    assert len(out["body"]) == 1024 and out["n"] == 1 and truncated is True
+    out, truncated = redact_arguments({"body": "x" * 1000})
+    assert out == {"body": "x" * 1000} and truncated is False
+
+
+def test_gate_holder_reuses_and_rebuilds_on_token_change(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text("tok-one")
+    holder = GateHolder("http://127.0.0.1:1", str(token_file))
+    first = holder.get()
+    assert holder.get() is first
+    token_file.write_text("tok-two-longer")
+    second = holder.get()
+    assert second is not first
+    assert holder.get() is second
+    token_file.unlink()
+    with pytest.raises(OSError):
+        holder.get()
+
+
+def test_gate_holder_closes_a_retired_client_one_rebuild_later(tmp_path):
+    """A rebuilt gate's old httpx client is closed, but only at the NEXT rebuild: a call that got the old gate
+    just before the token changed may still be using it."""
+    token_file = tmp_path / "token"
+    token_file.write_text("tok-1")
+    holder = GateHolder("http://127.0.0.1:1", str(token_file))
+    first = holder.get()
+    token_file.write_text("tok-22")
+    second = holder.get()
+    assert not first.client._http.is_closed  # retired, maybe still in use
+    token_file.write_text("tok-333")
+    holder.get()
+    assert first.client._http.is_closed
+    assert not second.client._http.is_closed
 
 
 def test_gate_pending_then_allow_then_consumed(tmp_path):

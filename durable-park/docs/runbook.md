@@ -7,7 +7,8 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 - [Deploy a change](#deploy-a-change)
 - [Alerts and what to do](#alerts-and-what-to-do)
 - [Troubleshooting](#troubleshooting)
-- [Add a new risky tool](#add-a-new-risky-tool)
+- [Plugin settings](#plugin-settings)
+- [Add a form-checked tool](#add-a-form-checked-tool)
 - [Rotate secrets before production](#rotate-secrets-before-production)
 - [Rollback](#rollback)
 
@@ -41,8 +42,9 @@ Rules:
   not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
   row" rule applies.
-  durable-park (the 12 QuickBooks money-move tool types) is an approval gate for QuickBooks only; the agent has no
-  terminal or file tools to gate. **This is not a security boundary today:** with passwordless sudo, an agent that got
+  durable-park asks withHuman about every tool call except `parked_action_execute` and `clarify` (withHuman's
+  pipeline decides which need a person); today that means the QuickBooks tools, since the agent has no terminal or
+  file tools. **This is not a security boundary today:** with passwordless sudo, an agent that got
   such a tool could read `/etc/durable-park/*` (QuickBooks secret and refresh token, withHuman tunnel token), change
   `/opt/durable-park`, forge ledger rows and call QuickBooks directly, bypassing withHuman. Accepted by Yaakov on
   2026-10-20 for the exploration phase on a QuickBooks sandbox; containing the agent's tools comes before real
@@ -112,6 +114,10 @@ PY
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
    | `deploy/` (units, policy, Hermes config) | On proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
+   | `deploy/withhuman/entry-pipeline.json` | in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (with today's code it changes nothing: park requests still reach a human, gateway rows match rev 8) |
+
+   Rollback: revert the code first (git checkout the previous `main`, restart the gateway with 0 active rows); never
+   re-activate rev 8 while this code runs - rev 8 auto-approves every `hermes`/`mcp:` request.
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
    `formcheck_status.json` within about a minute.
@@ -131,20 +137,53 @@ The approval was used but no result was recorded (gateway crash, session expired
    `select args_json from parks where park_id='P-XXXXXXXX'`.
 2. If it happened: nothing to do. If not: ask the bot again; that is a new park and a new approval.
 
+### Parked row never got an approval request
+
+`durable-park: P-XXXXXXXX (<tool>) never got an approval request; cancelled after 10 minutes`
+
+No request id was ever attached to the row: usually the gateway stopped between saving the park and asking
+withHuman, but the request MAY exist at withHuman (the gateway stopped between withHuman answering and the row
+recording the request, or withHuman errored after creating it and the cancel failed). The sweep cancelled the row
+(note `no approval request after 10 minutes (cancelled by the sweep)`); the action did not run. A request may stay
+open in withHuman; approving it does nothing (fails closed); cancel or let it expire. Ask the bot again (a new park and a new approval). If this repeats, check why the gateway restarts (`journalctl --user -u hermes-gateway`).
+
+### Ledger retention
+
+The sweep deletes `allowed`, `refused` and `cancelled` rows 30 days after their last update (the wrapper passes
+`--retention-days 30`; the value must be at least 1). It prints nothing; a failure goes to stderr as
+`retention failed (<ErrorType>)` and never stops the rest of the sweep. Rows holding an outcome or a human decision
+(`executed`, `failed`, `unknown`, `denied`, `expired`) are never deleted. SQLite reuses freed space but the file
+does not shrink by itself; to shrink it, stop the gateway, check that no row is `parked`, `approved` or `executing`,
+then run `sqlite3 <ledger> 'VACUUM;'` as `hermes`.
+
 ### Form checker not working
 
 `durable-park ALERT: the form checker is not working - <reason>. Risky actions will be refused until it is fixed.`
 
-Risky calls are blocked (fail closed) until it is fixed. Read `formcheck_status.json` and the reason:
+Form-checked calls (QuickBooks money moves, DocuSign writes) are blocked (fail closed) until it is fixed; other
+tool calls are still asked about as usual. Read `formcheck_status.json` and the reason:
 
 | Reason | Likely cause | Fix |
 |---|---|---|
 | no form-check report / last ran N minutes ago | Gateway down, or durable-park did not load | Health check; `systemctl --user restart hermes-gateway`; look for `durable-park loaded` in `~/.hermes/logs/agent.log` |
-| no risky tools are registered | Gateway lost the `wh` MCP server (withHuman down, token problem) | `hermes mcp test wh`; check the withHuman gateway and `instance_token` |
+| no form-checked tools are registered | Gateway lost the `wh` MCP server (withHuman down, token problem) | `hermes mcp test wh`; check the withHuman gateway and `instance_token` |
 | could not read the tool registry / Hermes type fixing is unavailable | A Hermes upgrade moved an internal | Read `plugin/durable_park/compat.py` and `formcheck.py`; adjust and redeploy |
 | `<tool>: rules could not be used` | A tool's schema changed in a way the checker cannot compile | Look at that tool's schema (`withHuman` tool catalog); see [form-check.md](form-check.md) |
 
 A second line `durable-park: the form checker is working again.` follows when it recovers.
+
+### withHuman could not be reached
+
+`durable-park ALERT: withHuman could not be reached (since <time>); every tool call is being refused until it answers again.`
+
+The park hook's circuit breaker opened after 3 consecutive errors from withHuman, so tool calls are refused
+(fail closed) without asking. Every 30 seconds it lets calls through again until one gets an outcome. Read `breaker_status.json` next to the
+ledger (`open`, `opened_at`, `closed_at`); check the withHuman status page, the `instance_token`, and the VM's
+network (`hermes mcp test wh`). Nothing needs restarting: it closes by itself on the first answer. A gateway
+restart while it is open keeps it open but lets the first call through at once, so the close is still recorded.
+
+`durable-park: withHuman answers again (since <time>); tool calls are decided normally.` follows when it closes. If
+the outage was shorter than 5 minutes, both lines may arrive together.
 
 ## Troubleshooting
 
@@ -173,42 +212,120 @@ logged.
 - **Digest differs**: the gateway rewrote the arguments (seen so far: added `withhuman_scope`, `2.0` sent as `2`).
   Extend `ledger.normalize_args` for the new rewrite, add a test, deploy to the plugin and the bridge copy.
 
+### What the bot's refusal messages mean
+
+The park hook answers a blocked call with one of these (the model sees them and is told what to do):
+
+| Message starts with | Meaning | What to do |
+|---|---|---|
+| `PARKED P-...` | withHuman sent it to a person; nothing ran. | Decide it in the withHuman app |
+| `durable-park: "<tool>" was refused by withHuman policy` | A pipeline rule refused it at once (row `refused`, the reviewer's note after the colon if any). | Nothing, or change the pipeline rule |
+| `durable-park: withHuman could not be reached` | withHuman did not answer (or the breaker is open); row `refused`, nothing ran. | See [withHuman could not be reached](#withhuman-could-not-be-reached); ask again later |
+| `durable-park: P-... is already waiting for approval in this chat` | Another call of this chat waits for a person or is running; this call's request was cancelled. | Decide the waiting one ([below](#a-chat-says-already-waiting-but-nothing-is-pending-in-withhuman)) |
+| `durable-park: P-... is already <status>; this call was not run again` | The model replayed a call id that was already decided (`allowed`, `refused`, `denied`, ...). | Nothing |
+| `durable-park: another plugin hook could change tool arguments after approval (<names>)` | Something other than durable-park registered a `pre_tool_call` callback (a plugin's hook, a `config.yaml` `hooks:` shell hook or an outbound webhook) or `tool_request` / `tool_execution` middleware (or a registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-hook-observer_hooks)) |
+| `durable-park: no chat session; the tool call was refused` | The call came from outside a chat (e.g. `hermes chat -q`). | Use a chat |
+| `durable-park: no tool call id; the tool call was refused` | Hermes passed no session id or call id. | Check the Hermes version (`compat.py`) |
+| `durable-park: could not open an approval request` | An error in the hook (token file unreadable, arguments that are not strict JSON, ledger error; logged as `park hook failed for tool=...`), or durable-park could not load and refuses every call (a setting of the wrong type, logged as `durable-park setting <name> must be a list of strings`, or `durable-park failed to load`). | Read `~/.hermes/logs/agent.log` |
+
 ### A chat says "already waiting" but nothing is pending in withHuman
 
-Probably a `parked` row without a request id (the gateway died between saving and asking; known v2 gap). Check
-[waiting rows](#health-check); if the row has no `request_id`, cancel it by hand (safe: such a row never reached withHuman):
-
-```sh
-python3 - <<'PY'
-import sqlite3, datetime
-c = sqlite3.connect("/home/hermes/.hermes/plugin-data/durable-park/ledger.db")
-now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-n = c.execute("update parks set status='cancelled', note='cancelled by hand: no request', updated_at=? "
-              "where status='parked' and request_id is null", (now,)).rowcount
-c.commit(); print(n, "row(s) cancelled")
-PY
-```
+Another row of the chat is `approved` (the agent has not called `parked_action_execute` yet), `executing`, or
+`parked` with a request id whose decision has not reached the chat yet (the sweep re-wakes it every 5 minutes).
+Look at [waiting rows](#health-check). A `parked` row **without** a request id (the gateway died between saving and
+asking) does not block the chat; the sweep cancels it once it is 10 minutes old and prints
+`durable-park: P-XXXXXXXX (<tool>) never got an approval request; cancelled after 10 minutes`.
 
 ### The bot never got the decision
 
 The sweep re-posts the wake every 5 minutes. If it still does not arrive: health check (gateway up? webhook route
 `/health`?), then `journalctl -u durable-park-receiver -n 20` for wake errors.
 
-## Add a new risky tool
+## Plugin settings
 
-Example: make DocuSign `createEnvelope` need approval. Every place that has to agree:
+Settings live under `plugins.entries.durable-park.settings` in `~/.hermes/config.yaml` (user `hermes`). Edit the
+file by hand (keep comments), then restart the gateway (only when nothing is waiting or running, see the
+[health check](#health-check)). What each one does and its default: [architecture](architecture.md#plugin-settings).
+
+```yaml
+plugins:
+  entries:
+    durable-park:
+      settings:
+        exempt_tools: [parked_action_execute, clarify]   # keep parked_action_execute
+        form_checked_tools: ['mcp__wh__quickbooks__(create|update|delete)[_-](payment|bill)']  # optional
+        observer_hooks: []                                # module.qualname of reviewed hooks
+```
+
+- `exempt_tools`, `form_checked_tools` and `observer_hooks` must be lists of strings. A wrong type (a number,
+  `true`, a mapping, an empty `observer_hooks:` that YAML reads as null) makes durable-park refuse every call
+  except `parked_action_execute` and `clarify`; the log says `durable-park setting <name> must be a list of
+  strings`. Fix it and restart.
+- `exempt_tools`: anything listed here runs with no approval and no ledger row. Keep it to
+  `parked_action_execute` and `clarify`. Any other name logs an ERROR at every gateway start; an MCP tool
+  (`mcp__...`) or a form-checked tool is refused (`durable-park setting exempt_tools must not list MCP or
+  form-checked tool '<name>'`) and every call is refused until it is removed.
+- `risky_tools` is retired: it was renamed `form_checked_tools`. If it is still set the gateway log says
+  `risky_tools is renamed form_checked_tools; ignoring it`; move the value to `form_checked_tools` and delete it.
+- After the restart, `~/.hermes/logs/agent.log` shows `durable-park loaded: ... exempt tool(s), ... form-checked
+  pattern(s), ... observer hook(s)`.
+
+### Allow another hook (`observer_hooks`)
+
+durable-park refuses every non-exempt call while anything else has a `pre_tool_call` callback in Hermes's hook
+registry, or `tool_request` / `tool_execution` middleware in its middleware registry, because such a callback can
+change a call's arguments after withHuman approved them (a hook by returning a `modify` directive, a
+`tool_execution` middleware by passing other arguments to `next_call`; it runs after `pre_tool_call`). Four things
+put one there, each with its own name format:
+
+| Source | Name in the refusal and the log |
+|---|---|
+| another Hermes plugin's `ctx.register_hook("pre_tool_call", ...)` | `<module>.<qualname>` of its function, e.g. `my_plugin.hooks.on_tool` |
+| a `config.yaml` `hooks:` shell hook for `pre_tool_call` (Hermes `agent/shell_hooks.py:376`) | `agent.shell_hooks.shell_hook[pre_tool_call:<command>]` |
+| a `config.yaml` outbound webhook subscribed to `pre_tool_call` (Hermes `agent/outbound_webhooks.py:236`) | `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name`, else its URL |
+| another Hermes plugin's `ctx.register_middleware("tool_request" or "tool_execution", ...)` (Hermes `hermes_cli/plugins.py:937`) | `<module>.<qualname>` of its function |
+
+Outbound webhooks only notify: the callback queues a POST and always returns `None`, so it can never change
+arguments and is safe to list. Shell hooks can return any directive their command prints (including `modify`), and
+the name holds the whole command, so review the script.
+
+To allow one:
+
+1. Find its name in the refusal or the log line `foreign pre_tool_call hook(s) present (<name>)`.
+2. **Read the callback's code**: for a plugin, its `register` and the function, including everything it calls;
+   for a shell hook, the command and the script it runs.
+3. **Confirm it never returns `modify`** (or any directive other than `None`, or `block`), on any path, including
+   errors. For middleware: a `tool_request` one must never return `{"args": ...}`; a `tool_execution` one must
+   call `next_call()` with no argument or with the exact `args` it was given, on every path. If you cannot confirm it, do not list it: remove or disable it instead.
+4. Add its exact name to `observer_hooks`, restart the gateway, and check one call is asked about normally again.
+5. Re-do this review whenever that plugin, script or command changes.
+
+`<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook or middleware
+registry (e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
+
+## Add a form-checked tool
+
+**Risk is a pipeline rule now.** Whether a call needs a person is decided by withHuman's entry pipeline for every
+tool call; the plugin no longer has a list of tools that need approval. To make a tool need a person, add a rule
+to the pipeline. The plugin's list only says which tools get the [form check](form-check.md) before withHuman is
+asked (and which ones the form self-check watches).
+
+Example: put a new gateway server's write tool (say DocuSign `createEnvelope`) through the full path. Every place
+that has to agree:
 
 1. **withHuman**: register the server (e.g. slug `docusign`) and grant it to agent `proto-agents`
-   ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add it to pipeline
-   **rule 2**, so the bridge decides its replays ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
+   ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
+   sends its `park:docusign` request to a person, and add it to pipeline **rule 2**, so the bridge decides its
+   replays ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
    other `mcp__wh__` tool registers. Allow the new server there.
 3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify` and
    `parked_action_execute`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
    list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
-4. **Risky list**: the plugin parks tools matching `risky_tools` (Hermes setting
-   `plugins.entries.durable-park.settings.risky_tools`, default `DEFAULT_RISKY_TOOLS` in
-   `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in the default.
+4. **Form-checked list**: the plugin form-checks tools matching the form-checked patterns (setting
+   `plugins.entries.durable-park.settings.form_checked_tools`, see [Plugin settings](#plugin-settings); default
+   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in
+   the default. Leaving a tool off this list does **not** let it through: it is still asked about.
 5. **Docs**: the pipeline table and system map in [architecture.md](architecture.md), this runbook, the setup guide.
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
 
