@@ -22,7 +22,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
 | Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where alerts go). |
 | Teams bot | "TapDash Agent", served by the same `hermes` gateway on `127.0.0.1:3978`; the devtunnel `proto-agents-bot` (user `ubuntu`, unit `devtunnel-hermes`) forwards to it. |
-| Web dashboard | `http://100.99.171.75:9119/` (Tailscale), user `TapDash`; systemd user unit `hermes-dashboard` of user `hermes`. |
+| Web dashboard | <http://proto-agents.taila95862.ts.net:9119/> (same as `http://100.99.171.75:9119/`; Tailscale only, not public), user `TapDash`; systemd user unit `hermes-dashboard` of user `hermes`. |
 | Claude connector "Proto-Agents" | system service `hermes-shell-mcp` (`/home/hermes/hermes-shell-mcp`, `127.0.0.1:8792`, Tailscale Funnel path `/hermes-shell`, GitHub OAuth for one allowed account). Stopping it cuts Claude's access to the VM. |
 
 Rules:
