@@ -38,9 +38,17 @@ POLICY_MAX_AGE = timedelta(minutes=15)
 PROCESS_START = datetime.now(timezone.utc)
 NOT_GATEWAY_MESSAGE = "tool policy: load verdict not written (not the gateway process)"
 _logged_not_gateway = False
+# A report older than 15 minutes before a side process started is expected there (the start check ran for the
+# gateway, not for it): INFO, once per process. WARNING and up land in errors.log and alarm the operator.
+STALE_SIDE_PROCESS_MESSAGE = ("durable-park: tool policy report predates this side process (expected for the cron "
+                              "sweep and CLI runs); refusing every tool call in this process")
+_logged_stale_side_process = False
 POLICY_MESSAGE = ("durable-park: the tool policy check did not pass at gateway start; tool calls are refused "
                   "until an admin fixes it.")
 NO_POLICY_REPORT = "no tool policy report"
+STALE_POLICY_REPORT = "stale"  # merely too old for this process: the only verdict a side process may log quietly
+UNREADABLE_CHECKED_AT = "unreadable checked_at"
+FUTURE_CHECKED_AT = "checked_at in the future"
 RISKY_TOOLS_RENAMED = "risky_tools is renamed form_checked_tools; ignoring it"
 
 
@@ -62,9 +70,10 @@ def policy_problem(path: str, now: datetime, max_age: timedelta = POLICY_MAX_AGE
     """What is wrong with the tool policy report written at gateway start (deploy/tool_policy_check.sh), or
     ``None`` when it is fresh and passing. Missing, unreadable, invalid or malformed -> "no tool policy report";
     ``ok`` not exactly true -> the joined ``problems``; ``checked_at`` more than ``max_age`` BEFORE this process
-    started (``process_start``, default ``PROCESS_START``) -> "stale", as is an unparsable one or one in the
-    future by more than a minute of ``now``. A report written after this process started is fine, so the
-    gateway's uptime does not matter; a process started long after the last gateway start did not have the
+    started (``process_start``, default ``PROCESS_START``) -> "stale". An unparsable or missing ``checked_at`` ->
+    "unreadable checked_at", and one in the future by more than a minute of ``now`` -> "checked_at in the
+    future": real anomalies (clock skew, tampering), never "stale". A report written after this process started is
+    fine, so the gateway's uptime does not matter; a process started long after the last gateway start did not have the
     start check run for it and is refused."""
     if process_start is None:
         process_start = PROCESS_START
@@ -83,9 +92,11 @@ def policy_problem(path: str, now: datetime, max_age: timedelta = POLICY_MAX_AGE
     try:
         checked = datetime.strptime(str(report.get("checked_at")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
-        return "stale"
-    if checked < process_start - max_age or checked - now > timedelta(minutes=1):
-        return "stale"
+        return UNREADABLE_CHECKED_AT
+    if checked - now > timedelta(minutes=1):
+        return FUTURE_CHECKED_AT
+    if checked < process_start - max_age:
+        return STALE_POLICY_REPORT
     return None
 
 
@@ -329,7 +340,15 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
             _logged_not_gateway = True
             log.info(NOT_GATEWAY_MESSAGE)
     if problem is not None:
-        log.error("durable-park tool policy check failed (%s); refusing every tool call", problem)
+        global _logged_stale_side_process
+        if problem == STALE_POLICY_REPORT and not is_gateway_process():
+            # Expected, not a fault: a side process started more than 15 minutes after the gateway's start check,
+            # which did not run for it. Same refusal, but INFO (WARNING and up land in errors.log), once per process.
+            if not _logged_stale_side_process:
+                _logged_stale_side_process = True
+                log.info(STALE_SIDE_PROCESS_MESSAGE)
+        else:
+            log.error("durable-park tool policy check failed (%s); refusing every tool call", problem)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS, POLICY_MESSAGE))
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         # The executor stays registered so the model's call gets a clean refusal (nothing consumed: an
