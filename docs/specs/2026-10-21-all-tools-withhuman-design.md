@@ -244,8 +244,8 @@ The design is `receiver-setup.md` "v2: separate ledger owner"; this section list
   later Teams).
 - Migration when no row is `parked|approved|executing`: checkpoint, copy, re-own, change `ledger_path` and the bridge
   unit, restart in order receiver, service, bridge, gateway.
-- Still open on the withHuman side (Q5, open): the gateway's `wh` MCP bearer is the same instance token, so `hermes` can call
-  the gateway directly. Needs a separate gateway-only credential or a service-side proxy (Q5).
+- Gateway access (Q5, decided 2026-10-21): the gateway's `wh` MCP bearer is the same instance token, so `hermes` can call
+  the gateway directly. Accepted: that token cannot approve, so the worst case is denial of service (§7, Q5). When new gateway servers are added, per-agent grants (`set_agent_tool_access`) should list only the servers the agent needs.
 
 ## 5. Verification and acceptance (evidence for each; no claim without it)
 
@@ -300,9 +300,7 @@ Open questions (who decides):
 - Q2 (Yaakov): any amount threshold for sandbox money tools, and which field (`TotalAmt`) it tests. **Decided 2026-10-21:** keep all 12 QuickBooks money types on "human" for now; no amount threshold.
 - Q3 (Yaakov): keep rows for every call in the ledger (§4.2) with 30-day retention, or parks only. **Decided 2026-10-21: yes.** A ledger row for every call (allowed or refused), 30-day retention; the rows feed the dashboard trace.
 - Q4 (Yaakov, Tailscale admin console): restrict Tailscale SSH to `ubuntu` so no interactive login as `hermes` exists. **Decided 2026-10-21: yes.** Yaakov restricts Tailscale SSH to `ubuntu` in the admin console.
-- Q5 (withHuman): a gateway-only credential separate from the instance token, or a proxy, so the agent's user cannot
-  call the gateway directly after Phase 2.
-  **Open** (pending Yaakov's answer). First check whether withHuman can issue a gateway-only credential; if not, a local relay owned by the durable-park service user holds the real key.
+- Q5 (withHuman): **Decided 2026-10-21: no separate gateway-only credential and no relay.** The AAP instance credential can only create a request, read it, cancel it, consume an approval a human already gave, and report an outcome (`agentapprovalprotocol/_client.py` lines 155-170: POST /v1/requests, GET /v1/requests/{id}, DELETE /v1/requests/{id}, POST /v1/requests/{id}/consume, POST /v1/requests/{id}/outcome). There is no endpoint to approve; only a person in withHuman or a pipeline rule decides. withHuman limits the agent's gateway access per agent: `proto-agents` is granted only the `quickbooks` gateway server (mode all, scope default; `list_agent_tool_access` 2026-10-21), and every gateway call is decided by the entry pipeline; risky QuickBooks calls also go through the durable-park bridge, which checks the ledger. So a compromised agent holding the credential can at worst create or cancel requests or spoil a pending approval (denial of service), never run a risky call without a human. The asset to protect is the ledger, which Phase 2 (§4.5) moves to its own user.
 - Q6 (Yaakov): whether the content agent (second agent) shares this pipeline with its own `/agent/slug` blocks or
   gets a delegated pipeline.
   **Decided 2026-10-21: defer.** Decide when the second agent is built.
@@ -327,8 +325,8 @@ Open questions (who decides):
 8. Open tools one by one, groups (a)–(d) of §4.4, `docs/tool-rollout.md` — the goal state, safely — depends on 5–7.
 9. Test `tools.tool_search: on` with a park (wake → `parked_action_execute` still found) — cuts the per-turn tool
    description cost; today off on purpose — depends on 8 (enough tools for it to matter).
-10. Clean Setup Phase 2 (§4.5): v2 ledger service, `dpledger`, bridge user, sweep timer, migration, Q5 — the real
-    boundary — depends on 5; Q5 answer for the gateway credential.
+10. Clean Setup Phase 2 (§4.5): v2 ledger service, `dpledger`, bridge user, sweep timer, migration — the real
+    boundary — depends on 5.
 11. Open groups (e)–(g) of §4.4 (file, terminal, code, delegation, cron) with the Phase-2 argument rules — last, by
     decision — depends on 10.
 12. Dashboard pages: pending withHuman approvals; full withHuman view; live trace of tool calls (source: the ledger's
