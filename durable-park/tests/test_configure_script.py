@@ -272,3 +272,23 @@ def test_an_invalid_allow_file_makes_the_script_exit_2_with_nothing_applied():
     block = text[at - 20:at + 260]
     assert "rc=$?" in block and 'exit "$rc"' in block and "could not apply the agent tool policy" in block
     assert "tool_policy apply || die" not in text
+
+
+def test_bridge_copy_is_the_whole_package_including_vendor():
+    text = SCRIPT.read_text()
+    code = "\n".join(_code_lines())
+    assert 'sync_tree "$REPO/plugin/durable_park" "$VENV/plugin/durable_park"' in code
+    assert 'sync_tree "$REPO/bridge" "$VENV/bridge"' in code
+    assert "find . -type f -not -path '*/__pycache__/*'" in code
+    assert "LICENSE.fastjsonschema" in code and "README.md" in code
+    assert "_vendor" in text  # explained next to the copy
+    assert 'rm -f -- "${dst:?}/$rel"' in code  # stale files go, and only below $dst
+
+
+def test_bridge_health_gate_demands_401_before_going_on():
+    code = "\n".join(_code_lines())
+    assert "-w '%{http_code}' -X POST \"$BRIDGE_LOCAL\"" in code
+    assert "== 401" in code and "seq 1 10" in code
+    assert 'journalctl -u "$BRIDGE_UNIT" -n 20' in code and "grep -v -i secret" in code
+    gate = code.index("bridge_ok=0")
+    assert "die " in code[gate:] and code.index("die \"bridge unit is not answering 401") > gate
