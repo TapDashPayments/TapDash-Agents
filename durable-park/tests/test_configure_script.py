@@ -1,5 +1,7 @@
 """deploy/configure_hermes.sh: syntax, shellcheck (when available) and a few invariants of the plan."""
 
+import json
+import re
 import shutil
 import subprocess
 import sys
@@ -93,3 +95,71 @@ def test_hermes_mcp_script_values_and_guards():
     for line in code:
         assert not ("instance_token" in line and ("cat " in line or "echo " in line)), line
         assert "untrusted" not in line, line
+
+
+POLICY_WRAPPER = SCRIPT.parent / "tool_policy_check.sh"
+DROP_IN = SCRIPT.parent / "hermes-gateway-policy.conf"
+
+
+def test_drop_in_installed_and_reloaded():
+    text = SCRIPT.read_text()
+    assert "50-durable-park-policy.conf" in text
+    assert "hermes-gateway.service.d" in text
+    assert "daemon-reload" in text
+    assert text.index("50-durable-park-policy.conf") < text.index('user_systemctl daemon-reload') \
+        < text.index("# --- 7. restart Hermes")  # in place before the gateway restarts
+    conf = DROP_IN.read_text()
+    assert "[Service]" in conf
+    assert "Environment=DURABLE_PARK_POLICY_STATUS=%h/.hermes/plugin-data/durable-park/tool_policy_status.json" in conf
+    assert "ExecStartPre=-/bin/bash %h/durable-park/deploy/tool_policy_check.sh" in conf
+
+
+def test_policy_wrapper_syntax_and_shellcheck():
+    subprocess.run(["bash", "-n", str(POLICY_WRAPPER)], check=True)
+    if _shellcheck() is None:
+        pytest.skip("shellcheck not installed")
+    result = subprocess.run([_shellcheck(), str(POLICY_WRAPPER)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_policy_wrapper_finds_python_the_way_configure_does():
+    def snippet(path):
+        text = path.read_text()
+        start = text.index("import glob, json, sys")
+        return text[start:text.index("\"$HERMES_HOME\"", start)]
+    assert snippet(POLICY_WRAPPER) == snippet(SCRIPT)
+
+
+def _run_wrapper(tmp_path, *, python_ok):
+    """Run the wrapper against a fake HERMES_HOME; returns (exit code, status path)."""
+    home = tmp_path / "hermes"
+    status = tmp_path / "state" / "tool_policy_status.json"
+    if python_ok:
+        install = home / "installs" / "x"
+        install.mkdir(parents=True)
+        env_dir = tmp_path / "venv"
+        (env_dir / "bin").mkdir(parents=True)
+        (env_dir / "bin" / "python").symlink_to(sys.executable)
+        (install / "facts.json").write_text(json.dumps({"packages": {"venv": {"environment": str(env_dir)}}}))
+    else:
+        home.mkdir()
+    result = subprocess.run(["bash", str(POLICY_WRAPPER)], env={
+        "PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "HERMES_HOME": str(home),
+        "DURABLE_PARK_POLICY_STATUS": str(status)}, capture_output=True, text=True)
+    return result.returncode, status
+
+
+def test_policy_wrapper_without_python_writes_a_failing_report_and_exits_0(tmp_path):
+    code, status = _run_wrapper(tmp_path, python_ok=False)
+    assert code == 0
+    report = json.loads(status.read_text())
+    assert report["ok"] is False and report["problems"] == ["hermes python not found"] and report["allowed"] == []
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", report["checked_at"])
+    assert [p.name for p in status.parent.iterdir()] == [status.name]  # no temp file left
+
+
+def test_policy_wrapper_failed_check_leaves_a_failing_report_and_exits_0(tmp_path):
+    # the fake Hermes python cannot import hermes_bootstrap, so the check itself fails: still exit 0, ok false
+    code, status = _run_wrapper(tmp_path, python_ok=True)
+    assert code == 0
+    assert json.loads(status.read_text())["ok"] is False

@@ -393,6 +393,7 @@ def test_register_wires_pre_gateway_dispatch_to_handle_wake(tmp_path, monkeypatc
         return SKIP
 
     monkeypatch.setattr("durable_park.handle_wake", spy)
+    monkeypatch.setattr("durable_park.policy_problem", lambda path, now, max_age=None: None)  # passing report
     ctx = Ctx(tmp_path, {"token_file": str(tmp_path / "tok"), "aap_base_url": BASE_URL})
     (tmp_path / "tok").write_text("tok-9\n")
     register(ctx)

@@ -132,6 +132,17 @@ def _tool_error(payload: Any) -> tuple[str, bool] | None:
     return _one_line(text), unknown
 
 
+def make_refusing_executor(message: str) -> Callable[..., str]:
+    """A handler that refuses every call and touches nothing (no ledger, no gate): used while the tool policy
+    check has failed. An approved park stays approved."""
+
+    def handler(args: Any = None, **_kw: Any) -> str:
+        park_id = str(args.get("park_id") or "").strip() if isinstance(args, dict) else ""
+        return _refused(park_id, message)
+
+    return handler
+
+
 def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Callable[..., Any],
                   session_key_fn: Callable[[], str] | None = None, crash_after_consume: bool = False,
                   exit_fn: Callable[[int], Any] | None = None) -> Callable[..., str]:

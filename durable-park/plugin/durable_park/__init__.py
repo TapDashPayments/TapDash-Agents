@@ -3,15 +3,17 @@ the decision."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from . import compat
 from . import formcheck
 from .breaker import STATUS_FILENAME as BREAKER_STATUS_FILENAME, Breaker
-from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor
+from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor, make_refusing_executor
 from .gatecall import GateHolder
 from .ledger import Ledger
 from .park_hook import DEFAULT_EXEMPT_TOOLS, DEFAULT_FORM_CHECKED_TOOLS, fail_closed_hook, make_pre_tool_call
@@ -23,11 +25,43 @@ DEFAULT_AAP_BASE_URL = "https://app.withhuman.ai/api/aap"
 DEFAULT_TOKEN_FILE = "/etc/durable-park/instance_token"
 EXECUTOR_TOOL = EXECUTE_SCHEMA["name"]
 HOOK_REGISTRY_UNAVAILABLE = "<hook registry unavailable>"
+POLICY_STATUS_FILENAME = "tool_policy_status.json"
+POLICY_MAX_AGE = timedelta(minutes=15)
+POLICY_MESSAGE = ("durable-park: the tool policy check did not pass at gateway start; tool calls are refused "
+                  "until an admin fixes it.")
+NO_POLICY_REPORT = "no tool policy report"
 RISKY_TOOLS_RENAMED = "risky_tools is renamed form_checked_tools; ignoring it"
 
 
 class BadSetting(ValueError):
     """A plugin setting has the wrong type."""
+
+
+def policy_problem(path: str, now: datetime, max_age: timedelta = POLICY_MAX_AGE) -> str | None:
+    """What is wrong with the tool policy report written at gateway start (deploy/tool_policy_check.sh), or
+    ``None`` when it is fresh and passing. Missing, unreadable, invalid or malformed -> "no tool policy report";
+    ``ok`` not exactly true -> the joined ``problems``; ``checked_at`` older than ``max_age`` (or unparsable or
+    in the future by more than a minute) -> "stale"."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, ValueError):
+        return NO_POLICY_REPORT
+    if not isinstance(report, dict):
+        return NO_POLICY_REPORT
+    if report.get("ok") is not True:
+        problems = report.get("problems")
+        if isinstance(problems, list) and problems:
+            return "; ".join(str(p) for p in problems)
+        return "the tool policy check failed"
+    try:
+        checked = datetime.strptime(str(report.get("checked_at")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "stale"
+    age = now - checked
+    if age > max_age or age < -timedelta(minutes=1):
+        return "stale"
+    return None
 
 
 def _names(key: str, value: Any) -> list[str]:
@@ -152,6 +186,21 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
     observers = frozenset(_names("observer_hooks", ctx.get_config("observer_hooks", [])))
 
     ledger_path = ctx.get_config("ledger_path", str(Path(ctx.state.data_dir) / "ledger.db"))
+    default_policy = str(Path(ledger_path).expanduser().parent / POLICY_STATUS_FILENAME)
+    policy_path = ctx.get_config("tool_policy_status", default_policy)
+    if not isinstance(policy_path, str) or not policy_path:
+        raise BadSetting(f"setting tool_policy_status must be a path, got {type(policy_path).__name__}")
+    problem = policy_problem(str(Path(policy_path).expanduser()), datetime.now(timezone.utc))
+    if problem is not None:
+        log.error("durable-park tool policy check failed (%s); refusing every tool call", problem)
+        register_hook("pre_tool_call", fail_closed_hook(exempt, POLICY_MESSAGE))
+        register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
+        # The executor stays registered so the model's call gets a clean refusal (nothing consumed: an
+        # approved park stays approved and can run after the admin fixes the policy and restarts the gateway).
+        ctx.register_tool(
+            name=EXECUTOR_TOOL, toolset="durable_park", schema=EXECUTE_SCHEMA,
+            handler=make_refusing_executor(POLICY_MESSAGE), description=EXECUTE_SCHEMA["description"])
+        return
     try:
         Path(ledger_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         ledger = Ledger(str(Path(ledger_path).expanduser()))

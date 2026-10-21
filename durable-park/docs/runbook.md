@@ -172,6 +172,31 @@ tool calls are still asked about as usual. Read `formcheck_status.json` and the 
 
 A second line `durable-park: the form checker is working again.` follows when it recovers.
 
+### Tool policy check failed
+
+`durable-park ALERT: the tool policy check failed at gateway start - <problems>. Every tool call is refused until it passes.`
+
+Only on a VM that runs the v1 tool lockdown. Before every `hermes-gateway` start, the user-unit drop-in
+`~hermes/.config/systemd/user/hermes-gateway.service.d/50-durable-park-policy.conf` runs
+`deploy/tool_policy_check.sh` (`ExecStartPre=-`, so a failure never stops the gateway). It runs `hermes_tool_policy.py
+check --status-file` and writes `plugin-data/durable-park/tool_policy_status.json` next to the ledger
+(`ok`, `checked_at`, `problems`, `allowed`). The plugin reads it at load: a missing report, `ok: false`, or a report
+older than 15 minutes makes it refuse every tool call except `parked_action_execute` and `clarify` (the log says
+`durable-park tool policy check failed (<reason>)`); wakes are dropped and `parked_action_execute` answers
+"refused" without touching the row, so an approved park stays approved. Telegram, Teams and the sweep keep running.
+The sweep alerts once when the report is missing or failed, and once (`durable-park: the tool policy check passes
+again.`) when it passes.
+
+| Problem | Likely cause | Fix |
+|---|---|---|
+| `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
+| `hermes python not found` | No or several `~/.hermes/installs/*/facts.json` | `hermes pm repair`; keep exactly one install |
+| a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
+| `stale` | The gateway started without the drop-in (the report is older than 15 minutes) | Install the drop-in, restart the gateway |
+
+Fix it, then `systemctl --user restart hermes-gateway` (only when nothing is waiting or running): the check runs
+again at the start. `systemctl --user show hermes-gateway -p ExecStartPre` shows the drop-in is active.
+
 ### withHuman could not be reached
 
 `durable-park ALERT: withHuman could not be reached (since <time>); every tool call is being refused until it answers again.`
@@ -255,6 +280,7 @@ plugins:
         exempt_tools: [parked_action_execute, clarify]   # keep parked_action_execute
         form_checked_tools: ['mcp__wh__quickbooks__(create|update|delete)[_-](payment|bill)']  # optional
         observer_hooks: []                                # module.qualname of reviewed hooks
+        # tool_policy_status: /path/to/tool_policy_status.json   # default: next to the ledger; leave unset
 ```
 
 - `exempt_tools`, `form_checked_tools` and `observer_hooks` must be lists of strings. A wrong type (a number,
@@ -350,7 +376,9 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
 3. Apply and check, as the `hermes` user in Hermes's own Python (or just re-run `deploy/hermes_mcp.sh`, which does both):
    `<hermes env python> -I deploy/hermes_tool_policy.py apply`, then `... check`. `check` must end with
    `tool policy: ok`.
-4. Restart `hermes-gateway`, then run `check` once more (`--status-file PATH` to leave the result as JSON).
+4. Restart `hermes-gateway`: its start runs `check` itself (the drop-in, see [Tool policy check
+   failed](#tool-policy-check-failed)) and the plugin refuses every call if it fails. Run `check` once more by hand
+   (`--status-file PATH` to leave the result as JSON).
 
 To close it again, remove the line and repeat from step 3.
 
