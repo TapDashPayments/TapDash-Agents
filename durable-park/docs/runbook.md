@@ -359,6 +359,25 @@ asking) does not block the chat; the sweep cancels it once it is 10 minutes old 
 The sweep re-posts the wake every 5 minutes. If it still does not arrive: health check (gateway up? webhook route
 `/health`?), then `journalctl -u durable-park-receiver -n 20` for wake errors.
 
+### Every `hermes` command prints `Config ref '...' ... is not set`
+
+Harmless, and gone on a VM configured by the current `deploy/configure_hermes.sh` / `deploy/hermes_mcp.sh`: they
+write the secret references bare (`${DURABLE_PARK_WAKE_SECRET}`, `Bearer ${DURABLE_PARK_WH_TOKEN}`) because Hermes
+warns only for the `env:`-prefixed form, and config loads before the `command` secret source has set the
+variables ([why, and how a missing secret still shows](receiver-setup.md#files-and-owners)). A VM configured
+earlier still has the `env:` form in `config.yaml`; with no row `parked`, `approved` or `executing` ([waiting
+rows](#health-check)), as `hermes`:
+
+```sh
+cp -p ~/.hermes/config.yaml ~/.hermes/config.yaml.bak-refs-$(date -u +%Y%m%dT%H%M%SZ)
+hermes config set 'platforms.webhook.extra.routes.durable-park-wake.secret' '${DURABLE_PARK_WAKE_SECRET}'
+hermes config set 'mcp_servers.wh.headers.Authorization' 'Bearer ${DURABLE_PARK_WH_TOKEN}'
+grep -c 'env:DURABLE_PARK' ~/.hermes/config.yaml                  # 0
+systemctl --user restart hermes-gateway
+```
+
+Then run the [health check](#health-check); a CLI command no longer prints the warning.
+
 ## Plugin settings
 
 Settings live under `plugins.entries.durable-park.settings` in `~/.hermes/config.yaml` (user `hermes`). Edit the

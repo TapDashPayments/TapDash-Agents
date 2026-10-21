@@ -75,6 +75,23 @@ def test_bridge_unit_uses_the_deployed_venv_and_ledger():
     assert 'LEDGER="$HERMES_HOME/plugin-data/durable-park/ledger.db"' in SCRIPT.read_text()
 
 
+def test_webhook_route_secret_is_a_bare_ref():
+    """Hermes expands `${env:VAR}` at import-time config load, before its secrets.command helper has put
+    the value in the environment, and warns on every process. A bare `${VAR}` resolves identically (same
+    primitive, hermes_cli/config.py `_env_expand_match`) but warns only for the `env:` form."""
+    text = SCRIPT.read_text()
+    assert ".secret\" '${DURABLE_PARK_WAKE_SECRET}'" in text
+    assert "${env:" not in text
+
+
+def test_no_env_prefixed_durable_park_refs_anywhere():
+    root = Path(__file__).resolve().parents[1]
+    offenders = [str(path.relative_to(root)) for path in
+                 [*(root / "deploy").glob("*.sh"), *(root / "docs").glob("*.md"), root / "README.md"]
+                 if "${env:DURABLE_PARK" in path.read_text()]
+    assert offenders == []
+
+
 MCP_SCRIPT = SCRIPT.parent / "hermes_mcp.sh"
 
 
@@ -88,7 +105,7 @@ def test_hermes_mcp_script_syntax_and_shellcheck():
 def test_hermes_mcp_script_values_and_guards():
     text = MCP_SCRIPT.read_text()
     for needle in ("GATEWAY_URL=https://app.withhuman.ai/gateway/mcp", "set_cfg \"mcp_servers.$SERVER.trust\" full",
-                   "'Bearer ${env:DURABLE_PARK_WH_TOKEN}'", "TOKEN_FILE=/etc/durable-park/instance_token",
+                   "'Bearer ${DURABLE_PARK_WH_TOKEN}'", "TOKEN_FILE=/etc/durable-park/instance_token",
                    "does not exist: provision the instance first", "TOOL_INCLUDE='[\"quickbooks__*\"]'"):
         assert needle in text, needle
     code = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]

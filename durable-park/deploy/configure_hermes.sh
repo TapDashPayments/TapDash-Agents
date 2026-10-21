@@ -14,7 +14,7 @@
 #   4. Hermes (as user hermes, through Hermes's own CLI): plugin symlink; `hermes plugins enable` (PM
 #      admission installs the plugin.yaml python_dependencies into Hermes's environment); plugin settings;
 #      plugins.hook_callback_timeout 60; the local webhook platform (127.0.0.1:8644, route durable-park-wake,
-#      deliver log, rate_limit 120) whose secret is ${env:DURABLE_PARK_WAKE_SECRET}, supplied at startup by
+#      deliver log, rate_limit 120) whose secret is ${DURABLE_PARK_WAKE_SECRET}, supplied at startup by
 #      the `command` secret source (the helper above reads wake_secret, and instance_token once it exists, for
 #      deploy/hermes_mcp.sh); no copy of a secret in config.yaml/.env
 #   4b. gateway bridge: root-owned copy of bridge/ + the whole plugin/durable_park package (incl. _vendor/, stale
@@ -225,8 +225,12 @@ set_cfg platforms.webhook.enabled true
 set_cfg platforms.webhook.extra.host 127.0.0.1
 set_cfg platforms.webhook.extra.port 8644
 set_cfg platforms.webhook.extra.rate_limit 120
-# shellcheck disable=SC2016  # a literal Hermes ${env:...} reference, expanded by Hermes, not by bash
-set_cfg "platforms.webhook.extra.routes.$ROUTE.secret" '${env:DURABLE_PARK_WAKE_SECRET}'
+# A bare ${VAR} reference, not the env:-prefixed form: Hermes expands config at import time, before the
+# secrets.command helper has put the value in the environment, and warns "Config ref ... is not set" in every
+# process for the env: form only (hermes_cli/config.py _env_expand_match). Both forms resolve alike; the
+# cached config is re-expanded after the helper ran, so the real value is used. See docs/receiver-setup.md.
+# shellcheck disable=SC2016  # a literal Hermes ${...} reference, expanded by Hermes, not by bash
+set_cfg "platforms.webhook.extra.routes.$ROUTE.secret" '${DURABLE_PARK_WAKE_SECRET}'
 set_cfg "platforms.webhook.extra.routes.$ROUTE.events" '["wake"]'
 set_cfg "platforms.webhook.extra.routes.$ROUTE.deliver" log
 set_cfg "platforms.webhook.extra.routes.$ROUTE.prompt" \
