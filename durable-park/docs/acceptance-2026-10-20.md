@@ -77,3 +77,5 @@ The record above is kept as it was. Changes since then:
 - Code now lives in GitHub `TapDashPayments/TapDash-Agents` (`durable-park/`); the VM works in a clone of it.
 
 Still open: Important #2, #3, #5, #6; the write-scope decision (#4); secret rotation.
+
+The ask-every-call acceptance (2026-10-21) is recorded in acceptance-2026-10-21-ask-every-call.md.

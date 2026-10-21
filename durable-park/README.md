@@ -93,6 +93,7 @@ Live checks against the sandbox run only on the VM: `DURABLE_PARK_LIVE=1 .venv/b
 | [receiver-setup.md](docs/receiver-setup.md) | Set up the receiver, provisioning and the v1 tool lockdown |
 | [backlog.md](docs/backlog.md) | See what is still open, and what must be done before real books |
 | [acceptance-2026-10-20.md](docs/acceptance-2026-10-20.md) | See what was tested for v1 (the record) |
+| [acceptance-2026-10-21-ask-every-call.md](docs/acceptance-2026-10-21-ask-every-call.md) | See what was tested for "ask every call" (the record) |
 | [plans/](docs/plans/) | The original build plan (historical) |
 
 Changing code? Update the docs and diagrams it affects in the same change - see [CONTRIBUTING.md](../CONTRIBUTING.md).
