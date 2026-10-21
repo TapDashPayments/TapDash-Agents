@@ -183,6 +183,9 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
    runs) and each fails closed on its own; only the gateway (`is_gateway_process()`: argv has `gateway run`) writes
    its verdict, `tool_policy_load.json` next to the ledger (`ok`, `problem`, `checked_at`; atomic, never raises).
    Other processes log `tool policy: load verdict not written (not the gateway process)` once and write nothing.
+   A `stale` report in such a process is expected (the start check ran for the gateway, not for it): the same
+   refusal, but logged once at INFO (`durable-park: tool policy report predates this side process ...`) so it does
+   not reach `errors.log`. Every other problem in any process, and `stale` in the gateway, log at ERROR.
 3. Otherwise the ledger opens and the normal hook, wake handler and executor register.
 4. As the last step of every path that ends with a `pre_tool_call` hook registered (normal, policy refusal, ledger
    unavailable, and the `except` path of `register`), the gateway process writes the **load proof**

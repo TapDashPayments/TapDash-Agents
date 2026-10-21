@@ -38,6 +38,11 @@ POLICY_MAX_AGE = timedelta(minutes=15)
 PROCESS_START = datetime.now(timezone.utc)
 NOT_GATEWAY_MESSAGE = "tool policy: load verdict not written (not the gateway process)"
 _logged_not_gateway = False
+# A report older than 15 minutes before a side process started is expected there (the start check ran for the
+# gateway, not for it): INFO, once per process. WARNING and up land in errors.log and alarm the operator.
+STALE_SIDE_PROCESS_MESSAGE = ("durable-park: tool policy report predates this side process (expected for the cron "
+                              "sweep and CLI runs); refusing every tool call in this process")
+_logged_stale_side_process = False
 POLICY_MESSAGE = ("durable-park: the tool policy check did not pass at gateway start; tool calls are refused "
                   "until an admin fixes it.")
 NO_POLICY_REPORT = "no tool policy report"
@@ -329,7 +334,15 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
             _logged_not_gateway = True
             log.info(NOT_GATEWAY_MESSAGE)
     if problem is not None:
-        log.error("durable-park tool policy check failed (%s); refusing every tool call", problem)
+        global _logged_stale_side_process
+        if problem == "stale" and not is_gateway_process():
+            # Expected, not a fault: a side process started more than 15 minutes after the gateway's start check,
+            # which did not run for it. Same refusal, but INFO (WARNING and up land in errors.log), once per process.
+            if not _logged_stale_side_process:
+                _logged_stale_side_process = True
+                log.info(STALE_SIDE_PROCESS_MESSAGE)
+        else:
+            log.error("durable-park tool policy check failed (%s); refusing every tool call", problem)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS, POLICY_MESSAGE))
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         # The executor stays registered so the model's call gets a clean refusal (nothing consumed: an
