@@ -11,7 +11,7 @@ from durable_park import compat, register
 from test_park_hook import FakeCtx
 
 HOOK_NAMES = ("pre_tool_call", "pre_gateway_dispatch", "ctx.inject_message", "ctx.dispatch_tool",
-              "ctx.register_tool", "MCP tool-error wording")
+              "ctx.register_tool", "MCP tool-error wording", "iter_hook_callbacks")
 
 
 def _warnings(caplog):

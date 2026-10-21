@@ -7,6 +7,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 - [Deploy a change](#deploy-a-change)
 - [Alerts and what to do](#alerts-and-what-to-do)
 - [Troubleshooting](#troubleshooting)
+- [Plugin settings](#plugin-settings)
 - [Add a form-checked tool](#add-a-form-checked-tool)
 - [Rotate secrets before production](#rotate-secrets-before-production)
 - [Rollback](#rollback)
@@ -215,7 +216,7 @@ The park hook answers a blocked call with one of these (the model sees them and 
 | `durable-park: withHuman could not be reached` | withHuman did not answer (or the breaker is open); row `refused`, nothing ran. | See [withHuman could not be reached](#withhuman-could-not-be-reached); ask again later |
 | `durable-park: P-... is already waiting for approval in this chat` | Another call of this chat waits for a person or is running; this call's request was cancelled. | Decide the waiting one ([below](#a-chat-says-already-waiting-but-nothing-is-pending-in-withhuman)) |
 | `durable-park: P-... is already <status>; this call was not run again` | The model replayed a call id that was already decided (`allowed`, `refused`, `denied`, ...). | Nothing |
-| `durable-park: another plugin hook could change tool arguments after approval (<names>)` | A Hermes plugin registered its own `pre_tool_call` hook; every call is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code |
+| `durable-park: another plugin hook could change tool arguments after approval (<names>)` | A Hermes plugin registered its own `pre_tool_call` hook (or the hook registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-plugins-hook-observer_hooks)) |
 | `durable-park: no chat session; the tool call was refused` | The call came from outside a chat (e.g. `hermes chat -q`). | Use a chat |
 | `durable-park: no tool call id; the tool call was refused` | Hermes passed no session id or call id. | Check the Hermes version (`compat.py`) |
 | `durable-park: could not open an approval request` | An error in the hook (token file unreadable, arguments that are not strict JSON, ledger error); logged as `park hook failed for tool=...`. | Read `~/.hermes/logs/agent.log` |
@@ -232,6 +233,44 @@ asking) does not block the chat; the sweep cancels it once it is 10 minutes old 
 
 The sweep re-posts the wake every 5 minutes. If it still does not arrive: health check (gateway up? webhook route
 `/health`?), then `journalctl -u durable-park-receiver -n 20` for wake errors.
+
+## Plugin settings
+
+Settings live under `plugins.entries.durable-park.settings` in `~/.hermes/config.yaml` (user `hermes`). Edit the
+file by hand (keep comments), then restart the gateway (only when nothing is waiting or running, see the
+[health check](#health-check)). What each one does and its default: [architecture](architecture.md#plugin-settings).
+
+```yaml
+plugins:
+  entries:
+    durable-park:
+      settings:
+        exempt_tools: [parked_action_execute, clarify]   # keep parked_action_execute
+        form_checked_tools: ['mcp__wh__quickbooks__(create|update|delete)[_-](payment|bill)']  # optional
+        observer_hooks: []                                # module.qualname of reviewed hooks
+```
+
+- `risky_tools` is retired: it was renamed `form_checked_tools`. If it is still set the gateway log says
+  `risky_tools is renamed form_checked_tools; ignoring it`; move the value to `form_checked_tools` and delete it.
+- After the restart, `~/.hermes/logs/agent.log` shows `durable-park loaded: ... exempt tool(s), ... form-checked
+  pattern(s), ... observer hook(s)`.
+
+### Allow another plugin's hook (`observer_hooks`)
+
+durable-park refuses every non-exempt call while any other plugin has a `pre_tool_call` hook, because such a hook
+can return a `modify` directive and change a call's arguments after withHuman approved them. To allow a hook that
+only watches:
+
+1. Find its name in the refusal or the log line `foreign pre_tool_call hook(s) present (<module.qualname>)`.
+2. **Read the callback's code** (the plugin's `register` and the function itself), including everything it calls.
+3. **Confirm it never returns `modify`** (or any directive other than `None`, or `block`), on any path, including
+   errors. If you cannot confirm it, do not list it: remove or disable the plugin instead.
+4. Add its exact `module.qualname` to `observer_hooks`, restart the gateway, and check one call is asked about
+   normally again.
+5. Re-do this review whenever that plugin is updated.
+
+`<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook registry
+(e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
 
 ## Add a form-checked tool
 
@@ -252,8 +291,8 @@ that has to agree:
 3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify` and
    `parked_action_execute`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
    list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
-4. **Form-checked list**: the plugin form-checks tools matching the form-checked patterns (in this version the
-   Hermes setting is still named `plugins.entries.durable-park.settings.risky_tools`; default
+4. **Form-checked list**: the plugin form-checks tools matching the form-checked patterns (setting
+   `plugins.entries.durable-park.settings.form_checked_tools`, see [Plugin settings](#plugin-settings); default
    `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in
    the default. Leaving a tool off this list does **not** let it through: it is still asked about.
 5. **Docs**: the pipeline table and system map in [architecture.md](architecture.md), this runbook, the setup guide.

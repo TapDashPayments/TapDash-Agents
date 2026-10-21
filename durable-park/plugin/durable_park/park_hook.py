@@ -36,7 +36,6 @@ DEFAULT_FORM_CHECKED_TOOLS: tuple[str, ...] = (
     r"mcp__wh__docusign__(createEnvelope|updateEnvelope|triggerWorkflow|cancelWorkflowInstance"
     r"|pauseNewWorkflowInstances|resumeWorkflow)",
 )
-DEFAULT_RISKY_TOOLS = DEFAULT_FORM_CHECKED_TOOLS  # old name, still imported by the plugin entry point
 
 PARK_MESSAGE = (
     'PARKED {park_id}: "{tool}" needs human approval in withHuman and has NOT run. '

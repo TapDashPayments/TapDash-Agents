@@ -130,6 +130,7 @@ flowchart LR
 
 | Part | Code | What it does |
 |---|---|---|
+| plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook registry on every call for other plugins' `pre_tool_call` hooks (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
 | park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`): checks the form (form-checked tools only), saves the call, and asks withHuman once. An instant approval lets the tool run (row `allowed`); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
 | ledger | `plugin/durable_park/ledger.py` | SQLite record of every tool call that was asked about and its state. The single source of truth. |
@@ -141,6 +142,25 @@ flowchart LR
 | bridge | `bridge/app.py` | Answers withHuman's pipeline: "is this exact gateway call an approved park?" |
 | sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id after 10 minutes, alerts when the form checker is broken, and once each when withHuman becomes unreachable (breaker open) and answers again. |
 | tunnel | `deploy/tunnel/` | Runs Intuit's QuickBooks MCP server behind the withHuman gateway (sandbox). |
+
+### Plugin settings
+
+Read once at gateway start from `plugins.entries.durable-park.settings.<name>` in `~/.hermes/config.yaml`
+(`ctx.get_config`); a change needs a gateway restart.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `exempt_tools` | `["parked_action_execute", "clarify"]` | Tools that are never asked about (no row, nobody asked). The list replaces the default, so keep `parked_action_execute` in it (a warning is logged if it is missing: approved parks could not run). Also used by the fail-closed hook when the ledger cannot open. |
+| `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
+| `observer_hooks` | `[]` | `module.qualname` of other plugins' `pre_tool_call` hooks an admin has read and confirmed never return `modify` ([runbook](runbook.md#plugin-settings)). Any other foreign hook, or a hook registry that cannot be read, refuses every non-exempt call. |
+| `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
+| `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
+| `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json` and `formcheck_status.json` are written next to it. |
+| `risky_tools` | (retired) | Renamed `form_checked_tools`. If still set, a warning `risky_tools is renamed form_checked_tools; ignoring it` is logged and its value is not used. |
+
+The foreign-hook guard reads Hermes's hook registry (`ctx._manager.iter_hook_callbacks("pre_tool_call")`,
+Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) on every call; durable-park's own callbacks are recognised by
+object identity. The dependency is listed in `compat.py`, so a Hermes upgrade warns to re-verify it.
 
 **The withHuman entry pipeline** (configured in the withHuman app, not in this repo; as of October 2026,
 revision 8):

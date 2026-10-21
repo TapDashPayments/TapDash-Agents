@@ -6,13 +6,14 @@ import httpx
 import pytest
 from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
-from durable_park import register
+from durable_park import foreign_pre_tool_call_hooks, register
 from durable_park.executor import EXECUTE_SCHEMA
-from durable_park.gatecall import build_call, bounded_http, make_gate
+from durable_park.gatecall import GateHolder, build_call, bounded_http, make_gate
 from durable_park.ledger import Ledger, call_key
 from agentapprovalprotocol import Gate
 
 from durable_park.breaker import Breaker
+from durable_park.formcheck import FormChecker
 from durable_park.park_hook import DEFAULT_FORM_CHECKED_TOOLS, make_pre_tool_call
 
 SESSION_KEY = "agent:main:telegram:dm:42"
@@ -209,12 +210,19 @@ def test_parked_row_without_request_does_not_make_the_chat_busy(env):
 
 
 class FakeCtx:
-    def __init__(self, data_dir, config=None):
+    """A Hermes PluginContext stand-in. ``_manager.iter_hook_callbacks`` mirrors Hermes v0.22.2
+    (hermes_cli/plugins_dispatch.py:523): a snapshot tuple of the callables registered for a hook."""
+
+    def __init__(self, data_dir, config=None, *, manager=True):
         self.config = config or {}
         self.state = SimpleNamespace(data_dir=data_dir)
         self.hooks = {}
+        self.hook_lists = {}  # every callback in registration order, as the Hermes registry keeps them
         self.tools = {}
         self.asked = []
+        if manager:
+            self._manager = SimpleNamespace(
+                iter_hook_callbacks=lambda name: tuple(self.hook_lists.get(name, ())))
 
     def get_config(self, key, default=None):
         self.asked.append(key)
@@ -222,6 +230,7 @@ class FakeCtx:
 
     def register_hook(self, name, callback):
         self.hooks[name] = callback
+        self.hook_lists.setdefault(name, []).append(callback)
 
     def register_tool(self, name, toolset, schema, handler, **kwargs):
         self.tools[name] = SimpleNamespace(toolset=toolset, schema=schema, handler=handler, **kwargs)
@@ -230,49 +239,244 @@ class FakeCtx:
         raise AssertionError("not expected in registration tests")
 
 
-def test_register_wires_pre_tool_call_with_default_settings(tmp_path):
+def foreign_hook(**kw):
+    """Another plugin's pre_tool_call hook (it could return a ``modify`` directive)."""
+    return None
+
+
+FOREIGN_NAME = f"{foreign_hook.__module__}.{foreign_hook.__qualname__}"
+
+
+@pytest.fixture
+def with_session(monkeypatch):
+    monkeypatch.setattr("durable_park.park_hook.default_session_key", lambda: SESSION_KEY)
+
+
+@pytest.fixture
+def fake_withhuman(monkeypatch, tmp_path):
+    """The plugin's shared gate talks to a FakeProvider; ``token`` is a readable token file."""
+    provider = FakeProvider(auto=None)
+    real_make_gate = make_gate
+    monkeypatch.setattr("durable_park.gatecall.make_gate",
+                        lambda base_url, token: real_make_gate(BASE_URL, TOKEN,
+                                                               client=provider.client(retry_budget=0.5)))
+    token = tmp_path / "token"
+    token.write_text("tok\n")
+    return SimpleNamespace(provider=provider, token=str(token))
+
+
+def test_register_wires_pre_tool_call_with_default_settings(tmp_path, with_session):
     ctx = FakeCtx(tmp_path / "data")
     register(ctx)
     assert set(ctx.hooks) == {"pre_tool_call", "pre_gateway_dispatch"}
     assert set(ctx.tools) == {"parked_action_execute"}
     tool = ctx.tools["parked_action_execute"]
     assert tool.toolset == "durable_park" and tool.schema == EXECUTE_SCHEMA and callable(tool.handler)
-    assert {"risky_tools", "aap_base_url", "token_file", "ledger_path"} <= set(ctx.asked)
+    assert {"exempt_tools", "form_checked_tools", "observer_hooks", "aap_base_url", "token_file",
+            "ledger_path"} <= set(ctx.asked)
     assert (tmp_path / "data" / "ledger.db").exists()  # default ledger_path under state.data_dir
-    # every non-exempt tool is asked (here: refused, there is no chat session); exempt tools pass
+    # every non-exempt tool is asked about: with no token and no network it is refused, never let through
+    result = ctx.hooks["pre_tool_call"](tool_name="web_search", args={"query": "x"}, session_id="s",
+                                        tool_call_id="c")
+    assert result is not None and result["action"] == "block"
+    assert result["message"] in (COULD_NOT_OPEN, UNREACHABLE.format(tool="web_search"))
+    for exempt in ("clarify", "parked_action_execute"):
+        assert ctx.hooks["pre_tool_call"](tool_name=exempt, args={}, session_id="s", tool_call_id="c2") is None
+
+
+def test_register_without_a_chat_session_refuses(tmp_path):
+    ctx = FakeCtx(tmp_path / "data")
+    register(ctx)
     result = ctx.hooks["pre_tool_call"](tool_name="mcp__wh__quickbooks__search_customers", args={},
                                         session_id="s", tool_call_id="c")
     assert result == {"action": "block", "message": NO_SESSION}
-    assert ctx.hooks["pre_tool_call"](tool_name="clarify", args={}, session_id="s", tool_call_id="c2") is None
 
 
-def test_register_honours_settings_and_fails_closed_without_token(tmp_path, monkeypatch):
+def test_register_honours_settings_and_fails_closed_without_token(tmp_path, with_session):
     ctx = FakeCtx(tmp_path, {
         "ledger_path": str(tmp_path / "custom.db"),
         "token_file": str(tmp_path / "no-such-token"),
-        "risky_tools": [r"mcp__wh__custom__do_it"],
+        "exempt_tools": ["parked_action_execute", "web_search"],
+        "form_checked_tools": [r"mcp__wh__custom__do_it"],
     })
-    monkeypatch.setattr("durable_park.park_hook.default_session_key", lambda: SESSION_KEY)
     register(ctx)
     assert (tmp_path / "custom.db").exists()
     hook = ctx.hooks["pre_tool_call"]
-    # it has a chat session; only the unreadable token file can stop it (every non-exempt tool is asked)
+    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c0") is None  # exempt now
+    # clarify is no longer exempt: it is asked about (and the unreadable token file refuses it)
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c1") == {
+        "action": "block", "message": COULD_NOT_OPEN}
     result = hook(tool_name="mcp__wh__custom__do_it", args={}, session_id="s", tool_call_id="c")
     assert result == {"action": "block", "message": COULD_NOT_OPEN}
-    (row,) = Ledger(str(tmp_path / "custom.db")).list_by_status("cancelled")
-    assert row.tool == "mcp__wh__custom__do_it"
+    rows = Ledger(str(tmp_path / "custom.db")).list_by_status("cancelled")
+    assert {row.tool for row in rows} == {"clarify", "mcp__wh__custom__do_it"}
+
+
+def test_register_form_checks_the_configured_tools(tmp_path, monkeypatch, with_session):
+    seen = []
+
+    class Spy(FormChecker):
+        def check(self, tool, args):
+            seen.append(tool)
+            return None
+
+    monkeypatch.setattr("durable_park.formcheck.FormChecker", Spy)
+    ctx = FakeCtx(tmp_path, {"form_checked_tools": [r"mcp__wh__custom__do_it"],
+                             "token_file": str(tmp_path / "no-such-token")})
+    register(ctx)
+    hook = ctx.hooks["pre_tool_call"]
+    hook(tool_name="mcp__wh__custom__do_it", args={}, session_id="s", tool_call_id="c1")
+    hook(tool_name="mcp__wh__quickbooks__create_payment", args={}, session_id="s", tool_call_id="c2")
+    assert seen == ["mcp__wh__custom__do_it"]
+
+
+def test_register_invalid_form_checked_pattern_keeps_the_defaults(tmp_path, monkeypatch, caplog):
+    captured = {}
+
+    def spy(ledger, gate_factory, form_checked, **kw):
+        captured["patterns"] = [p.pattern for p in form_checked]
+        return lambda **k: None
+
+    monkeypatch.setattr("durable_park.make_pre_tool_call", spy)
+    with caplog.at_level("ERROR", logger="durable_park"):
+        register(FakeCtx(tmp_path, {"form_checked_tools": ["(", r"mcp__wh__x__y"]}))
+    assert captured["patterns"] == [r"mcp__wh__x__y", *DEFAULT_FORM_CHECKED_TOOLS]
+    assert any("form_checked_tools" in r.getMessage() for r in caplog.records)
 
 
 def test_register_fails_closed_when_ledger_cannot_open(tmp_path):
     ctx = FakeCtx(tmp_path, {"ledger_path": str(tmp_path)})  # a directory, not a database file
     register(ctx)
     hook = ctx.hooks["pre_tool_call"]
-    result = hook(tool_name="mcp__wh__quickbooks__create_payment", args={}, session_id="s", tool_call_id="c")
-    assert result == {"action": "block", "message": COULD_NOT_OPEN}
-    assert hook(tool_name="mcp__wh__quickbooks__search_customers", args={}, session_id="s",
-                tool_call_id="c") == {"action": "block", "message": COULD_NOT_OPEN}
+    for tool in ("web_search", "mcp__wh__quickbooks__create_payment", "mcp__wh__quickbooks__search_customers"):
+        assert hook(tool_name=tool, args={}, session_id="s", tool_call_id="c") == {
+            "action": "block", "message": COULD_NOT_OPEN}
     assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") is None
+    assert "pre_gateway_dispatch" in ctx.hooks  # wakes are dropped, never reach the agent
     assert ctx.tools == {}  # without a ledger there is nothing to execute
+
+
+def test_register_fails_closed_with_the_configured_exempt_tools(tmp_path):
+    ctx = FakeCtx(tmp_path, {"ledger_path": str(tmp_path), "exempt_tools": ["web_search"]})
+    register(ctx)
+    hook = ctx.hooks["pre_tool_call"]
+    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") is None
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": COULD_NOT_OPEN}
+
+
+def test_foreign_hook_detected_through_manager(tmp_path, with_session, fake_withhuman):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token})
+    register(ctx)
+    ctx.register_hook("pre_tool_call", foreign_hook)  # another plugin, loaded after durable-park
+    hook = ctx.hook_lists["pre_tool_call"][0]
+    result = hook(tool_name="web_search", args={"q": 1}, session_id="s", tool_call_id="c")
+    assert result == {"action": "block", "message": FOREIGN.format(names=FOREIGN_NAME)}
+    assert len(fake_withhuman.provider.requests) == 0
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c2") is None
+
+
+def test_foreign_hook_listed_in_observer_hooks_is_allowed(tmp_path, with_session, fake_withhuman):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token, "observer_hooks": [FOREIGN_NAME]})
+    register(ctx)
+    ctx.register_hook("pre_tool_call", foreign_hook)
+    hook = ctx.hook_lists["pre_tool_call"][0]
+    result = hook(tool_name="web_search", args={"q": 1}, session_id="s", tool_call_id="c")
+    assert result["message"].startswith("PARKED P-")  # it went on to ask withHuman
+    assert len(fake_withhuman.provider.requests) == 1
+
+
+def test_foreign_hook_registered_later_is_caught_on_the_next_call(tmp_path, with_session, fake_withhuman):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token})
+    register(ctx)
+    hook = ctx.hooks["pre_tool_call"]
+    assert call(hook, "web_search", tool_call_id="c1")["message"].startswith("PARKED P-")
+    ctx.register_hook("pre_tool_call", foreign_hook)
+    assert call(hook, "web_search", session_id="s2", tool_call_id="c2") == {
+        "action": "block", "message": FOREIGN.format(names=FOREIGN_NAME)}
+
+
+@pytest.mark.parametrize("manager", ["missing", "no_method", "raises"])
+def test_missing_hook_registry_fails_closed(tmp_path, with_session, fake_withhuman, manager):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token}, manager=manager != "missing")
+    if manager == "no_method":
+        ctx._manager = SimpleNamespace()
+    elif manager == "raises":
+        def boom(name):
+            raise RuntimeError("registry broke")
+        ctx._manager = SimpleNamespace(iter_hook_callbacks=boom)
+    register(ctx)
+    result = ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c")
+    assert result == {"action": "block", "message": FOREIGN.format(names="<hook registry unavailable>")}
+    assert len(fake_withhuman.provider.requests) == 0
+
+
+def test_foreign_pre_tool_call_hooks_names_and_filters():
+    def mine(**kw):
+        return None
+
+    class Callable_:
+        def __call__(self, **kw):
+            return None
+
+    obj = Callable_()
+    ctx = SimpleNamespace(_manager=SimpleNamespace(
+        iter_hook_callbacks=lambda name: (mine, foreign_hook, obj) if name == "pre_tool_call" else ()))
+    obj_name = f"{type(obj).__module__}.{type(obj).__qualname__}"
+    assert foreign_pre_tool_call_hooks(ctx, {id(mine)}, set()) == [FOREIGN_NAME, obj_name]
+    assert foreign_pre_tool_call_hooks(ctx, {id(mine)}, {FOREIGN_NAME}) == [obj_name]
+    assert foreign_pre_tool_call_hooks(ctx, {id(mine), id(obj)}, {FOREIGN_NAME}) == []
+    assert foreign_pre_tool_call_hooks(SimpleNamespace(), set(), set()) == ["<hook registry unavailable>"]
+
+
+def test_hook_and_executor_share_one_gate(tmp_path, monkeypatch):
+    holders, gets, factories = [], [], {}
+    real_init = GateHolder.__init__
+
+    def init_spy(self, *a, **kw):
+        holders.append(self)
+        real_init(self, *a, **kw)
+
+    monkeypatch.setattr(GateHolder, "__init__", init_spy)
+    monkeypatch.setattr(GateHolder, "get", lambda self: gets.append(self) or object())
+
+    def hook_spy(ledger, gate_factory, form_checked, **kw):
+        factories["hook"] = gate_factory
+        factories["breaker"] = kw.get("breaker")
+        return lambda **k: None
+
+    def executor_spy(ledger, gate_factory, dispatch, **kw):
+        factories["executor"] = gate_factory
+        return lambda args, **k: "{}"
+
+    monkeypatch.setattr("durable_park.make_pre_tool_call", hook_spy)
+    monkeypatch.setattr("durable_park.make_executor", executor_spy)
+    register(FakeCtx(tmp_path / "data"))
+    factories["hook"]()
+    factories["executor"]()
+    assert len(holders) == 1 and gets == [holders[0], holders[0]]
+    assert isinstance(factories["breaker"], Breaker)
+    assert factories["breaker"]._path == str(tmp_path / "data" / "breaker_status.json")
+
+
+def test_risky_tools_setting_warns(tmp_path, monkeypatch, caplog):
+    captured = {}
+
+    def spy(ledger, gate_factory, form_checked, **kw):
+        captured["patterns"] = [p.pattern for p in form_checked]
+        return lambda **k: None
+
+    monkeypatch.setattr("durable_park.make_pre_tool_call", spy)
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(FakeCtx(tmp_path, {"risky_tools": [r"mcp__wh__old__x"]}))
+    assert "risky_tools is renamed form_checked_tools; ignoring it" in [r.getMessage() for r in caplog.records]
+    assert captured["patterns"] == list(DEFAULT_FORM_CHECKED_TOOLS)
+
+
+def test_no_risky_tools_setting_no_warning(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(FakeCtx(tmp_path))
+    assert not any("risky_tools" in r.getMessage() for r in caplog.records)
 
 
 REUSED = "durable-park: this tool call id was already used for a different call; the call was not run"
@@ -377,7 +581,6 @@ def test_register_passes_crash_flag_and_dispatch_to_executor(tmp_path, monkeypat
 
 # ---- form check before parking ---------------------------------------------------------------
 
-from durable_park.formcheck import FormChecker  # noqa: E402
 
 PAY_RULES = {"type": "object", "required": ["params"], "additionalProperties": False,
              "properties": {"params": {"type": "object", "required": ["customer_ref", "total_amt"],

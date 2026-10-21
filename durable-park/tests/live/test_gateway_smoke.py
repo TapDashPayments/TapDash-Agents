@@ -5,9 +5,11 @@ Manual only (Task 3 Step 3), after provisioning and ``sudo bash deploy/hermes_mc
     DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py
 
 Optional: ``DURABLE_PARK_QBO_COMPANY`` = a regex for the sandbox company name (default ``Sandbox Company``).
-Run as the ``hermes`` user. The one-shot chat turn makes one real ``get_company_info`` call through the
-gateway, so the approval pipeline must let that read-only call through (or someone approves it in time).
-Nothing here prints the instance token; the tests also assert it never shows up in Hermes's output.
+Run as the ``hermes`` user. A one-shot ``hermes chat -q`` turn has no chat session, so durable-park (which
+asks withHuman about every tool call) refuses the ``get_company_info`` call with its no-session message and
+nothing reaches the gateway. The turn test checks that refusal; reading the company name end to end needs a
+chat (Teams/Telegram) and the pipeline's allow rule. Nothing here prints the instance token; the tests also
+assert it never shows up in Hermes's output.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from durable_park.park_hook import NO_SESSION_MESSAGE
 
 pytestmark = pytest.mark.skipif(os.environ.get("DURABLE_PARK_LIVE") != "1",
                                 reason="live gateway smoke test: set DURABLE_PARK_LIVE=1 on the proto VM")
@@ -63,10 +67,12 @@ def test_hermes_lists_the_quickbooks_gateway_tool():
 
 
 def test_one_shot_cli_turn_returns_the_sandbox_company_name():
+    """Name kept for the runbook; a one-shot turn has no chat session, so the call is refused, never run."""
     prompt = (f"Call the tool {HERMES_TOOL} exactly once with no arguments, then reply with only the "
-              "company name it returned.")
+              "exact text the tool returned.")
     turn = _run("chat", "-Q", "-q", prompt, timeout=600)
     _assert_no_token(turn.stdout, turn.stderr)
     assert turn.returncode == 0, turn.stdout[-2000:] + turn.stderr[-2000:]
-    assert "PARKED" not in turn.stdout  # a read-only call must never be parked
-    assert re.search(COMPANY, turn.stdout), turn.stdout[-2000:]
+    assert "PARKED" not in turn.stdout  # nothing is parked without a chat session
+    assert NO_SESSION_MESSAGE in turn.stdout, turn.stdout[-2000:]  # the model relays the refusal verbatim
+    assert not re.search(COMPANY, turn.stdout), "the call ran without a chat session: " + turn.stdout[-2000:]
