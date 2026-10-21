@@ -422,7 +422,7 @@ replay store is not tied to the withHuman request id.
 | Process | Runs as | Code it runs | Listens on | Started by |
 |---|---|---|---|---|
 | Hermes gateway (agent + plugin, Telegram and Teams adapters) | `hermes` | `~/.hermes/plugins/durable-park` -> `/home/hermes/durable-park/plugin/durable_park` (the git clone) | `127.0.0.1:8644` (webhook route `durable-park-wake`), `127.0.0.1:3978` (Teams bot "TapDash Agent") | systemd user unit `hermes-gateway` |
-| Hermes web dashboard | `hermes` | the `hermes` install (`hermes dashboard`, basic-auth user `TapDash`) | `100.99.171.75:9119` (Tailscale only) | systemd user unit `hermes-dashboard` |
+| Hermes web dashboard | `hermes` | the `hermes` install (`hermes dashboard`, basic-auth user `TapDash`) | `100.99.171.75:9119` (Tailscale only), HTTPS via Tailscale Serve on `:8443` | systemd user unit `hermes-dashboard` |
 | Teams tunnel | `ubuntu` | Microsoft devtunnel `proto-agents-bot`, forwards to the gateway's `127.0.0.1:3978` | outbound only | systemd user unit `devtunnel-hermes` (user `ubuntu`) |
 | Claude connector "Proto-Agents" | `hermes` | `/home/hermes/hermes-shell-mcp` (shell access for Claude on this VM) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |

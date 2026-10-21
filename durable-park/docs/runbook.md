@@ -22,7 +22,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
 | Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where alerts go). |
 | Teams bot | "TapDash Agent", served by the same `hermes` gateway on `127.0.0.1:3978`; the devtunnel `proto-agents-bot` (user `ubuntu`, unit `devtunnel-hermes`) forwards to it. |
-| Web dashboard | <http://100.99.171.75:9119/> (Tailscale only, not public; must be opened by this IP, the `...ts.net` name is rejected with "Invalid Host header"), user `TapDash`; systemd user unit `hermes-dashboard` of user `hermes`. |
+| Web dashboard | <https://proto-agents.taila95862.ts.net:8443/> (HTTPS through Tailscale Serve; tailnet only, **not** Funnel), user `TapDash`; systemd user unit `hermes-dashboard` of user `hermes`. Fallback, plain HTTP by IP only: `http://100.99.171.75:9119/`. How it is wired and how to undo it: [Dashboard over HTTPS](#dashboard-over-https). |
 | Claude connector "Proto-Agents" | system service `hermes-shell-mcp` (`/home/hermes/hermes-shell-mcp`, `127.0.0.1:8792`, Tailscale Funnel path `/hermes-shell`, GitHub OAuth for one allowed account). Stopping it cuts Claude's access to the VM. |
 
 Rules:
@@ -54,6 +54,24 @@ Rules:
   and keeps running. The "no `parked`, `approved` or `executing` row" rule below still applies before any restart.
 - QuickBooks is a **sandbox** company. Never connect real books before the [rotation](#rotate-secrets-before-production)
   and the open v2 items are done.
+
+## Dashboard over HTTPS
+
+The dashboard itself speaks plain HTTP on the Tailscale IP only (`hermes dashboard --host 100.99.171.75 --port 9119`).
+Browsers upgrade bare addresses to `https` and then fail with `ERR_SSL_PROTOCOL_ERROR`, so **Tailscale Serve** puts HTTPS in
+front of it on the machine's Tailscale name, port 8443 (set up 2026-10-21):
+
+- `tailscale serve --bg --https=8443 http://100.99.171.75:9119` (tailnet only: port 8443 is **not** in `AllowFunnel`).
+  The Funnel on port 443 (`/aap/events`, `/wh/bridge`, `/hermes-shell`) is untouched.
+- The dashboard rejects any Host name it was not told about ("Invalid Host header"). A systemd drop-in
+  `~/.config/systemd/user/hermes-dashboard.service.d/public-url.conf` sets
+  `HERMES_DASHBOARD_PUBLIC_URL=https://proto-agents.taila95862.ts.net:8443`. It is on the dashboard unit only, not in
+  `config.yaml`, so the gateway is not affected.
+- Check: `curl -s -o /dev/null -w '%{http_code}\n' https://proto-agents.taila95862.ts.net:8443/login` prints `200`, and
+  `tailscale serve status --json` lists `AllowFunnel` for port 443 only.
+- Undo: `tailscale serve --https=8443 off`, delete the drop-in, then `systemctl --user daemon-reload && systemctl --user restart hermes-dashboard`.
+  The saved Serve config from before the change is in `/home/hermes/serve-backup/`.
+- Restarting `hermes-dashboard` does not touch the gateway, so the "no `parked`, `approved` or `executing` row" rule does not apply to it.
 
 ## Health check
 
