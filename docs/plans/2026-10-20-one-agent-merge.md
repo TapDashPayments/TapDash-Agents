@@ -18,7 +18,7 @@ The lockdown is defined by `durable-park/deploy/hermes_tool_policy.py::desired_s
 |---|---|---|
 | `platform_toolsets.<58 platforms>` | delete block | delete block (same) |
 | `known_plugin_toolsets.<40 platforms>` | not mentioned | delete block (stock has none; with it present, plugin toolsets such as `durable_park` are OFF on every platform once `platform_toolsets` is gone) |
-| `agent.disabled_toolsets` = 35 "forbidden" toolsets | remove 6 entries | replace with Hermes's stock default list (Task 2 step 2 extracts it) **minus `clarify`**, which the approved durable-park flow uses to ask the user questions |
+| `agent.disabled_toolsets` = 35 "forbidden" toolsets | remove 6 entries | set to [] — Hermes's stock default (hermes_cli/config_defaults.py:279); the 31-entry list on the ubuntu install is the "Blank Slate" setup preset, not stock |
 | `tools.tool_search.enabled: off` | not mentioned | **keep off.** durable-park's wake message tells the model to call `parked_action_execute` by name; with tool_search on, Hermes may hide plugin/MCP tools behind a search bridge. Untested; restricts nothing. |
 | `gateway.strict: true`, `gateway.trust_recent_files: false` | leave | leave (same) |
 
@@ -105,29 +105,28 @@ Commit message subject: `docs: amend merge spec §4.1 with the full lockdown; ad
 - Modify (VM): `/home/hermes/.hermes/config.yaml` — delete block at `^platform_toolsets:` (line 1168 → line before `^stt:`), delete block at `^known_plugin_toolsets:` (line 2311 → line before `^tools:`), replace the list under `agent.disabled_toolsets` (lines 1061–1095), add `  mode: off` under `^approvals:` (line 2616). Line numbers are from 2026-10-20; re-derive with grep, never hard-code.
 
 **Interfaces:**
-- Produces: a config that Hermes's loader accepts; `STOCK_DISABLED` = the stock default `agent.disabled_toolsets` list (step 2), reused by Task 6 #4.
+- Produces: a config that Hermes's loader accepts; `STOCK_DISABLED` = `[]`, the stock default `agent.disabled_toolsets` (step 2), reused by Task 6 #4.
 
 - [ ] **Step 1: Confirm block boundaries fresh**
 
 Run: `grep -n -E "^platform_toolsets:|^stt:|^known_plugin_toolsets:|^tools:|^approvals:|^  disabled_toolsets:" ~/.hermes/config.yaml`
 Expected: exactly six lines, in the order `disabled_toolsets`, `platform_toolsets`, `stt`, `known_plugin_toolsets`, `tools`, `approvals`. If `tools:` is not the first top-level key after `known_plugin_toolsets:`, find the real next top-level key (`awk 'NR>L && /^[a-z_]+:/{print NR": "$0; exit}'`) and use that.
 
-- [ ] **Step 2: Get the stock default disabled list**
+- [ ] **Step 2: Confirm the stock default disabled list**
 
-Run with the install's python: `cd ~/.hermes/hermes-agent && ~/.hermes/hermes-agent/.hermes/bin/python -c "from hermes_cli import config_defaults as d; import re,inspect; src=inspect.getsource(d); print(src[src.find('disabled_toolsets'):src.find('disabled_toolsets')+1200])"` and read the default list. Cross-check: it must equal the `ubuntu` install's list (`sudo -n awk '/^  disabled_toolsets:/{f=1;next} f&&/^    - /{print $2;next} f{exit}' /home/ubuntu/.hermes/config.yaml`), 31 entries, which includes `clarify` and `stt`. If the two differ, STOP and report both lists.
-Set `STOCK_DISABLED` = that list **without** `clarify` (30 entries).
+Run with the install's python: `cd ~/.hermes/hermes-agent && ~/.hermes/hermes-agent/.hermes/bin/python -c "from hermes_cli import config_defaults as d; import re,inspect; src=inspect.getsource(d); print(src[src.find('disabled_toolsets'):src.find('disabled_toolsets')+1200])"`. Expected: the stock default is `disabled_toolsets: []` at `hermes_cli/config_defaults.py:279`, so there is no list to extract. Do not cross-check against the `ubuntu` install: its 31-entry list (with `clarify` and `stt`) is the "Blank Slate" setup preset, not stock. Set `STOCK_DISABLED = []`.
 
 - [ ] **Step 3: Apply the edits with one python3 text script** (read file, operate on lines, write back; no YAML library):
   1. Delete lines from `^platform_toolsets:` up to (not including) the next line matching `^[a-z_]+:`.
   2. Delete lines from `^known_plugin_toolsets:` up to (not including) the next `^[a-z_]+:`.
-  3. Under `^  disabled_toolsets:` (inside `agent:`), replace the following `^    - ` lines with `STOCK_DISABLED`, one `    - <name>` per line, same order as stock.
+  3. Replace the `^  disabled_toolsets:` line and the `^    - ` lines that follow it with the single line `  disabled_toolsets: []` (`STOCK_DISABLED` is empty, so there are no items).
   4. After the line `^approvals:` insert `  mode: off` as the next line.
   Write to `~/.hermes/config.yaml.new`, then `mv` over the original (owner `hermes`, mode unchanged).
 
 - [ ] **Step 4: Verify the text**
 
-Run: `grep -n -c -E "^platform_toolsets:|^known_plugin_toolsets:" ~/.hermes/config.yaml; grep -n -A1 "^approvals:" ~/.hermes/config.yaml; awk '/^  disabled_toolsets:/{f=1;next} f&&/^    - /{n++;next} f{print n; exit}' ~/.hermes/config.yaml; grep -c -E "^    - (clarify|terminal|file|skills|vision|browser-cdp|browser-use)$" ~/.hermes/config.yaml`
-Expected: `0`; `approvals:` followed by `  mode: off`; `30`; `0`.
+Run: `grep -n -c -E "^platform_toolsets:|^known_plugin_toolsets:" ~/.hermes/config.yaml; grep -n -A1 "^approvals:" ~/.hermes/config.yaml; awk 'BEGIN{n=0} /^  disabled_toolsets:/{f=1;next} f&&/^    - /{n++;next} f{print n; exit}' ~/.hermes/config.yaml; grep -c -E "^    - (clarify|terminal|file|skills|vision|browser-cdp|browser-use)$" ~/.hermes/config.yaml`
+Expected: `0`; `approvals:` followed by `  mode: off`; `0`; `0`.
 
 - [ ] **Step 5: withHuman settings untouched**
 
@@ -137,7 +136,7 @@ Expected: `PLUGINS_SAME` and `MCP_SAME`.
 - [ ] **Step 6: Hermes's own loader accepts the file**
 
 Run: `cd ~/.hermes/hermes-agent && HERMES_HOME=/home/hermes/.hermes ~/.hermes/hermes-agent/.hermes/bin/python -c "from hermes_cli.config import load_config; c=load_config(); print('approvals', c.get('approvals',{}).get('mode')); print('platform_toolsets', c.get('platform_toolsets')); print('known', c.get('known_plugin_toolsets')); print('disabled', len(c['agent']['disabled_toolsets'])); print('tool_search', c.get('tools',{}).get('tool_search',{}).get('enabled'))"`
-Expected: `approvals off`, `platform_toolsets None` (or `{}`), `known None` (or `{}`), `disabled 30`, `tool_search off`.
+Expected: `approvals off`, `platform_toolsets None` (or `{}`), `known None` (or `{}`), `disabled 0`, `tool_search off`.
 
 - [ ] **Step 7: The old lockdown check now reports the tools are open** (inverse evidence)
 

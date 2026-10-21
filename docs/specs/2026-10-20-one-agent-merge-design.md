@@ -50,14 +50,15 @@ Rejected: (a) building on `ubuntu` and re-deploying durable-park there — re-do
 |---|---|---|
 | `platform_toolsets.<58 platforms>` | delete block | delete block (same) |
 | `known_plugin_toolsets.<40 platforms>` | not mentioned | delete block (stock has none; with it present, plugin toolsets such as `durable_park` are OFF on every platform once `platform_toolsets` is gone) |
-| `agent.disabled_toolsets` = 35 "forbidden" toolsets | remove 6 entries | replace with Hermes's stock default list (Task 2 step 2 extracts it) **minus `clarify`**, which the approved durable-park flow uses to ask the user questions |
+| `agent.disabled_toolsets` = 35 "forbidden" toolsets | remove 6 entries | set to [] — Hermes's stock default (hermes_cli/config_defaults.py:279); the 31-entry list on the ubuntu install is the "Blank Slate" setup preset, not stock |
 | `tools.tool_search.enabled: off` | not mentioned | **keep off.** durable-park's wake message tells the model to call `parked_action_execute` by name; with tool_search on, Hermes may hide plugin/MCP tools behind a search bridge. Untested; restricts nothing. |
 | `gateway.strict: true`, `gateway.trust_recent_files: false` | leave | leave (same) |
 
 Found while planning on 2026-10-20: the lockdown is `hermes_tool_policy.py::desired_settings()`, which writes five settings.
 
-1. Leave `strict: true`, `trust_recent_files: false`, `max_turns: 500` as they are (not part of the lockdown; unrelated to tool availability).
-2. Add a comment at the top of `/home/hermes/durable-park/deploy/configure_hermes.sh`: "Do not re-run on proto-agents: it re-applies the tool lockdown removed on 2026-10-20 by decision (see docs/specs/2026-10-20-one-agent-merge-design.md in the TapDash-Agents repo)". No code change.
+1. Under the existing `approvals:` block add `mode: off` (Hermes built-in approvals off; withHuman stays the only gate).
+2. Leave `strict: true`, `trust_recent_files: false`, `max_turns: 500` as they are (not part of the lockdown; unrelated to tool availability).
+3. Add a comment at the top of `/home/hermes/durable-park/deploy/configure_hermes.sh`: "Do not re-run on proto-agents: it re-applies the tool lockdown removed on 2026-10-20 by decision (see docs/specs/2026-10-20-one-agent-merge-design.md in the TapDash-Agents repo)". No code change.
 
 ### 4.2 withHuman side: no change
 
