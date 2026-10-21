@@ -141,7 +141,7 @@ flowchart LR
 | breaker | `plugin/durable_park/breaker.py` | Circuit breaker for withHuman outages: after 3 consecutive errors it stays open for 30 s (calls are refused without asking), then lets calls through again until an outcome is recorded; a failure re-opens, a success closes. It records open/close in `breaker_status.json` next to the ledger (written only on a change); it never calls withHuman itself. Started with a status file that still says open (a restart during an outage), it starts open but lets calls through at once, so the first success writes the close. |
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
 | bridge | `bridge/app.py` | Answers withHuman's pipeline: "is this exact gateway call an approved park?" |
-| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, and once each when withHuman becomes unreachable (breaker open) and answers again. Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
+| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, and once each when withHuman becomes unreachable (breaker open) and answers again. Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
 
 ### Plugin settings
 
@@ -157,7 +157,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
 | `audit_key_file` | `/etc/durable-park/audit_key` | Optional. A withHuman org API key with only `audit.read`; read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
 | `audit_base_url` | `https://app.withhuman.ai` | Where that audit lookup (`GET /api/v1/audit`) goes. A bad `audit_*` setting (not a string, empty, a path that cannot be resolved) only switches the name off with a warning in the log; unlike the other settings it never refuses tool calls. |
-| `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json` and `formcheck_status.json` are written next to it. |
+| `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json`, `formcheck_status.json` and `plugin_load.json` are written next to it. |
 | `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
 | `risky_tools` | (retired) | Renamed `form_checked_tools`. If still set, a warning `risky_tools is renamed form_checked_tools; ignoring it` is logged and its value is not used. |
 
@@ -184,6 +184,25 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
    its verdict, `tool_policy_load.json` next to the ledger (`ok`, `problem`, `checked_at`; atomic, never raises).
    Other processes log `tool policy: load verdict not written (not the gateway process)` once and write nothing.
 3. Otherwise the ledger opens and the normal hook, wake handler and executor register.
+4. As the last step of every path that ends with a `pre_tool_call` hook registered (normal, policy refusal, ledger
+   unavailable, and the `except` path of `register`), the gateway process writes the **load proof**
+   `plugin_load.json` next to the ledger: `pid`, `written_at`, `mode` (`asking`, `refusing-policy` or
+   `refusing-error`, naming the live hook) and the `hooks` registered (atomic, never raises; a failed write is only
+   logged). Hermes v0.22.2 has no lifecycle hook that fires after all plugins loaded
+   (`hermes_cli/plugins.py:109-166`, `VALID_HOOKS`, has no startup, ready or post-load event), so the proof is written
+   from `register`. A plugin that fails to import, or overruns `plugins.load_timeout_seconds` (default 10 s;
+   `hermes_cli/plugins_loader.py:40-60`, `:525-537`), is disposed with all its hooks and never writes it.
+5. systemd then runs the drop-in's `ExecStartPost=` (no `-`): `deploy/plugin_load_check.sh` polls once a second, up to
+   `DURABLE_PARK_LOAD_TIMEOUT` seconds (default 120), for a `plugin_load.json` whose `pid` is the unit's `$MAINPID`.
+   Found (any mode, `refusing-*` included: the plugin is live and refusing) it prints one line and exits 0. Not found
+   it prints `durable-park ALERT: the plugin did not load in this gateway ...` and exits 1, so systemd stops the
+   gateway and no tool call runs unchecked. The drop-in's `StartLimitIntervalSec=600` / `StartLimitBurst=3` stop the
+   restart loop after 3 starts in 10 minutes.
+
+Limits: a plugin whose `register` finishes just after the deadline can still write its proof although Hermes
+disposed it (the check then passes; the toolset lockdown is the cover, and the sweep cannot see it either); and
+the sweep runs as a Hermes cron inside the gateway, so a gateway the check stopped cannot alert (the bot going
+silent is the signal).
 
 The sweep reads the same report and alerts once on a failure and once on recovery. The report is written only at
 start, so a long-running gateway does not make it stale for the sweep (the plugin judges age at load). The sweep
@@ -191,6 +210,11 @@ also reads `tool_policy_load.json` and alerts once when the plugin's verdict is 
 report) and once when a later load passes. When the start-time report itself failed, the load alert is skipped (the
 failure already alerted once, and the plugin refused for that same reason), so one failure gives one ALERT and one
 recovery line.
+
+As a second line of defence the sweep compares `plugin_load.json` with the running gateway's MainPID
+(`systemctl --user show hermes-gateway -p MainPID --value`, 5 s timeout; any error or `0` means it does nothing).
+A missing, unreadable or other-pid proof prints one ALERT (state in `plugin_load_alert_state.json`) and one line
+when it is loaded again.
 
 The foreign-hook guard reads Hermes's hook registry (`ctx._manager.iter_hook_callbacks("pre_tool_call")`,
 Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) and its middleware registry
@@ -409,6 +433,7 @@ form-checked tool's rules work, and writes `formcheck_status.json`. The sweep al
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
 | Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
+| The plugin did not load at all (import error, missing dependency or `_vendor`, overran `plugins.load_timeout_seconds`, or disabled in `config.yaml`): Hermes drops every registration and runs with no `pre_tool_call` hook | `plugin_load_check.sh` (`ExecStartPost`) finds no `plugin_load.json` for the gateway's pid within the timeout and fails, so systemd stops the gateway; after 3 starts in 10 minutes it stays stopped. If the gateway is somehow running anyway, the sweep alerts once. | Fix the plugin ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)) |
 | Ledger cannot be opened at start | Every tool call except the exempt ones is blocked; wakes are dropped; no executor tool. | Fix the ledger file |
 | A plugin setting has the wrong type, or loading fails after the ledger opened | Every tool call except `parked_action_execute` and `clarify` is blocked; wakes are dropped. | Fix the setting ([runbook](runbook.md#plugin-settings)), restart the gateway |
 | Another park is still waiting in the chat | A new call that withHuman sends to a person is blocked: "already waiting", and its request is cancelled. Calls withHuman answers at once still run or are refused. A park can wait up to 168 h. | Decide the waiting one |
@@ -437,7 +462,8 @@ replay store is not tied to the withHuman request id.
   the code that says "approved" (today the user `hermes` has passwordless sudo, so these copies are not yet a boundary;
   that changes with Clean Setup Phase 1, [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1). Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
 - Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`, `bridge_deliveries.db`,
-  `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`.
+  `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
+  `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`.
 - Since 2026-10-21 03:16 UTC the v1 lockdown is applied (`deploy/hermes_tool_policy.py`: tools limited to
   `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`; 58 platform keys, `check` ok) and Hermes's own
   approvals are off (`approvals.mode: off`). `gateway.strict: true` and `gateway.trust_recent_files: false` are set;

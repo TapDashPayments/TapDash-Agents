@@ -55,6 +55,9 @@ you do. Example: `durable-park/plugin/durable_park/breaker.py` (the withHuman ci
 The gateway-start tool policy check (`durable-park/deploy/tool_policy_check.sh` and its systemd drop-in
 `durable-park/deploy/hermes-gateway-policy.conf`) is mapped to `runbook.md` in the "Deploy scripts and service units"
 rule: change either, update the runbook's "Tool policy check failed" and "Open a toolset" sections.
+The gateway-start load check (`durable-park/deploy/plugin_load_check.sh`, run by the same drop-in as `ExecStartPost`)
+is covered by the same rule (`deploy/*.sh`): change it, update the runbook's "Gateway will not start: the plugin did
+not load" section.
 The withHuman entry pipeline kept as a reviewed file (`durable-park/deploy/withhuman/entry-pipeline.json`) is mapped to
 `architecture.md`: change the file, change the pipeline table there in the same commit.
 

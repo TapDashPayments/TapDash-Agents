@@ -30,6 +30,8 @@
 #      before AND after the gateway restart; a failed pre-restart check aborts without restarting anything.
 #      A hermes-gateway drop-in (50-durable-park-policy.conf) re-runs the check at every gateway start
 #      (deploy/tool_policy_check.sh); the plugin refuses every tool call when its report is missing/failed/stale.
+#      The same drop-in runs deploy/plugin_load_check.sh as ExecStartPost (a failure stops the gateway when the
+#      plugin did not load: no plugin_load.json for the gateway's pid) and limits restarts (StartLimitBurst=3 in 10 min).
 #   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (every 5m, --no-agent, telegram)
 #   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events and /wh/bridge -> 127.0.0.1:8791/wh/bridge
 #   7. restart: the hermes user manager when the gateway does not carry the dpwake group yet, else the
@@ -246,7 +248,8 @@ log "agent tool policy ok before restart"
 
 # Re-check the policy at every gateway start: a user-unit drop-in runs deploy/tool_policy_check.sh as
 # ExecStartPre=- (never blocks the start; the plugin fails closed when the report it writes is missing, failed
-# or older than 15 minutes). The %h/durable-park path in the repo copy is rewritten to this checkout.
+# or older than 15 minutes) and as ExecStartPost (no "-": the gateway is stopped when the plugin did not load).
+# The %h/durable-park paths in the repo copy are rewritten to this checkout (the sed has no g flag: one per line).
 DROPIN_DIR="$HERMES_HOMEDIR/.config/systemd/user/hermes-gateway.service.d"
 DROPIN="$DROPIN_DIR/50-durable-park-policy.conf"
 dropin_tmp=$(mktemp)
