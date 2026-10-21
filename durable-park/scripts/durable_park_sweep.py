@@ -10,6 +10,8 @@
 * ``allowed``/``refused``/``cancelled`` rows older than ``--retention-days`` (default 30) are deleted, silently
 * the gateway's form-check report (``formcheck_status.json`` next to the ledger) missing, older than
   75 minutes or failing on two sweeps in a row        -> print one alert line (and one when it recovers)
+* the gateway has no load proof (``plugin_load.json`` missing, unreadable or for another pid than the running
+  gateway's MainPID)                                 -> print one alert line (and one when it recovers)
 * the park hook's circuit-breaker report (``breaker_status.json``: withHuman unreachable) opened or closed
                                                        -> print one alert line for each change
 
@@ -26,6 +28,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import tempfile
 import sys
 from datetime import datetime, timedelta, timezone
@@ -50,6 +53,10 @@ POLICY_STATUS = "tool_policy_status.json"
 POLICY_STATE = "tool_policy_alert_state.json"
 POLICY_LOAD = "tool_policy_load.json"  # the plugin's own verdict at load (it judges the report's age)
 POLICY_LOAD_STATE = "tool_policy_load_alert_state.json"
+PLUGIN_LOAD = "plugin_load.json"  # the load proof the plugin writes in the gateway (pid of that process)
+PLUGIN_LOAD_STATE = "plugin_load_alert_state.json"
+GATEWAY_UNIT = "hermes-gateway"
+SYSTEMCTL_TIMEOUT = 5  # seconds
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -316,6 +323,51 @@ def _policy_load_alert(directory: str, *, report_failed: bool) -> None:
     _save_state(state_path, {"alerted": alerted})
 
 
+def _gateway_mainpid() -> int | None:
+    """MainPID of the ``hermes-gateway`` user unit, or ``None`` when it cannot be learned (systemctl missing,
+    failing, timing out, printing junk, or ``0`` = no main process). ``None`` means the load-proof alert stays
+    silent: this must never make the sweep fail."""
+    env = None
+    if not os.environ.get("XDG_RUNTIME_DIR"):  # a cron job may lack it; systemctl --user needs it
+        env = {**os.environ, "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}
+    try:
+        done = subprocess.run(["systemctl", "--user", "show", GATEWAY_UNIT, "-p", "MainPID", "--value"],
+                              capture_output=True, text=True, timeout=SYSTEMCTL_TIMEOUT, check=False, env=env)
+        if done.returncode != 0:
+            return None
+        pid = int(done.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _load_proof_alert(ledger_path: str, now: datetime) -> None:
+    """Defence in depth for ``deploy/plugin_load_check.sh``: alert once when the running gateway has no load
+    proof for its own pid (the plugin did not load in it, so no ``pre_tool_call`` hook runs and every tool call
+    may be unchecked), and once when it has one again. ``now`` is unused: the proof carries its own pid.
+
+    Known limit: this sweep is a Hermes cron job that runs INSIDE the gateway, so a stopped gateway (for
+    example one the start check stopped) cannot alert; the bot going silent is the signal. Unknown MainPID
+    (``_gateway_mainpid`` is ``None``): do nothing, change no state."""
+    pid = _gateway_mainpid()
+    if pid is None:
+        return
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    proof = _load_state(os.path.join(directory, PLUGIN_LOAD))  # missing or unreadable -> {}
+    loaded = isinstance(proof.get("pid"), int) and not isinstance(proof.get("pid"), bool) and proof["pid"] == pid
+    state_path = os.path.join(directory, PLUGIN_LOAD_STATE)
+    alerted = _load_state(state_path).get("alerted") is True
+    if not loaded and not alerted:
+        print(f"durable-park ALERT: the running gateway (pid {pid}) has no durable-park load proof; every tool "
+              "call may be running unchecked. Restart the gateway with no active rows and check the journal.",
+              flush=True)
+        alerted = True
+    elif loaded and alerted:
+        print("durable-park: the durable-park plugin is loaded in the running gateway.", flush=True)
+        alerted = False
+    _save_state(state_path, {"alerted": alerted})
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -345,6 +397,10 @@ def main(argv=None) -> int:
         _policy_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the policy alert must never stop the sweep
         _err(f"tool policy alert failed ({type(exc).__name__})")
+    try:
+        _load_proof_alert(args.ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - the load-proof alert must never stop the sweep
+        _err(f"load proof alert failed ({type(exc).__name__})")
     status = 0
     targets = _wake_targets(ledger)
     if targets:

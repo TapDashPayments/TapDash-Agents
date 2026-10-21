@@ -13,6 +13,7 @@ from durable_park.ledger import Ledger
 SESSION_KEY = "agent:main:telegram:dm:42"
 TOOL = "mcp__wh__quickbooks__create_payment"
 SCRIPT = Path(sweep.__file__).resolve()
+REAL_MAINPID = sweep._gateway_mainpid if hasattr(sweep, "_gateway_mainpid") else None
 DEFAULT_URL = "http://127.0.0.1:8644/webhooks/durable-park-wake"
 
 
@@ -89,6 +90,13 @@ class World:
 @pytest.fixture
 def world(tmp_path):
     return World(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _no_gateway_pid(monkeypatch):
+    """No real systemctl in tests: by default the gateway's MainPID is unknown, so the load-proof alert stays
+    silent (the tests of that alert set a pid)."""
+    monkeypatch.setattr(sweep, "_gateway_mainpid", lambda: None)
 
 
 def test_orphan_parked_row_is_cancelled_after_ten_minutes(world, monkeypatch, capsys):
@@ -530,3 +538,112 @@ def test_load_verdict_unreadable_is_silent_and_keeps_the_sweep_going(world, monk
     world.row("approved")
     assert world.main(monkeypatch) == 0
     assert capsys.readouterr().out == "" and len(world.posted) == 1
+
+
+LOADPROOF_ALERT = ("durable-park ALERT: the running gateway (pid {pid}) has no durable-park load proof; every tool "
+                   "call may be running unchecked. Restart the gateway with no active rows and check the journal.")
+LOADPROOF_OK = "durable-park: the durable-park plugin is loaded in the running gateway."
+
+
+def write_proof(tmp_path, pid, mode="asking"):
+    (tmp_path / "plugin_load.json").write_text(json.dumps(
+        {"pid": pid, "written_at": "2026-10-21T10:00:00Z", "mode": mode, "hooks": ["pre_tool_call"]}))
+
+
+def test_load_proof_missing_alerts_once_then_recovers(world, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(sweep, "_gateway_mainpid", lambda: 4242)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == LOADPROOF_ALERT.format(pid=4242) and second == ""
+    write_proof(tmp_path, 4242)
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.strip() == LOADPROOF_OK and fourth == ""
+
+
+def test_load_proof_matching_pid_is_silent(world, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(sweep, "_gateway_mainpid", lambda: 4242)
+    write_proof(tmp_path, 4242)
+    assert runs(world, monkeypatch, capsys, 3) == ["", "", ""]
+    write_proof(tmp_path, 4242, mode="refusing-policy")  # live and refusing, as designed
+    assert runs(world, monkeypatch, capsys, 1) == [""]
+
+
+@pytest.mark.parametrize("proof", ["other-pid", "unreadable", "not-a-mapping", "pid-not-int"])
+def test_load_proof_that_does_not_match_the_running_gateway_alerts(world, monkeypatch, capsys, tmp_path, proof):
+    monkeypatch.setattr(sweep, "_gateway_mainpid", lambda: 4242)
+    path = tmp_path / "plugin_load.json"
+    if proof == "other-pid":
+        write_proof(tmp_path, 1)
+    elif proof == "unreadable":
+        path.write_text("{not json")
+    elif proof == "not-a-mapping":
+        path.write_text("[4242]")
+    else:
+        path.write_text(json.dumps({"pid": "4242", "mode": "asking"}))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.strip() == LOADPROOF_ALERT.format(pid=4242)
+
+
+def test_load_proof_alert_is_silent_when_the_gateway_pid_is_unknown(world, monkeypatch, capsys, tmp_path):
+    # _gateway_mainpid() is None (systemctl failed, timed out, or MainPID 0): never alert, never fail
+    assert runs(world, monkeypatch, capsys, 2) == ["", ""]
+    assert not (tmp_path / "plugin_load_alert_state.json").exists()
+
+
+@pytest.mark.parametrize("outcome,expected", [
+    (subprocess.CompletedProcess([], 0, stdout="4242\n"), 4242),
+    (subprocess.CompletedProcess([], 0, stdout="0\n"), None),
+    (subprocess.CompletedProcess([], 0, stdout=""), None),
+    (subprocess.CompletedProcess([], 0, stdout="junk"), None),
+    (subprocess.CompletedProcess([], 1, stdout="4242"), None),
+    (FileNotFoundError("systemctl"), None),
+    (subprocess.TimeoutExpired("systemctl", 5), None),
+    (OSError("boom"), None),
+])
+def test_gateway_mainpid_reads_systemctl_and_fails_to_none(monkeypatch, outcome, expected):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"], seen["kw"] = cmd, kw
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert REAL_MAINPID() == expected
+    assert seen["cmd"] == ["systemctl", "--user", "show", "hermes-gateway", "-p", "MainPID", "--value"]
+    assert seen["kw"]["timeout"] == 5
+
+
+def test_a_failing_load_proof_alert_does_not_stop_the_sweep(world, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(sweep, "_gateway_mainpid", lambda: 4242)
+    (tmp_path / "plugin_load_alert_state.json").mkdir()  # the state file cannot be written
+    world.row("approved")
+    assert world.main(monkeypatch) == 0
+    assert len(world.posted) == 1
+
+
+def _run_mainpid(monkeypatch, env):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(cmd, 0, stdout="4242\n")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    for key in ("XDG_RUNTIME_DIR",):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert REAL_MAINPID() == 4242
+    return seen
+
+
+def test_gateway_mainpid_sets_xdg_runtime_dir_when_unset(monkeypatch):
+    import os
+    seen = _run_mainpid(monkeypatch, {})
+    assert seen["env"]["XDG_RUNTIME_DIR"] == f"/run/user/{os.getuid()}"
+
+
+def test_gateway_mainpid_keeps_an_existing_xdg_runtime_dir(monkeypatch):
+    seen = _run_mainpid(monkeypatch, {"XDG_RUNTIME_DIR": "/run/user/77"})
+    assert seen.get("env") is None  # inherit as is

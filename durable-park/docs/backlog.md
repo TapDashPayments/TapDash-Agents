@@ -25,7 +25,6 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 - Dashboard pages: pending withHuman approvals, full withHuman view, live trace of tool calls (spec section 8 item 12).
 - The archived `ubuntu` Hermes install still holds Teams secrets (spec section 8 item 16).
 - Rev 8 rollback hazard: rev 8 auto-approves `hermes`/`mcp:` calls, so never activate it while the ask-every-call code runs ([runbook](runbook.md#rollback)).
-- Load check before toolsets open: a plugin import failure removes that plugin's own registrations, so its park hook is gone and calls pass without it (Hermes v0.22.2 `hermes_cli/plugins_loader.py`, `_load_plugin_scoped`).
 - Name the human decider in the refusal note (withHuman management API lookup; in progress).
 - The second agent (content) and one Hermes profile per person.
 - Minor review findings listed in [acceptance-2026-10-20.md](acceptance-2026-10-20.md#minor-selected).
@@ -38,6 +37,8 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 - 2026-10-21: bridge copies the whole plugin package, `_vendor` included, and gates on a live bridge (PR #10).
 - 2026-10-21: the refusal note says whether a policy rule or a person decided (PR #11).
 - 2026-10-21: one policy alert when the tool policy report fails (PR #13).
+- 2026-10-21: load check: the gateway is stopped (`ExecStartPost`, `deploy/plugin_load_check.sh`) when the plugin left no
+  load proof (`plugin_load.json`) for its pid; the sweep alerts as a backup; the drop-in limits restarts to 3 in 10 minutes.
 - 2026-10-21: check the agent's tool policy at every gateway start (Important #6), built as spec §8 item 7 part 2: the `hermes-gateway` drop-in runs
   `deploy/tool_policy_check.sh` before each start; the plugin refuses every call when the report is missing, failed
   or older than 15 minutes, and the sweep alerts on failure and on recovery. It checks the v1 lockdown that is

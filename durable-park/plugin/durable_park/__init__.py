@@ -32,6 +32,7 @@ EXECUTOR_TOOL = EXECUTE_SCHEMA["name"]
 HOOK_REGISTRY_UNAVAILABLE = "<hook registry unavailable>"
 POLICY_STATUS_FILENAME = "tool_policy_status.json"
 POLICY_LOAD_FILENAME = "tool_policy_load.json"
+PLUGIN_LOAD_FILENAME = "plugin_load.json"  # the load proof: deploy/plugin_load_check.sh and the sweep read it
 POLICY_MAX_AGE = timedelta(minutes=15)
 # Hermes loads plugins in every process (gateway, cron sweep, CLI): each has its own start time.
 PROCESS_START = datetime.now(timezone.utc)
@@ -88,31 +89,86 @@ def policy_problem(path: str, now: datetime, max_age: timedelta = POLICY_MAX_AGE
     return None
 
 
-def write_policy_load(path: str, problem: str | None) -> None:
-    """Record this load's own verdict on the tool policy report (``ok``, ``problem``, ``checked_at``) for the
-    sweep, atomically. The sweep cannot judge a report's age itself, so a stale report would otherwise be
-    invisible to it. Called only from the gateway process. Never raises."""
+def _atomic_write_json(path: str, payload: dict, prefix: str) -> None:
+    """Write ``payload`` as JSON to ``path`` atomically (temp file in the same directory, fsync, rename), mode
+    0644. Raises on any failure (the temp file is removed first); the callers log and carry on."""
     tmp = None
     try:
         directory = os.path.dirname(os.path.abspath(path))
         os.makedirs(directory, exist_ok=True)
-        verdict = {"ok": problem is None, "problem": problem,
-                   "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".policy-load-", suffix=".tmp")
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=prefix, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(verdict, handle)
+            json.dump(payload, handle)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
-    except Exception as exc:  # noqa: BLE001 - a failed verdict write must never change what the plugin does
-        log.warning("durable-park could not write %s (%s)", POLICY_LOAD_FILENAME, type(exc).__name__)
+    except BaseException:
         if tmp:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
+        raise
+
+
+def write_policy_load(path: str, problem: str | None) -> None:
+    """Record this load's own verdict on the tool policy report (``ok``, ``problem``, ``checked_at``) for the
+    sweep, atomically. The sweep cannot judge a report's age itself, so a stale report would otherwise be
+    invisible to it. Called only from the gateway process. Never raises."""
+    try:
+        verdict = {"ok": problem is None, "problem": problem,
+                   "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        _atomic_write_json(path, verdict, ".policy-load-")
+    except Exception as exc:  # noqa: BLE001 - a failed verdict write must never change what the plugin does
+        log.warning("durable-park could not write %s (%s)", POLICY_LOAD_FILENAME, type(exc).__name__)
+
+
+def write_plugin_load(path: str, mode: str, hooks: list[str]) -> None:
+    """Write the load proof: this process (``pid``), when, which ``pre_tool_call`` hook is live (``mode``:
+    ``asking``, ``refusing-policy`` or ``refusing-error``) and the hook names registered. Called only from the
+    gateway process, as the LAST step of every path that ends with a ``pre_tool_call`` hook registered.
+    Hermes v0.22.2 has no hook that fires once every plugin has loaded (hermes_cli/plugins.py ``VALID_HOOKS``),
+    so this is the closest point: a plugin that fails to import, or overruns ``plugins.load_timeout_seconds``,
+    never gets here. ``deploy/plugin_load_check.sh`` (``ExecStartPost``) stops the gateway when no proof for its
+    pid appears; the sweep alerts on the same. Never raises: a failed write is logged and the check then fails
+    closed, which is the right outcome."""
+    try:
+        proof = {"pid": os.getpid(), "written_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "mode": mode, "hooks": list(hooks)}
+        _atomic_write_json(path, proof, ".plugin-load-")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("durable-park could not write %s (%s)", PLUGIN_LOAD_FILENAME, type(exc).__name__)
+
+
+def _own_hook_live(ctx: Any, own: set[int]) -> bool:
+    """True only when this load was not abandoned and one of our own ``pre_tool_call`` callbacks is in Hermes's
+    registry. Hermes v0.22.2 ``run_with_load_deadline`` (hermes_cli/plugins_loader.py:142-148) abandons a worker
+    that overran ``plugins.load_timeout_seconds`` and calls ``ctx._abandon_load()`` (plugins.py:241), after which
+    every ``ctx.register_*`` is a silent no-op (plugins.py:1100-1121) while ``register`` keeps running to its end.
+    ``PluginManager.iter_hook_callbacks`` (hermes_cli/plugins_dispatch.py:523) is the registry read. Any doubt
+    (unreadable registry, no manager) answers False: no proof, and the start check then fails closed."""
+    try:
+        if getattr(ctx, "_load_abandoned", False):
+            return False
+        return any(id(cb) in own for cb in ctx._manager.iter_hook_callbacks("pre_tool_call"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _proof_directory(ctx: Any) -> str | None:
+    """Where the load proof goes (next to the ledger) when ``register`` is already on its failure path: the
+    ``ledger_path`` setting's directory, else the plugin data dir, else ``None`` (no proof; the check fails)."""
+    try:
+        return str(Path(ctx.get_config("ledger_path", str(Path(ctx.state.data_dir) / "ledger.db")))
+                   .expanduser().parent)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return str(Path(ctx.state.data_dir).expanduser())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _names(key: str, value: Any) -> list[str]:
@@ -211,13 +267,16 @@ def register(ctx) -> None:
     every call except ``DEFAULT_EXEMPT_TOOLS`` and drops wakes."""
     compat.check_hermes_version(log)  # warns (never refuses) on a Hermes other than v0.22.2
     own: set[int] = set()  # ids of the hook callbacks this register passed to ctx.register_hook
+    registered: list[str] = []  # hook names passed to ctx.register_hook, in order, for the load proof
 
     def register_hook(name: str, callback: Any) -> None:
         own.add(id(callback))
         ctx.register_hook(name, callback)
+        if name not in registered:
+            registered.append(name)
 
     try:
-        _register(ctx, own, register_hook)
+        _register(ctx, own, register_hook, registered)
     except Exception as exc:  # noqa: BLE001 - fail closed, never leave Hermes without a blocking hook
         if isinstance(exc, BadSetting):
             log.error("durable-park %s; refusing every tool call", exc)
@@ -225,9 +284,29 @@ def register(ctx) -> None:
             log.error("durable-park failed to load (%s); refusing every tool call", type(exc).__name__)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS))
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
+        directory = _proof_directory(ctx) if is_gateway_process() else None
+        if directory is not None:  # LAST: the refusing hook is registered
+            _write_load_proof(ctx, own, os.path.join(directory, PLUGIN_LOAD_FILENAME), "refusing-error", registered)
 
 
-def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
+def _proof_path(ledger_path: str) -> str:
+    return str(Path(ledger_path).expanduser().parent / PLUGIN_LOAD_FILENAME)
+
+
+def _write_load_proof(ctx: Any, own: set[int], proof_path: str, mode: str, registered: list[str]) -> None:
+    """The load proof, in the gateway process only (the cron sweep and CLI runs must not write it: the check
+    wants the gateway's pid), and only when our own ``pre_tool_call`` hook is really live (``_own_hook_live``):
+    otherwise a warning and no proof."""
+    if not is_gateway_process():
+        return
+    if not _own_hook_live(ctx, own):
+        log.warning("durable-park: its pre_tool_call hook is not registered in Hermes (load abandoned or "
+                    "registry unreadable); not writing %s", PLUGIN_LOAD_FILENAME)
+        return
+    write_plugin_load(proof_path, mode, registered)
+
+
+def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]) -> None:
     if ctx.get_config("risky_tools", None) is not None:
         log.warning(RISKY_TOOLS_RENAMED)
     # Every list setting is validated before anything is registered (BadSetting -> refuse everything).
@@ -258,6 +337,7 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
         ctx.register_tool(
             name=EXECUTOR_TOOL, toolset="durable_park", schema=EXECUTE_SCHEMA,
             handler=make_refusing_executor(POLICY_MESSAGE), description=EXECUTE_SCHEMA["description"])
+        _write_load_proof(ctx, own, _proof_path(ledger_path), "refusing-policy", registered)  # LAST
         return
     try:
         Path(ledger_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -266,6 +346,7 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
         log.error("durable-park ledger unavailable (%s); refusing every tool call", type(exc).__name__)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS))
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
+        _write_load_proof(ctx, own, _proof_path(ledger_path), "refusing-error", registered)  # LAST
         return
 
     base_url = ctx.get_config("aap_base_url", DEFAULT_AAP_BASE_URL)
@@ -319,4 +400,5 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
         description=EXECUTE_SCHEMA["description"])
     log.info("durable-park loaded: ledger=%s, %d exempt tool(s), %d form-checked pattern(s), %d observer "
              "hook(s), aap=%s", ledger_path, len(exempt), len(form_checked), len(observers), base_url)
+    _write_load_proof(ctx, own, _proof_path(ledger_path), "asking", registered)  # LAST: the asking hook is registered
 

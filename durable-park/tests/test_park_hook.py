@@ -1,4 +1,5 @@
 import hashlib
+import os
 import re
 import sys
 from types import SimpleNamespace
@@ -1376,3 +1377,139 @@ def test_a_non_gateway_process_does_not_overwrite_the_gateways_verdict(tmp_path,
     (data / "tool_policy_load.json").write_text('{"ok": true, "problem": null, "checked_at": "2026-10-21T07:00:00Z"}')
     register(FakeCtx(data))
     assert _load_verdict(data)["ok"] is True
+
+
+# --- plugin load proof (plugin_load.json): written last on every path that ends with a pre_tool_call hook ----
+
+def _proof(directory):
+    return json.loads((directory / "plugin_load.json").read_text())
+
+
+def _assert_proof(directory, mode, ctx):
+    proof = _proof(directory)
+    assert set(proof) == {"pid", "written_at", "mode", "hooks"}
+    assert proof["pid"] == os.getpid()
+    assert proof["mode"] == mode
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", proof["written_at"])
+    assert proof["hooks"] == list(ctx.hook_lists) and "pre_tool_call" in proof["hooks"]
+    assert [p.name for p in directory.iterdir() if p.name.startswith(".plugin-load-")] == []  # no temp file left
+
+
+def test_register_writes_the_load_proof_when_asking(tmp_path, with_session, fake_withhuman):
+    data = tmp_path / "data"
+    ctx = FakeCtx(data, {"token_file": fake_withhuman.token})
+    register(ctx)
+    _assert_proof(data, "asking", ctx)
+    assert set(_proof(data)["hooks"]) == {"pre_gateway_dispatch", "pre_tool_call"}
+
+
+def test_register_writes_the_load_proof_when_the_policy_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(durable_park, "policy_problem", lambda path, now, max_age=None: "stale")
+    data = tmp_path / "data"
+    ctx = FakeCtx(data)
+    register(ctx)
+    _assert_proof(data, "refusing-policy", ctx)
+
+
+def test_register_writes_the_load_proof_when_the_ledger_is_unavailable(tmp_path):
+    data = tmp_path / "data"
+    (data / "ledger.db").mkdir(parents=True)  # a directory, not a database file
+    ctx = FakeCtx(tmp_path, {"ledger_path": str(data / "ledger.db")})
+    register(ctx)
+    assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c")["action"] == "block"
+    _assert_proof(data, "refusing-error", ctx)
+
+
+def test_register_writes_the_load_proof_on_the_except_path(tmp_path):
+    data = tmp_path / "data"
+    ctx = FakeCtx(data, {"exempt_tools": 5})  # BadSetting -> the refusing hook
+    register(ctx)
+    _assert_proof(data, "refusing-error", ctx)
+
+
+def test_register_writes_the_load_proof_when_a_setting_lookup_raises(tmp_path):
+    data = tmp_path / "data"
+    ctx = FakeCtx(data)
+    real_get = ctx.get_config
+    calls = []
+
+    def flaky(key, default=None):
+        calls.append(key)
+        if key == "risky_tools":  # the very first lookup inside _register
+            raise RuntimeError("boom")
+        return real_get(key, default)
+
+    ctx.get_config = flaky
+    register(ctx)
+    _assert_proof(data, "refusing-error", ctx)
+
+
+def test_the_load_proof_is_written_after_the_hook_is_registered(tmp_path, monkeypatch, with_session, fake_withhuman):
+    seen = []
+    real = durable_park.write_plugin_load
+    monkeypatch.setattr(durable_park, "write_plugin_load",
+                        lambda path, mode, hooks: seen.append((mode, list(hooks))) or real(path, mode, hooks))
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token})
+    register(ctx)
+    assert len(seen) == 1 and "pre_tool_call" in seen[0][1] and "pre_tool_call" in ctx.hooks
+
+
+@pytest.mark.parametrize("gateway", [True, False])
+def test_only_the_gateway_writes_the_load_proof(tmp_path, monkeypatch, gateway):
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: gateway)
+    data = tmp_path / "data"
+    register(FakeCtx(data))
+    assert (data / "plugin_load.json").exists() is gateway
+
+
+def test_a_failed_load_proof_write_is_logged_not_raised(tmp_path, caplog):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "plugin_load.json").mkdir()  # cannot be replaced by a file
+    ctx = FakeCtx(data)
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(ctx)  # must not raise
+    assert "pre_tool_call" in ctx.hooks
+    assert any("could not write plugin_load.json" in r.getMessage() for r in caplog.records)
+
+
+class NoopHookCtx(FakeCtx):
+    """What Hermes gives an abandoned load: register_hook silently does nothing."""
+
+    def register_hook(self, name, callback):
+        pass
+
+
+@pytest.mark.parametrize("config", [{}, {"exempt_tools": 5}], ids=["asking", "except-path"])
+def test_no_load_proof_when_the_load_was_abandoned(tmp_path, config, with_session, fake_withhuman, caplog):
+    # Hermes run_with_load_deadline (hermes_cli/plugins_loader.py:142-148) set ctx._load_abandoned after the
+    # deadline; register() still ran to its end, but its registrations were ignored.
+    data = tmp_path / "data"
+    ctx = FakeCtx(data, {"token_file": fake_withhuman.token, **config})
+    ctx._load_abandoned = True
+    with caplog.at_level("WARNING", logger="durable_park"):
+        register(ctx)
+    assert not (data / "plugin_load.json").exists()
+    assert any("not writing plugin_load.json" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("config", [{}, {"exempt_tools": 5}], ids=["asking", "except-path"])
+def test_no_load_proof_when_our_hook_never_reached_the_registry(tmp_path, config, with_session, fake_withhuman):
+    data = tmp_path / "data"
+    ctx = NoopHookCtx(data, {"token_file": fake_withhuman.token, **config})
+    register(ctx)
+    assert not (data / "plugin_load.json").exists()
+
+
+def test_no_load_proof_when_the_hook_registry_is_unreadable(tmp_path, with_session, fake_withhuman):
+    data = tmp_path / "data"
+    register(FakeCtx(data, {"token_file": fake_withhuman.token}, manager=False))
+    assert not (data / "plugin_load.json").exists()  # fail closed: nothing proves the hook is live
+
+
+def test_no_load_proof_when_only_a_foreign_hook_is_registered(tmp_path, with_session, fake_withhuman):
+    data = tmp_path / "data"
+    ctx = NoopHookCtx(data, {"token_file": fake_withhuman.token})
+    ctx.hook_lists["pre_tool_call"] = [foreign_hook]  # someone else's hook is there, ours is not
+    register(ctx)
+    assert not (data / "plugin_load.json").exists()

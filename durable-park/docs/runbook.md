@@ -84,6 +84,7 @@ systemctl is-active durable-park-receiver durable-park-bridge      # active acti
 sudo docker ps --filter name=wh-tunnel --format '{{.Status}}'      # Up ...
 curl -s http://127.0.0.1:8644/health                               # {"status": "ok", ...}
 cat ~/.hermes/plugin-data/durable-park/formcheck_status.json       # "ok": true, recent checked_at
+cat ~/.hermes/plugin-data/durable-park/plugin_load.json            # "pid" = systemctl --user show hermes-gateway -p MainPID --value
 hermes cron list | grep -A3 durable-park-sweep                     # last run ok
 ~/.hermes/scripts/durable_park_sweep.sh                            # prints nothing when all is well
 ```
@@ -224,12 +225,61 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 | `stale` | The report was written more than 15 minutes **before the gateway process started** (the gateway started without the drop-in, so no fresh report). The gateway's uptime no longer matters, and a plugin reload inside the running gateway stays fine. A process started more than 15 minutes after the last gateway start (for example a manual `hermes` run) is refused, which is correct: the start check did not run for it (it fails closed but does not write the verdict) | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). Visible through the `tool_policy_load.json` alert above |
 
 Before go-live, time the check once on the VM (`time bash deploy/tool_policy_check.sh` as `hermes`): it must
-finish well under 60 s, because `ExecStartPre` counts toward `TimeoutStartSec`.
+finish well under 60 s (the check's own timeout; systemd also has a start timeout, `TimeoutStartSec`, to stay inside).
 
 Fix it, then `systemctl --user restart hermes-gateway` (only when nothing is waiting or running): the check runs
-again at the start. If the report directory is not writable the script cannot replace an old report: it logs
+again at the start. (The same drop-in also stops the gateway when the plugin did not load: see
+[Gateway will not start](#gateway-will-not-start-the-plugin-did-not-load).) If the report directory is not writable the script cannot replace an old report: it logs
 `durable-park: tool policy report could not be refreshed (directory not writable?)` (journal) and the plugin's
 15-minute staleness check refuses calls in any process started after the old report aged out. `systemctl --user show hermes-gateway -p ExecStartPre` shows the drop-in is active.
+
+### No load proof for the running gateway
+
+`durable-park ALERT: the running gateway (pid N) has no durable-park load proof; every tool call may be running unchecked. Restart the gateway with no active rows and check the journal.`
+
+The sweep found no `plugin_load.json` for the running gateway's MainPID: the durable-park plugin did not load in
+it, so Hermes runs with no `pre_tool_call` hook (only the toolset lockdown is left). Normally `ExecStartPost`
+stops such a gateway at start (next procedure), so this means the unit runs without the drop-in, or the proof file
+was removed. Follow [Gateway will not start: the plugin did not load](#gateway-will-not-start-the-plugin-did-not-load),
+then restart the gateway (only when no row is `parked`, `approved` or `executing`). A second line
+`durable-park: the durable-park plugin is loaded in the running gateway.` follows when it recovers.
+
+Known limit: the sweep is a Hermes cron job that runs inside the gateway, so a stopped gateway cannot alert. The
+bot going silent (Telegram, Teams) is the signal; look at `systemctl --user status hermes-gateway`.
+
+### Gateway will not start: the plugin did not load
+
+Deploy order for this check: update the clone, install the drop-in and `systemctl --user daemon-reload`
+(`configure_hermes.sh` does both), then restart the gateway promptly with no `parked`, `approved` or `executing`
+row. Between the clone update and the restart the running gateway has no `plugin_load.json` yet, so expect one
+transient sweep ALERT ("no durable-park load proof"); it recovers after the restart. Each start deletes the
+previous proof first (`ExecStartPre`), so a proof from an earlier process can never match a reused pid.
+
+Symptom: `systemctl --user status hermes-gateway` shows `failed` or `start-limit-hit`, and the journal has
+`durable-park ALERT: the plugin did not load in this gateway (pid N); stopping the gateway so no tool call runs unchecked`.
+The drop-in's `ExecStartPost=` (`deploy/plugin_load_check.sh`, no `-`) fails the unit when no `plugin_load.json` for
+the gateway's pid appears within `DURABLE_PARK_LOAD_TIMEOUT` seconds (default 30; Hermes's own load deadline is 10 s and
+the live gateway loads the plugin in about 2 s, well inside systemd's default 90 s start timeout).
+
+1. Find the reason in the journal: `journalctl --user -u hermes-gateway -n 200 --no-pager | grep -i -E "durable|plugin"`.
+   Look for `Failed to load plugin 'durable-park': ...` (an import error, a missing dependency or `_vendor`, or a
+   load timeout: `plugins.load_timeout_seconds`, default 10 s), or no durable-park line at all (the plugin is
+   disabled or missing: `hermes config get plugins.enabled` must list `durable-park`; re-run
+   `deploy/configure_hermes.sh`).
+2. Fix it (restore the file, fix the syntax, re-run `configure_hermes.sh`, raise `plugins.load_timeout_seconds`).
+3. Confirm the plugin loads: after the start, `cat ~/.hermes/plugin-data/durable-park/plugin_load.json` shows
+   `"pid"` equal to `systemctl --user show hermes-gateway -p MainPID --value`, and the journal says
+   `durable-park plugin loaded (mode=asking, pid=N)`. A mode of `refusing-policy` or `refusing-error` means the
+   plugin is live but refusing every call: see [Tool policy check failed](#tool-policy-check-failed) or the log line
+   `durable-park failed to load (...)`.
+4. Start it: `systemctl --user reset-failed hermes-gateway && systemctl --user start hermes-gateway`.
+
+Start limit: the drop-in sets `StartLimitIntervalSec=600` and `StartLimitBurst=3` (the unit alone has no limit and
+`Restart=always`, so a gateway whose plugin cannot load would loop for ever). That applies to every cause: **3
+ordinary crashes in 10 minutes also stop the gateway**, and so do manual restarts and Hermes graceful restarts (exit
+75): three starts of any kind in 10 minutes end in `start-limit-hit`. It stays down until `reset-failed` and `start`
+as above.
+The bot going silent is then the signal (the sweep runs inside the gateway and cannot alert).
 
 ### withHuman could not be reached
 
