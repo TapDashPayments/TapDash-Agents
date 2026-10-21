@@ -378,6 +378,20 @@ systemctl --user restart hermes-gateway
 
 Then run the [health check](#health-check); a CLI command no longer prints the warning.
 
+### The sweep runs every 6 minutes, not 5
+
+`hermes cron list | grep -A3 durable-park-sweep` shows `Schedule: every 5m`. Hermes re-arms an interval job from
+the previous run's time and its ticker runs every 60 s, so such a job runs about every 6 minutes. A cron
+expression is anchored to the wall clock (`cron/jobs.py` `compute_next_run`), so `deploy/configure_hermes.sh`
+creates the job as `*/5 * * * *` and, when it finds the job on another schedule, moves it over with
+`hermes cron edit` (a job already on `*/5 * * * *` is left alone). To change a live job without re-running the
+script, as `hermes` (it only changes when the next run is due and does not touch the ledger, so rows may be waiting):
+
+```sh
+hermes cron edit "$(hermes cron list --all | awk '/^ +[0-9a-f]+ +\[/ {id=$1} $1=="Name:" && $2=="durable-park-sweep" {print id}')" --schedule '*/5 * * * *'
+hermes cron list --all | grep -A3 durable-park-sweep   # Schedule: */5 * * * *, Next run on a multiple of 5 minutes
+```
+
 ## Plugin settings
 
 Settings live under `plugins.entries.durable-park.settings` in `~/.hermes/config.yaml` (user `hermes`). Edit the

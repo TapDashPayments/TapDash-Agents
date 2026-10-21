@@ -19,8 +19,8 @@ left behind and turns `executing` rows older than 10 min into `unknown` with one
 **Retries.** The SDK receiver answers withHuman `204` as soon as the signature checks out and only then,
 in the background, reads the request and posts the wake (agentapprovalprotocol 0.3.3 `receiver.py:158-166`).
 withHuman therefore counts the notification as delivered even if the wake later fails (Hermes down, wake
-refused, withHuman read failed) and never retries it. Recovery is the sweep: on its next run (every 5 minutes,
-about 6 in practice) it re-posts a wake for every `parked` row and every decided row the chat was not told
+refused, withHuman read failed) and never retries it. Recovery is the sweep: on its next run (every 5 minutes on
+the wall clock) it re-posts a wake for every `parked` row and every decided row the chat was not told
 about, so a lost wake costs at most one sweep interval. withHuman's own retries (up to 7 days) only cover the receiver being unreachable or
 answering non-2xx (e.g. 401 before provisioning).
 
@@ -92,7 +92,7 @@ curl -s http://127.0.0.1:8644/health                               # {"status": 
 grep "durable-park loaded" ~/.hermes/logs/agent.log | tail -1        # plugin loaded, ledger path
 sudo tailscale funnel status                                       # /aap/events proxy http://127.0.0.1:8790/aap/events
 systemctl status durable-park-receiver                             # active (running)
-hermes cron list                                                   # durable-park-sweep, every 5m, telegram
+hermes cron list                                                   # durable-park-sweep, */5 * * * *, telegram
 ~/.hermes/scripts/durable_park_sweep.sh                            # prints nothing when all is well
 ```
 

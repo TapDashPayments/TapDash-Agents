@@ -461,7 +461,7 @@ replay store is not tied to the withHuman request id.
 | Claude connector "Proto-Agents" | `hermes` | `/home/hermes/hermes-shell-mcp` (shell access for Claude on this VM) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
 | bridge | `hermes` | `/opt/durable-park/bridge/` + `/opt/durable-park/plugin/durable_park/ledger.py` (root-owned copy) | `127.0.0.1:8791` `/wh/bridge` | system unit `durable-park-bridge` |
-| sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, every 5 min, no agent |
+| sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
 | tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` | outbound only | Docker, container `wh-tunnel` |
 | Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
 
@@ -507,7 +507,7 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 |---|---|---|
 | 168 h | An approval request waits this long for a decision | `gatecall.py` |
 | 16 KiB / 1 KiB | Arguments over 16 KiB of canonical JSON are sent with every string cut to 1 KiB (`args_truncated`); the ledger keeps the exact arguments | `gatecall.py` |
-| 5 min | Sweep interval (fires about 1 min late, so about 6 min in practice) | Hermes cron |
+| 5 min | Sweep interval: cron expression `*/5 * * * *`, anchored to the wall clock; each run starts up to 1 min after the boundary (Hermes's ticker runs every 60 s). The earlier `every 5m` interval was re-armed from the previous run's time and ran every ~6 min | Hermes cron |
 | 30 days | `allowed`, `refused` and `cancelled` rows older than this are deleted | `durable_park_sweep.py --retention-days` |
 | 10 min | An `executing` row older than this becomes `unknown` | `durable_park_sweep.py` |
 | 30 min | Form self-check interval | `formcheck.py` |

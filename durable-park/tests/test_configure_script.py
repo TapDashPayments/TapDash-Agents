@@ -48,7 +48,7 @@ def test_never_creates_the_bridge_secret_and_never_echoes_secret_files():
     "platforms.webhook.extra.rate_limit 120", "ROUTE=durable-park-wake", "routes.$ROUTE.deliver\" log",
     "FUNNEL_PATH=/aap/events", "RECEIVER_LOCAL=http://127.0.0.1:8790/aap/events",
     "tailscale funnel --bg --set-path=\"$FUNNEL_PATH\" \"$RECEIVER_LOCAL\"",
-    "agentapprovalprotocol==0.3.3", "cron create \"every 5m\" --no-agent", "--deliver telegram", "--retention-days 30",
+    "agentapprovalprotocol==0.3.3", "cron create \"$CRON_SCHEDULE\" --no-agent", "CRON_SCHEDULE='*/5 * * * *'", "--deliver telegram", "--retention-days 30",
     "hermes_cli plugins enable", "systemctl enable --quiet \"$UNIT\"",
     "BRIDGE_FUNNEL_PATH=/wh/bridge", "BRIDGE_LOCAL=http://127.0.0.1:8791/wh/bridge",
     "tailscale funnel --bg --set-path=\"$BRIDGE_FUNNEL_PATH\" \"$BRIDGE_LOCAL\"",
@@ -90,6 +90,62 @@ def test_no_env_prefixed_durable_park_refs_anywhere():
                  [*(root / "deploy").glob("*.sh"), *(root / "docs").glob("*.md"), root / "README.md"]
                  if "${env:DURABLE_PARK" in path.read_text()]
     assert offenders == []
+
+
+LIST_OUTPUT = """
+\u250c\u2500\u2500\u2510
+\u2502 Scheduled Jobs (profile: default) \u2502
+\u2514\u2500\u2500\u2518
+
+  0aaaaaaaaaaa [active]
+    Name:      some-other-job
+    Schedule:  every 5m
+    Repeat:    \u221e
+
+  5982945c6071 [active]
+    Name:      durable-park-sweep
+    Schedule:  {schedule}
+    Repeat:    \u221e
+    Next run:  2026-10-21T19:31:39.697852+00:00
+    Deliver:   telegram
+"""
+
+
+def _job_awk():
+    match = re.search(r"^CRON_JOB_AWK='(.*?)'$", SCRIPT.read_text(), re.S | re.M)
+    assert match, "CRON_JOB_AWK is not defined"
+    return match.group(1)
+
+
+def _parse_job(schedule, name="durable-park-sweep"):
+    out = subprocess.run(["awk", "-v", f"name={name}", _job_awk()], input=LIST_OUTPUT.format(schedule=schedule),
+                         capture_output=True, text=True, check=True).stdout
+    return out.rstrip("\n")
+
+
+def test_sweep_runs_on_the_wall_clock_every_five_minutes():
+    """An `every 5m` interval is re-armed from the previous run's time, so the 60 s cron ticker phase made it
+    run every ~6 minutes; a cron expression is anchored to the wall clock (cron/jobs.py compute_next_run)."""
+    text = SCRIPT.read_text()
+    assert "CRON_SCHEDULE='*/5 * * * *'" in text
+    assert "every 5m" not in "\n".join(_code_lines())
+
+
+def test_cron_job_lookup_reads_id_and_schedule_of_the_named_job_only():
+    assert _parse_job("every 5m") == "5982945c6071\tevery 5m"
+    assert _parse_job("*/5 * * * *") == "5982945c6071\t*/5 * * * *"
+    assert _parse_job("every 5m", name="no-such-job") == ""
+
+
+def test_existing_job_schedule_is_edited_only_when_it_differs():
+    """Re-running configure must not re-arm a job that is already on the wanted schedule (an edit resets the next
+    run) and must move an old `every 5m` job over."""
+    text = SCRIPT.read_text()
+    assert 'cron edit "$job_id" --schedule "$CRON_SCHEDULE"' in text
+    edit = text.index('cron edit "$job_id"')
+    guard = text.rindex('!= "$CRON_SCHEDULE"', 0, edit)
+    assert 0 < edit - guard < 200  # the edit sits directly under the comparison
+    assert text.index("cron create") < text.index("--- 6. Funnel")
 
 
 MCP_SCRIPT = SCRIPT.parent / "hermes_mcp.sh"
