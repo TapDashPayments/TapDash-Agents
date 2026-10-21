@@ -114,6 +114,10 @@ PY
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
    | `deploy/` (units, policy, Hermes config) | On proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
+   | `deploy/withhuman/entry-pipeline.json` | in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (with today's code it changes nothing: park requests still reach a human, gateway rows match rev 8) |
+
+   Rollback: revert the code first (git checkout the previous `main`, restart the gateway with 0 active rows); never
+   re-activate rev 8 while this code runs - rev 8 auto-approves every `hermes`/`mcp:` request.
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
    `formcheck_status.json` within about a minute.
