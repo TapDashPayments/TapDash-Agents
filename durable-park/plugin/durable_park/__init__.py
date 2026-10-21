@@ -276,11 +276,15 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
     # Optional: names who decided. The key file is read per lookup; none = no name, nothing else changes.
     audit_key_file = ctx.get_config("audit_key_file", DEFAULT_AUDIT_KEY_FILE)
     audit_base_url = ctx.get_config("audit_base_url", DEFAULT_AUDIT_BASE_URL)
-    if isinstance(audit_key_file, str) and audit_key_file and isinstance(audit_base_url, str) and audit_base_url:
+    audit_client_factory = None  # a bad audit_* setting only switches the name off (unlike the other settings)
+    try:
+        if not (isinstance(audit_key_file, str) and audit_key_file
+                and isinstance(audit_base_url, str) and audit_base_url):
+            raise BadSetting("audit_key_file and audit_base_url must be non-empty strings")
         audit_client_factory = make_audit_client_factory(audit_base_url, str(Path(audit_key_file).expanduser()))
-    else:
-        log.warning("durable-park: audit_key_file and audit_base_url must be non-empty strings; deciders not named")
-        audit_client_factory = None
+    except (BadSetting, RuntimeError, OSError) as exc:
+        log.warning("durable-park: %s; deciders will not be named", exc if isinstance(exc, BadSetting)
+                    else f"audit_key_file unusable ({type(exc).__name__})")
 
     async def durable_park_wake(event=None, **_kw):
         # Hermes awaits async hooks on the gateway loop and passes event=, gateway=, session_store=.

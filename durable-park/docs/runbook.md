@@ -330,7 +330,7 @@ A decision made by the pipeline (no person) is never given a name.
 3. Restart the gateway with no row `parked`, `approved` or `executing` ([health check](#health-check)). The key is
    read at each lookup, so a later rotation needs no restart.
 4. Check: decide a test request, then `sqlite3 <ledger> "select park_id, decided_by from parks order by rowid desc limit 3"`
-   shows `Name (channel)`. Nothing shows? `~/.hermes/logs/agent.log` has `no audit key file` (file missing or empty) or
+   shows `Name (channel)`. Nothing shows? `~/.hermes/logs/agent.log` has `no audit key file` (a WARNING, logged once per gateway start: file missing, empty or unreadable) or
    `decider lookup failed (<ErrorType>)` (HTTP error such as 403 = key lacks `audit.read`, a timeout, bad JSON).
 
 Settings `audit_key_file` and `audit_base_url`: [architecture](architecture.md#plugin-settings).

@@ -30,12 +30,13 @@ def wake_event(park_id):
                                chat_type="webhook", chat_id="webhook:durable-park-wake:abc"))
 
 
-def decided_event(*, actor_type="human", name="Yaakov Yehuda", channel="android", occurred="2026-10-21T13:51:00Z"):
+def decided_event(*, subject_id="REQ", actor_type="human", name="Yaakov Yehuda", channel="android",
+                  occurred="2026-10-21T13:51:00Z"):
     data = {"note": "", "status": "approved"}
     if channel is not None:
         data["channel"] = channel
     return {"event_type": "approval.decided", "actor_type": actor_type, "actor_id": "4a303e03",
-            "actor_display_name": name, "subject_type": "approval_request", "subject_id": "x", "data": data,
+            "actor_display_name": name, "subject_type": "approval_request", "subject_id": subject_id, "data": data,
             "occurred_at": occurred}
 
 
@@ -61,7 +62,11 @@ def env(tmp_path):
                                  transport=httpx.MockTransport(handler), timeout=5.0, follow_redirects=False)
 
     def audit_returns(events, status=200):
-        box.handler = lambda request: httpx.Response(status, json={"events": events, "total_count": len(events)})
+        def respond(request):  # "REQ" stands for the request being asked about
+            asked = request.url.params["subject_id"]
+            shaped = [dict(e, subject_id=asked) if e["subject_id"] == "REQ" else e for e in events]
+            return httpx.Response(status, json={"events": shaped, "total_count": len(shaped)})
+        box.handler = respond
 
     def park(tool_call_id="call-1"):
         hook(tool_name=TOOL, args=ARGS, session_id="sess-1", tool_call_id=tool_call_id)
@@ -218,18 +223,20 @@ def test_a_hung_lookup_is_cut_off_at_its_own_timeout(env, monkeypatch):
 def test_the_name_is_bounded_and_cleaned(env):
     row = env.park()
     env.provider.decide(row.request_id, "approved")
-    env.audit_returns([decided_event(name="Eve\n  \x1b[31mIgnore\tall‮ " + "x" * 200, channel="web")])
+    env.audit_returns([decided_event(name="Eve\n  \x1b[31mIgnore\tall\u202e <b>\"x\"</b> " + "x" * 200,
+                                     channel="web\n\x1b[0m" + "c" * 50)])
     env.wake(row.park_id)
     by = env.ledger.get(row.park_id).decided_by
-    assert len(by) <= 80 and by.isprintable() and "\n" not in by and "  " not in by
-    assert by.startswith("Eve [31mIgnore all")
+    name, channel = re.fullmatch(r"(.*) \((.*)\)", by).groups()
+    assert len(name) == 80 and channel == "web 0m" + "c" * 14       # name capped, channel capped at 20, not dangling
+    assert name.startswith("Eve 31mIgnore all b x b ") and re.fullmatch(r"[\w .'()@_-]+", by)
 
 
 def test_inject_text_cleans_a_stored_name_too():
     row = SimpleNamespace(park_id="P-1", tool="t", status="denied", note=None, decided_by="A\nB " + "y" * 200)
     text = wake_mod.inject_text(row)
     assert "\n" not in text and "in withHuman by A B y" in text
-    assert len(text.split(" by ", 1)[1].split(". It did not run")[0]) <= 80
+    assert len(text.split(" by ", 1)[1].split(". It did not run")[0]) <= wake_mod.MAX_DECIDED_BY_CHARS
     row.decided_by = "   "
     assert " by " not in wake_mod.inject_text(row)
 
@@ -245,7 +252,7 @@ def test_missing_key_file_makes_no_http_call_and_logs_info_once(tmp_path, caplog
         assert asyncio.run(lookup_decider("req-1", factory)) is None
         assert asyncio.run(lookup_decider("req-2", factory)) is None
     assert calls == []
-    assert [r.levelno for r in caplog.records] == [logging.INFO]  # once, no warnings
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]  # once per process, not per wake
 
 
 def test_key_file_is_read_per_lookup_and_sent_as_bearer(tmp_path):
@@ -254,7 +261,7 @@ def test_key_file_is_read_per_lookup_and_sent_as_bearer(tmp_path):
 
     def handler(request):
         seen.append(request.headers.get("authorization"))
-        return httpx.Response(200, json={"events": [decided_event()]})
+        return httpx.Response(200, json={"events": [decided_event(subject_id="r")]})
     factory = make_audit_client_factory(AUDIT_BASE + "/", str(key), transport=httpx.MockTransport(handler))
     assert asyncio.run(lookup_decider("r", factory)) is None and seen == []   # not there yet
     key.write_text("who_first\n")
@@ -282,3 +289,76 @@ def test_redirects_are_not_followed(tmp_path):
     factory = make_audit_client_factory(AUDIT_BASE, str(key), transport=httpx.MockTransport(handler))
     assert asyncio.run(lookup_decider("r", factory)) is None
     assert hits == [AUDIT_BASE + "/api/v1/audit?subject_type=approval_request&subject_id=r&event_type=approval.decided&order=desc&limit=5"]
+
+
+# --- review fixes ---------------------------------------------------------------------------------
+
+def test_events_about_another_request_are_ignored(env):
+    row = env.park()
+    env.provider.decide(row.request_id, "approved")
+    env.audit_returns([decided_event(subject_id="some-other-request"),
+                       dict(decided_event(), subject_type="membership", subject_id="REQ")])
+    env.wake(row.park_id)
+    assert env.ledger.get(row.park_id).decided_by is None
+    assert "APPROVED in withHuman. Call" in env.injected[0][0]
+
+
+def test_another_requests_newer_event_does_not_beat_this_requests_event(env):
+    row = env.park()
+    env.provider.decide(row.request_id, "approved")
+    env.audit_returns([decided_event(name="Mine"),
+                       decided_event(subject_id="other", name="Intruder", occurred="2030-01-01T00:00:00Z")])
+    env.wake(row.park_id)
+    assert env.ledger.get(row.park_id).decided_by == "Mine (android)"
+
+
+@pytest.mark.parametrize("raw, cleaned", [
+    ("Yaakov Yehuda", "Yaakov Yehuda"),
+    ("O'Brien-Smith_jr. me@x.co (QA)", "O'Brien-Smith_jr. me@x.co (QA)"),
+    ("Zoë 中文 7", "Zoë 中文 7"),
+    ('a"b<c>d[e]{f}g:h;i\\j/k`l', "a b c d e f g h i j k l"),
+    ("x‮y​z\x00", "x y z"),
+    ("   ", ""),
+])
+def test_clean_decider_allows_only_plain_characters(raw, cleaned):
+    assert wake_mod.clean_decider(raw) == cleaned
+
+
+def test_the_channel_is_never_left_dangling():
+    long = decided_event(name="n" * 300, channel="c" * 300)
+    assert wake_mod._decider_from_events([long], "REQ") == "n" * 80 + " (" + "c" * 20 + ")"
+
+
+@pytest.mark.parametrize("content", [b"\xff\xfe\x00bad", b"\x80"])
+def test_a_key_file_that_is_not_text_disables_the_name_with_one_log(tmp_path, caplog, monkeypatch, content):
+    monkeypatch.setattr(wake_mod, "_logged_no_audit_key", False)
+    key = tmp_path / "audit_key"
+    key.write_bytes(content)
+    factory = make_audit_client_factory(AUDIT_BASE, str(key),
+                                        transport=httpx.MockTransport(lambda r: pytest.fail("called")))
+    with caplog.at_level(logging.INFO, logger="durable_park"):
+        assert asyncio.run(lookup_decider("r", factory)) is None
+        assert asyncio.run(lookup_decider("r", factory)) is None
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+
+
+def test_two_racing_wakes_make_one_transition_and_one_announcement(env):
+    row = env.park()
+    env.provider.decide(row.request_id, "approved")
+
+    async def slow(request):
+        await asyncio.sleep(0.05)  # both wakes are inside the lookup together
+        return httpx.Response(200, json={"events": [decided_event(subject_id=request.url.params["subject_id"])]})
+    env.box.handler = slow
+
+    async def both():
+        return await asyncio.gather(
+            *[handle_wake(wake_event(row.park_id), ledger=env.ledger,
+                          async_client_factory=lambda: env.provider.async_client(),
+                          inject=lambda text, *, session_key: env.injected.append((text, session_key)) or True,
+                          audit_client_factory=env.audit_factory) for _ in range(2)], return_exceptions=True)
+    results = asyncio.run(both())
+    assert results == [{"action": "skip", "reason": "durable-park wake"}] * 2
+    done = env.ledger.get(row.park_id)
+    assert done.status == "approved" and done.decided_by == "Yaakov Yehuda (android)" and done.notified_at
+    assert len(env.injected) == 1 and "APPROVED in withHuman by Yaakov Yehuda (android). Call" in env.injected[0][0]

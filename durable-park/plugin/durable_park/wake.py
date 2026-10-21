@@ -31,7 +31,10 @@ WAKE_TIMEOUT_SECONDS = 30.0
 MAX_NOTE_CHARS = 300
 # The decider lookup (withHuman audit log) is optional garnish: bounded on its own, fails soft.
 DECIDER_TIMEOUT_SECONDS = 5.0
-MAX_DECIDER_CHARS = 80
+MAX_DECIDER_CHARS = 80  # the name
+MAX_CHANNEL_CHARS = 20
+MAX_DECIDED_BY_CHARS = MAX_DECIDER_CHARS + MAX_CHANNEL_CHARS + 3  # "<name> (<channel>)"
+_DECIDER_EXTRA_CHARS = frozenset(" .'-_@()")
 AUDIT_PATH = "/api/v1/audit"
 _logged_no_audit_key = False
 
@@ -64,15 +67,16 @@ def one_line(note: str | None) -> str:
 
 
 
-def clean_decider(name: str | None) -> str:
-    """A decider's name as one printable line of at most ``MAX_DECIDER_CHARS`` ("" when nothing is left)."""
-    printable = "".join(ch if ch.isprintable() else " " for ch in (name or ""))
-    return " ".join(printable.split())[:MAX_DECIDER_CHARS].strip()
+def clean_decider(text: str | None, limit: int = MAX_DECIDER_CHARS) -> str:
+    """One line of letters, digits, spaces and ``.'-_@()`` (anything else becomes a space), whitespace
+    collapsed, at most ``limit`` characters; "" when nothing is left. It goes into the agent's chat."""
+    allowed = "".join(ch if ch.isalnum() or ch in _DECIDER_EXTRA_CHARS else " " for ch in (text or ""))
+    return " ".join(allowed.split())[:limit].strip()
 
 
 def inject_text(row: ParkRow) -> str | None:
     """The message for a decided row, or None when the chat is not told about this status."""
-    decider = clean_decider(row.decided_by)
+    decider = clean_decider(row.decided_by, MAX_DECIDED_BY_CHARS)
     by = f" by {decider}" if decider else ""
     if row.status == "approved":
         return APPROVED_TEXT.format(park_id=row.park_id, tool=row.tool, by=by)
@@ -111,12 +115,12 @@ def make_audit_client_factory(base_url: str, key_file: str,
         global _logged_no_audit_key
         try:
             key = Path(key_file).read_text().strip()
-        except OSError:
+        except (OSError, ValueError):  # unreadable, or not text (UnicodeDecodeError)
             key = ""
         if not key:
             if not _logged_no_audit_key:
                 _logged_no_audit_key = True
-                log.info("durable-park: no audit key file; decisions are announced without the decider's name")
+                log.warning("durable-park: no audit key file; decisions are announced without the decider's name")
             raise AuditDisabled
         return httpx.AsyncClient(base_url=base_url.rstrip("/"), headers={"Authorization": f"Bearer {key}"},
                                  timeout=DECIDER_TIMEOUT_SECONDS, follow_redirects=False, transport=transport)
@@ -124,23 +128,26 @@ def make_audit_client_factory(base_url: str, key_file: str,
     return factory
 
 
-def _decider_from_events(events: Any) -> str | None:
-    """``"<name> (<channel>)"`` / ``"<name>"`` from the newest ``approval.decided`` event when a human made it."""
+def _decider_from_events(events: Any, request_id: str) -> str | None:
+    """``"<name> (<channel>)"`` / ``"<name>"`` from the newest ``approval.decided`` event of THIS request when a
+    human made it (events about any other subject are ignored, whatever the server sent)."""
     if not isinstance(events, list):
         return None
-    decided = [e for e in events if isinstance(e, dict) and e.get("event_type") == "approval.decided"]
+    decided = [e for e in events if isinstance(e, dict) and e.get("event_type") == "approval.decided"
+               and e.get("subject_type") == "approval_request" and e.get("subject_id") == request_id]
     if not decided:
         return None
     newest = max(decided, key=lambda e: str(e.get("occurred_at") or ""))
     if newest.get("actor_type") != "human":
         return None
-    name = clean_decider(newest.get("actor_display_name") if isinstance(newest.get("actor_display_name"), str) else "")
+    raw_name = newest.get("actor_display_name")
+    name = clean_decider(raw_name if isinstance(raw_name, str) else "")
     if not name:
         return None
     data = newest.get("data")
     channel = data.get("channel") if isinstance(data, dict) else None
-    channel = clean_decider(channel) if isinstance(channel, str) else ""
-    return clean_decider(f"{name} ({channel})" if channel else name) or None
+    channel = clean_decider(channel, MAX_CHANNEL_CHARS) if isinstance(channel, str) else ""
+    return f"{name} ({channel})" if channel else name
 
 
 async def lookup_decider(request_id: str, audit_client_factory: Callable[[], Any] | None) -> str | None:
@@ -166,7 +173,7 @@ async def lookup_decider(request_id: str, audit_client_factory: Callable[[], Any
             if not isinstance(body, dict) or not isinstance(body.get("events"), list):
                 raise ValueError("unexpected audit response shape")
             return body["events"]
-        return _decider_from_events(await asyncio.wait_for(fetch(), DECIDER_TIMEOUT_SECONDS))
+        return _decider_from_events(await asyncio.wait_for(fetch(), DECIDER_TIMEOUT_SECONDS), request_id)
     except Exception as exc:  # noqa: BLE001 - the name is optional; the decision must never depend on it
         log.warning("durable-park wake: decider lookup failed (%s); the decider is not named", type(exc).__name__)
         return None
