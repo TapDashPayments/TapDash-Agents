@@ -25,9 +25,15 @@ the root README's [Built on](../../README.md#built-on) table.
 3. **A crash never causes a silent retry.** If the outcome is unclear the row becomes `unknown` and a person checks.
 
 How strong is the first guarantee today? The plugin, the bridge and the ledger all trust the user `hermes`, which
-is also the user the agent runs as. What stops the agent from writing a fake "approved" row is that it has **no
-file or terminal tools at all** (the tool lockdown, `deploy/hermes_tool_policy.py`). That is a configuration guard,
-not a permission boundary; making it one is on the [backlog](backlog.md).
+is also the user the agent runs as. Until 2026-10-20 what stopped the agent from writing a fake "approved" row was
+that it had **no file or terminal tools at all** (the v1 tool lockdown, `deploy/hermes_tool_policy.py`). That was a
+configuration guard, not a permission boundary, and **it is lifted on proto-agents**: on 2026-10-20 Yaakov decided the
+one agent gets the full Hermes toolset, and since about 02:20 UTC on 2026-10-21 it runs that way (Hermes's built-in
+approvals are off too; see the [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md)). durable-park (withHuman) is now the **only** approval
+gate, and it covers the 12 QuickBooks money-move tool types, not terminal or file actions. An agent with a terminal
+can in principle write the ledger, so the first guarantee now holds for an agent that follows the park flow, not
+against one that is hijacked. That is accepted while QuickBooks is a sandbox company; a separate ledger owner (a
+real permission boundary) is on the [backlog](backlog.md) and is needed before real books.
 
 ## 1. System map
 
@@ -263,12 +269,15 @@ replay store is not tied to the withHuman request id.
 
 | Process | Runs as | Code it runs | Listens on | Started by |
 |---|---|---|---|---|
-| Hermes gateway (agent + plugin) | `hermes` | `~/.hermes/plugins/durable-park` -> `/home/hermes/durable-park/plugin/durable_park` (the git clone) | `127.0.0.1:8644` (webhook route `durable-park-wake`) | systemd user unit `hermes-gateway` |
+| Hermes gateway (agent + plugin, Telegram and Teams adapters) | `hermes` | `~/.hermes/plugins/durable-park` -> `/home/hermes/durable-park/plugin/durable_park` (the git clone) | `127.0.0.1:8644` (webhook route `durable-park-wake`), `127.0.0.1:3978` (Teams bot "TapDash Agent") | systemd user unit `hermes-gateway` |
+| Hermes web dashboard | `hermes` | the `hermes` install (`hermes dashboard`, basic-auth user `TapDash`) | `100.99.171.75:9119` (Tailscale only) | systemd user unit `hermes-dashboard` |
+| Teams tunnel | `ubuntu` | Microsoft devtunnel `proto-agents-bot`, forwards to the gateway's `127.0.0.1:3978` | outbound only | systemd user unit `devtunnel-hermes` (user `ubuntu`) |
+| Claude connector "Proto-Agents" | `hermes` | `/home/hermes/hermes-shell-mcp` (shell access for Claude on this VM) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
 | bridge | `hermes` | `/opt/durable-park/bridge/` + `/opt/durable-park/plugin/durable_park/ledger.py` (root-owned copy) | `127.0.0.1:8791` `/wh/bridge` | system unit `durable-park-bridge` |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, every 5 min, no agent |
 | tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` | outbound only | Docker, container `wh-tunnel` |
-| Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge` | 443 | `tailscale funnel --bg` |
+| Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
 
 - The git clone is `/home/hermes/tapdash-agents`; `/home/hermes/durable-park` is a link to its `durable-park/`
   folder, so older paths keep working.
@@ -276,8 +285,14 @@ replay store is not tied to the withHuman request id.
   the code that says "approved". Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
 - Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`, `bridge_deliveries.db`,
   `formcheck_status.json`, `formcheck_alert_state.json`.
-- The agent's tools are locked down to `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`
-  (`deploy/hermes_tool_policy.py`), so it has no terminal or file access to the ledger.
+- The agent has the full Hermes toolset (terminal, file, browser, ...) and Hermes's own approvals are off
+  (`approvals.mode: off`). Only `tools.tool_search.enabled: off`, `gateway.strict: true` and
+  `gateway.trust_recent_files: false` of the old lockdown were kept. The v1 lockdown
+  (`deploy/hermes_tool_policy.py`, tools limited to `parked_action_execute`, `clarify` and
+  `mcp__wh__quickbooks__*`) was lifted by hand-editing `~/.hermes/config.yaml`; do not re-run
+  `deploy/configure_hermes.sh` on this VM, it re-applies it ([spec](../../docs/specs/2026-10-20-one-agent-merge-design.md) section 4.1).
+- Two agents ran on the VM until 2026-10-21 (this install and an `ubuntu` user install for Teams and the
+  dashboard). Now it is **one**: the `hermes` install. The `ubuntu` install is stopped and kept as an archive.
 
 ## 7. Secrets and who can read them
 

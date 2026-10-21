@@ -20,6 +20,9 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 | Repo on the VM | `/home/hermes/tapdash-agents` (a clone of this repo). `/home/hermes/durable-park` links to its `durable-park/` folder. |
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
 | Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where alerts go). |
+| Teams bot | "TapDash Agent", served by the same `hermes` gateway on `127.0.0.1:3978`; the devtunnel `proto-agents-bot` (user `ubuntu`, unit `devtunnel-hermes`) forwards to it. |
+| Web dashboard | `http://100.99.171.75:9119/` (Tailscale), user `TapDash`; systemd user unit `hermes-dashboard` of user `hermes`. |
+| Claude connector "Proto-Agents" | system service `hermes-shell-mcp` (`/home/hermes/hermes-shell-mcp`, `127.0.0.1:8792`, Tailscale Funnel path `/hermes-shell`, GitHub OAuth for one allowed account). Stopping it cuts Claude's access to the VM. |
 
 Rules:
 
@@ -29,6 +32,12 @@ Rules:
 - **Never print a secret.** Secrets are typed in by an admin with `read -rs` (never pasted into chat).
 - Root steps (copying into `/opt`, restarting system units) are done by an admin in their own terminal. AI agents
   are blocked from them by design.
+- **One agent, full toolset (since 2026-10-21).** The `hermes` install is the only agent on the VM. It has every Hermes
+  tool and Hermes's own approvals are off, so durable-park (the 12 QuickBooks money-move tool types) is the **only**
+  approval gate; terminal and file actions are not gated. Why: [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md). The old `ubuntu` user's
+  Hermes install (gateway and dashboard units) is stopped and kept as an archive; do not start it next to this one.
+- **Restarting `hermes-gateway` also restarts the Teams bot** (and briefly drops Telegram). The dashboard is its own unit
+  and keeps running. The "no `parked`, `approved` or `executing` row" rule below still applies before any restart.
 - QuickBooks is a **sandbox** company. Never connect real books before the [rotation](#rotate-secrets-before-production)
   and the open v2 items are done.
 
@@ -37,7 +46,8 @@ Rules:
 As `hermes` on the VM:
 
 ```sh
-systemctl --user is-active hermes-gateway                          # active
+systemctl --user is-active hermes-gateway hermes-dashboard         # active active
+systemctl is-active hermes-shell-mcp                               # active
 systemctl is-active durable-park-receiver durable-park-bridge      # active active
 sudo docker ps --filter name=wh-tunnel --format '{{.Status}}'      # Up ...
 curl -s http://127.0.0.1:8644/health                               # {"status": "ok", ...}
@@ -88,7 +98,7 @@ PY
    | any file in `bridge/` | root, admin: copy each changed file, e.g. `sudo install -m 0644 -o root -g root /home/hermes/durable-park/bridge/app.py /opt/durable-park/bridge/app.py`, then `sudo systemctl restart durable-park-bridge` |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
-   | `deploy/` (units, policy, Hermes config) | `sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh` (idempotent; restarts the gateway) |
+   | `deploy/` (units, policy, Hermes config) | **Not on proto-agents since 2026-10-20:** `configure_hermes.sh` re-applies the v1 tool lockdown. Edit `~/.hermes/config.yaml` by hand (keep comments), then `systemctl --user restart hermes-gateway`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
@@ -181,7 +191,9 @@ Example: make DocuSign `createEnvelope` need approval. Every place that has to a
    **rule 2**, so the bridge decides its replays ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
    other `mcp__wh__` tool registers. Allow the new server there.
-3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*`. Allow the new prefix.
+3. **Tool lockdown**: no step on proto-agents, since the lockdown is lifted (the agent has every tool). Only if the
+   v1 lockdown is ever re-applied: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*`; allow the
+   new prefix.
 4. **Risky list**: the plugin parks tools matching `risky_tools` (Hermes setting
    `plugins.entries.durable-park.settings.risky_tools`, default `DEFAULT_RISKY_TOOLS` in
    `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in the default.
@@ -206,6 +218,12 @@ Several secrets were pasted into chat during testing (approved for testing only)
 
 ## Rollback
 
+- **The one-agent merge (2026-10-21)**: the configs, units and ledger from before the cutover are in
+  `/home/hermes/merge-backup-20261021T021246Z/` (`hermes/` and `ubuntu/`). To go back: stop `hermes-dashboard`, copy
+  `hermes/config.yaml` and `hermes/.env` over `~/.hermes/`, restart `hermes-gateway` (locked-down tools again, no
+  Teams), then start the `ubuntu` user's `hermes-gateway` and `hermes-dashboard` units (they are disabled and stopped:
+  `enable --now` them) and check Telegram and the dashboard login. Only with nothing `parked`, `approved` or
+  `executing`. Plan: [docs/plans/2026-10-20-one-agent-merge.md](../../docs/plans/2026-10-20-one-agent-merge.md).
 - **Code**: `git revert <commit>` in the clone, push, then make it live as in [Deploy a change](#deploy-a-change).
   For the bridge and receiver that includes copying the reverted files to `/opt/durable-park` again: the root
   copies do not change by themselves.
