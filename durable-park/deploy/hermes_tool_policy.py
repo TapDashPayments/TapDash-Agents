@@ -36,10 +36,16 @@ Policy, three layers (Hermes v0.22.2, ~/.hermes/hermes-agent):
    per-source overrides (gateway/run_turn.py:2386-2409), cron agents (cron/scheduler.py:414-435), the
    tool_search bridge (model_tools.py:701-745) and delegate children (agent/agent_init.py:1114-1116).
 The model can only call names in its tool list (agent/turn_tool_round.py:107-127).
-4. ``tools.tool_search.enabled: off`` (hermes_cli/config_defaults.py:1991; read at tools/tool_search.py:112-121): otherwise Hermes hides plugin/MCP tools (``parked_action_execute``,
-   ``mcp__wh__*``) behind the tool_search/tool_describe/tool_call bridge whenever any are deferrable
-   (tools/tool_search.py:198-201, 335-370), so the model would not see ``parked_action_execute`` by the name
-   the wake message tells it to call. With only a handful of tools there is nothing to save.
+4. Hermes "Tool Search" (``tools.tool_search.enabled``, tools/tool_search.py): ``apply`` writes ``off`` unless an
+   admin already set ``on`` (``tool_search_setting``). With it on, Hermes hides every MCP and plugin tool
+   (``parked_action_execute``, ``mcp__wh__*``) behind three bridge tools it synthesizes, ``tool_search`` /
+   ``tool_describe`` / ``tool_call`` (tools/tool_search.py:198-201, 335-370; ``tool_call`` can invoke any tool of
+   the session's own catalog and nothing else, model_tools.py:743). So ``check`` judges TWO lists per platform
+   (``tool_problems``): the CATALOG (``get_tool_definitions(..., skip_tool_search_assembly=True)``: every tool
+   ``tool_call`` can reach; only the allowed names, and no bridge name, may be in it) and what the model SEES (the
+   assembled list: the allowed names plus, all three together or none, the bridge tools). Judging only the
+   assembled list would let a forbidden tool hide behind the bridge. ``parked_action_execute`` is then reachable
+   only through the bridge, so it must be in the catalog and all three bridge tools must be visible.
 5. ``gateway.strict: true`` + ``gateway.trust_recent_files: false``: the gateway uploads a file the model names
    in its reply (``MEDIA:/path``) without any tool. Non-strict, anything outside a small denylist goes out,
    e.g. the ledger (gateway/platforms/base.py:1165-1201); strict without recency trust = only the Hermes
@@ -64,6 +70,11 @@ ALLOW_FILE = "/etc/durable-park/allowed_toolsets"
 ALLOWED_TOOLSETS = ["durable_park", "clarify"]
 MCP_SERVER = "wh"
 ALLOWED_TOOL_NAMES = {"parked_action_execute", "clarify"}
+# Hermes's Tool Search bridge tools (tools/tool_search_catalog.py BRIDGE_TOOL_NAMES). Synthesized when tool search
+# is on, never registered: allowed in the list the model SEES (all three or none), never in the CATALOG.
+# plugin/durable_park/park_hook.py keeps the same three names (tests/test_tool_policy.py pins them together).
+BRIDGE_TOOL_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
+TOOL_SEARCH_SETTINGS = ("off", "on")
 ALLOWED_TOOL_PREFIXES = (f"mcp__{MCP_SERVER}__quickbooks__",)
 REQUIRED_TOOL = "parked_action_execute"
 
@@ -179,12 +190,22 @@ def _wh_configured() -> bool:
     return isinstance((load_config().get("mcp_servers") or {}).get(MCP_SERVER), dict)
 
 
-def desired_settings(allowed: list[str] | None = None) -> dict:
+def tool_search_setting(raw: dict) -> str:
+    """The ``tools.tool_search.enabled`` value ``apply`` writes: ``on`` when an admin set it (``on``, ``true``),
+    otherwise ``off``. ``auto`` is Hermes's alias of ``on`` but is not an admin's explicit choice: it is turned off.
+    ``check`` is the safety net either way (it judges the catalog and the assembled list)."""
+    value = _get(raw, "tools.tool_search.enabled")
+    return "on" if str(value).strip().lower() in ("on", "true") else "off"
+
+
+def desired_settings(allowed: list[str] | None = None, tool_search: str = "off") -> dict:
+    if tool_search not in TOOL_SEARCH_SETTINGS:
+        raise ValueError(f"tool_search must be one of {TOOL_SEARCH_SETTINGS}, got {tool_search!r}")
     allowed = list(allowed or [])
     plugin_toolsets = _plugin_toolsets()
     mcp = MCP_SERVER if _wh_configured() else "no_mcp"
     disabled = [t for t in FORBIDDEN_TOOLSETS if t not in allowed]
-    settings: dict = {"agent.disabled_toolsets": disabled, "tools.tool_search.enabled": "off",
+    settings: dict = {"agent.disabled_toolsets": disabled, "tools.tool_search.enabled": tool_search,
                       "gateway.strict": True, "gateway.trust_recent_files": False}
     for platform in _platforms():
         settings[f"platform_toolsets.{platform}"] = [*ALLOWED_TOOLSETS, *allowed, mcp]
@@ -213,7 +234,7 @@ def apply(allowed: list[str] | None = None) -> int:
         with redirect_stdout(io.StringIO()):
             unset_config_value("tool_search")
         changed += 1
-    for key, value in desired_settings(allowed).items():
+    for key, value in desired_settings(allowed, tool_search_setting(raw)).items():
         if _get(raw, key) == value:
             continue
         with redirect_stdout(io.StringIO()):
@@ -241,10 +262,14 @@ def _disabled(config: dict):
     return parse_config_string_list((config.get("agent") or {}).get("disabled_toolsets")) or None
 
 
-def effective_tools(platform: str, enabled: list[str] | None | str = "config") -> list[str]:
+def effective_tools(platform: str, enabled: list[str] | None | str = "config", assemble: bool = True) -> list[str]:
     """The tool names a session on *platform* gets, through the same calls the gateway / CLI make:
     gateway/run_turn.py:2404-2409 -> agent/agent_init.py:1114-1121 (session gating, definitions, drops).
-    ``enabled="config"`` resolves the platform's configured toolsets; anything else is used as given."""
+    ``enabled="config"`` resolves the platform's configured toolsets; anything else is used as given.
+    ``assemble=True`` is what the model SEES (with Tool Search on, MCP and plugin tools are replaced by the three
+    bridge tools); ``assemble=False`` is the CATALOG, every tool the session can reach, which ``tool_call`` can
+    invoke (model_tools.py ``get_tool_definitions(skip_tool_search_assembly=True)``, the list the bridge itself
+    scopes ``tool_call`` to, model_tools.py:719-720, 743)."""
     import model_tools
     from hermes_cli.config import load_config
     from hermes_cli.tools_config import _get_platform_tools
@@ -255,7 +280,8 @@ def effective_tools(platform: str, enabled: list[str] | None | str = "config") -
         enabled = sorted(_get_platform_tools(config, platform))
     disabled = _disabled(config)
     disabled = session_disabled_toolsets(disabled, platform)
-    defs = model_tools.get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=True)
+    defs = model_tools.get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=True,
+                                            skip_tool_search_assembly=not assemble)
     drops = session_platform_tool_drops(platform)
     return sorted(d["function"]["name"] for d in defs if d["function"]["name"] not in drops)
 
@@ -268,12 +294,41 @@ def allowed_tool_names(allowed: list[str]) -> set[str]:
     # only a kanban worker has it, so the definitions below are exactly the toolsets' own tools.
     # An empty list selects nothing (model_tools.py:316-321: only ``None`` means every toolset).
 
-    defs = model_tools.get_tool_definitions(enabled_toolsets=list(allowed), quiet_mode=True)
+    # The catalog, not what the model sees: with Tool Search on, an opened toolset's cold tools (todo_list,
+    # session_search, ...) are deferred and would be missing from the assembled list.
+    defs = model_tools.get_tool_definitions(enabled_toolsets=list(allowed), quiet_mode=True,
+                                            skip_tool_search_assembly=True)
     return {d["function"]["name"] for d in defs}
 
 
 def is_allowed(name: str, extra: set[str] | frozenset[str] = frozenset()) -> bool:
     return name in ALLOWED_TOOL_NAMES or name in extra or name.startswith(ALLOWED_TOOL_PREFIXES)
+
+
+def tool_problems(catalog: list[str], visible: list[str], extra: set[str] | frozenset[str] = frozenset()) -> list[str]:
+    """What is wrong with one session's tools (empty = ok). ``catalog`` is every tool the session can reach,
+    ``visible`` what the model is shown (the same list when Tool Search is off).
+
+    * ``LEAK <name>``: a tool outside the allowed set in the catalog (``tool_call`` can invoke it even when the
+      bridge hides it from the model) or in the visible list. A bridge name in the CATALOG is a leak too: Hermes
+      synthesizes the bridge, it never registers it, so a registered tool with such a name is not Hermes's.
+    * ``BRIDGE incomplete``: some but not all of the three bridge tools are visible.
+    * ``MISSING parked_action_execute``: the executor is not reachable (not visible, and not in the catalog behind
+      a complete bridge)."""
+    problems: list[str] = []
+    for name in dict.fromkeys([*catalog, *(n for n in visible if n not in BRIDGE_TOOL_NAMES)]):
+        if not is_allowed(name, extra):
+            problems.append(f"LEAK {name}")
+    for name in dict.fromkeys(n for n in visible if n in BRIDGE_TOOL_NAMES and n in catalog):
+        if f"LEAK {name}" not in problems:
+            problems.append(f"LEAK {name}")
+    bridge = BRIDGE_TOOL_NAMES & set(visible)
+    whole_bridge = bridge == BRIDGE_TOOL_NAMES
+    if REQUIRED_TOOL not in visible and not (whole_bridge and REQUIRED_TOOL in catalog):
+        problems.append(f"MISSING {REQUIRED_TOOL}")
+    if bridge and not whole_bridge:
+        problems.append(f"BRIDGE incomplete: {', '.join(sorted(BRIDGE_TOOL_NAMES - bridge))} missing")
+    return problems
 
 
 def media_check() -> list[str]:
@@ -309,19 +364,26 @@ def check(allowed: list[str] | None = None, problems: list[str] | None = None) -
     problems = problems if problems is not None else []
     _plugin_toolsets()  # discovery registers plugin tools, as at agent start
     extra = allowed_tool_names(allowed)
+    bridged = 0
     for platform in _platforms():
-        names = effective_tools(platform)
-        leaks = [n for n in names if not is_allowed(n, extra)]
-        missing = [] if REQUIRED_TOOL in names else [REQUIRED_TOOL]
-        problems += [f"{platform}: LEAK {n}" for n in leaks] + [f"{platform}: MISSING {n}" for n in missing]
-        print(f"{platform}: {', '.join(names) or '(none)'}" + (f"  LEAK: {', '.join(leaks)}" if leaks else "")
-              + (f"  MISSING: {REQUIRED_TOOL}" if missing else ""))
+        visible = effective_tools(platform)
+        catalog = effective_tools(platform, assemble=False)
+        found = tool_problems(catalog, visible, extra)
+        problems += [f"{platform}: {p}" for p in found]
+        bridged += bool(BRIDGE_TOOL_NAMES & set(visible))
+        behind = sorted(set(catalog) - set(visible))  # hidden from the model, reachable through tool_call
+        hidden = f"  (behind the Tool Search bridge: {', '.join(behind)})" if behind else ""
+        print(f"{platform}: {', '.join(visible) or '(none)'}{hidden}" + "".join(f"  {p}" for p in found))
     for posture, enabled in POSTURES.items():
         for platform in ("cli", "tui", "desktop", "acp", "telegram"):
-            leaks = [n for n in effective_tools(platform, enabled) if not is_allowed(n, extra)]
-            problems += [f"{posture}@{platform}: LEAK {n}" for n in leaks]
-            if leaks:
-                print(f"{posture}@{platform}: LEAK: {', '.join(leaks)}")
+            found = tool_problems(effective_tools(platform, enabled, assemble=False),
+                                  effective_tools(platform, enabled), extra)
+            # a posture session gets none of the platform lists: its own tools must still all be allowed, but it
+            # need not carry the executor (``MISSING`` is judged per platform above)
+            found = [p for p in found if not p.startswith("MISSING ")]
+            problems += [f"{posture}@{platform}: {p}" for p in found]
+            if found:
+                print(f"{posture}@{platform}: {', '.join(found)}")
     print(f"postures ({', '.join(POSTURES)}) on cli/tui/desktop/acp/telegram: "
           + ("ok" if not problems else "see LEAK lines"))
     media = media_check()
@@ -335,8 +397,9 @@ def check(allowed: list[str] | None = None, problems: list[str] | None = None) -
               "or media delivery open", file=sys.stderr)
         return 1
     opened = f" plus the opened toolsets ({', '.join(allowed)})" if allowed else ""
+    search = f"; Tool Search on: the bridge tools are visible on {bridged} of them" if bridged else ""
     print(f"tool policy: ok on {len(_platforms())} platform keys (only durable_park, clarify and "
-          f"mcp__wh__quickbooks__* tools{opened})")
+          f"mcp__wh__quickbooks__* tools{opened}{search})")
     return 0
 
 

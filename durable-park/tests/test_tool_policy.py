@@ -204,7 +204,7 @@ def test_check_writes_status_file_on_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(policy, "_plugin_toolsets", lambda: [])
     monkeypatch.setattr(policy, "_platforms", lambda: ["cli"])
     monkeypatch.setattr(policy, "allowed_tool_names", lambda allowed: set())
-    monkeypatch.setattr(policy, "effective_tools", lambda platform, enabled="config": ["parked_action_execute", "terminal"])
+    monkeypatch.setattr(policy, "effective_tools", lambda platform, enabled="config", assemble=True: ["parked_action_execute", "terminal"])
     monkeypatch.setattr(policy, "media_check", lambda: [])
     allow = tmp_path / "allowed"
     allow.write_text("web\n")
@@ -222,7 +222,7 @@ def test_check_writes_status_file_when_ok(tmp_path, monkeypatch):
     monkeypatch.setattr(policy, "_plugin_toolsets", lambda: [])
     monkeypatch.setattr(policy, "_platforms", lambda: ["cli"])
     monkeypatch.setattr(policy, "allowed_tool_names", lambda allowed: {"web_search"})
-    monkeypatch.setattr(policy, "effective_tools", lambda platform, enabled="config": ["parked_action_execute", "web_search"])
+    monkeypatch.setattr(policy, "effective_tools", lambda platform, enabled="config", assemble=True: ["parked_action_execute", "web_search"])
     monkeypatch.setattr(policy, "media_check", lambda: [])
     allow = tmp_path / "allowed"
     allow.write_text("web\n")
@@ -329,3 +329,209 @@ def test_unwritable_status_directory_is_a_failed_check(tmp_path, monkeypatch, ca
     assert policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)]) == 1
     assert "status file" in capsys.readouterr().err
     assert not out.exists()
+
+
+# --- Hermes "Tool Search" (tools.tool_search.enabled: on) -------------------------------------------------
+#
+# With tool search on, Hermes hides MCP and plugin tools (parked_action_execute, mcp__wh__*) behind three
+# synthesized bridge tools. Run against the real Hermes v0.22.3 on the proto VM (2026-10-21), the unchanged
+# check reported clarify + tool_call/tool_describe/tool_search: three LEAKs and parked_action_execute MISSING,
+# and it could no longer see the hidden tools at all. The check now judges both lists.
+
+from durable_park import park_hook  # noqa: E402
+
+CATALOG = ["clarify", "mcp__wh__quickbooks__get_company_info", "parked_action_execute"]
+BRIDGE = ["tool_call", "tool_describe", "tool_search"]
+
+
+def test_the_bridge_names_match_the_plugin_constants():
+    # Both sides are local constants: they are pinned to the names Hermes really synthesizes by
+    # tests/test_hermes_integration.py (skipped where Hermes is not importable).
+    assert policy.BRIDGE_TOOL_NAMES == frozenset({"tool_search", "tool_describe", "tool_call"})
+    assert policy.BRIDGE_TOOL_NAMES == frozenset(park_hook.BRIDGE_TOOLS)
+    for name in policy.BRIDGE_TOOL_NAMES:  # strict by default: nothing is allowed by name, bridge or not
+        assert policy.is_allowed(name) is False
+
+
+def test_tool_search_on_passes_with_exactly_the_three_bridge_tools():
+    assert policy.tool_problems(CATALOG, ["clarify", *BRIDGE]) == []
+
+
+def test_tool_search_off_passes_as_before():
+    assert policy.tool_problems(CATALOG, CATALOG) == []
+
+
+@pytest.mark.parametrize("leak", ["terminal", "read_file", "execute_code", "mcp__wh__withhuman__get_agent",
+                                  "mcp__other__x", "manage_connections"])
+def test_a_forbidden_tool_is_a_leak_in_the_catalog_even_when_the_bridge_hides_it(leak):
+    # hidden behind the bridge the model's tool list looks clean, but tool_call can reach it
+    assert policy.tool_problems([*CATALOG, leak], ["clarify", *BRIDGE]) == [f"LEAK {leak}"]
+
+
+def test_a_forbidden_tool_is_a_leak_in_what_the_model_sees():
+    assert policy.tool_problems(CATALOG, ["clarify", *BRIDGE, "terminal"]) == ["LEAK terminal"]
+    assert policy.tool_problems(CATALOG, [*CATALOG, "terminal"]) == ["LEAK terminal"]
+
+
+def test_a_bridge_name_in_the_catalog_is_a_leak():
+    # the bridge tools are synthesized, never registered: a registered tool with such a name is hostile
+    assert policy.tool_problems([*CATALOG, "tool_call"], ["clarify", *BRIDGE]) == ["LEAK tool_call"]
+
+
+@pytest.mark.parametrize("partial", [["tool_search"], ["tool_search", "tool_describe"], ["tool_call"]])
+def test_a_partial_bridge_is_a_problem(partial):
+    problems = policy.tool_problems(CATALOG, ["clarify", *partial])
+    missing = sorted(policy.BRIDGE_TOOL_NAMES - set(partial))
+    assert f"BRIDGE incomplete: {', '.join(missing)} missing" in problems
+
+
+def test_the_executor_hidden_behind_a_bridge_that_is_not_there_is_missing():
+    # parked_action_execute is a plugin tool: deferred when tool search is on. Hidden and no bridge = unreachable.
+    assert policy.tool_problems(["clarify", "parked_action_execute"], ["clarify"]) == ["MISSING parked_action_execute"]
+    assert policy.tool_problems(["clarify"], ["clarify", *BRIDGE]) == ["MISSING parked_action_execute"]
+
+
+def test_opened_toolsets_are_allowed_in_the_catalog_and_the_visible_list():
+    assert policy.tool_problems([*CATALOG, "web_search"], ["clarify", *BRIDGE, "web_search"],
+                                {"web_search"}) == []
+    assert policy.tool_problems([*CATALOG, "web_search"], ["clarify", *BRIDGE]) == ["LEAK web_search"]
+
+
+def _check_with(monkeypatch, tmp_path, catalog, visible, extra=frozenset()):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: None)
+    monkeypatch.setattr(policy, "_plugin_toolsets", lambda: [])
+    monkeypatch.setattr(policy, "_platforms", lambda: ["cli", "telegram"])
+    monkeypatch.setattr(policy, "allowed_tool_names", lambda allowed: set(extra))
+    monkeypatch.setattr(policy, "effective_tools",
+                        lambda platform, enabled="config", assemble=True: list(visible if assemble else catalog))
+    monkeypatch.setattr(policy, "media_check", lambda: [])
+    out = tmp_path / "status.json"
+    rc = policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)])
+    return rc, json.loads(out.read_text())
+
+
+def test_check_passes_with_the_bridge_tools_present(tmp_path, monkeypatch, capsys):
+    rc, status = _check_with(monkeypatch, tmp_path, CATALOG, ["clarify", *BRIDGE])
+    assert rc == 0 and status["ok"] is True and status["problems"] == []
+    assert "tool policy: ok" in capsys.readouterr().out
+
+
+def test_check_fails_when_terminal_is_present_with_the_bridge_tools(tmp_path, monkeypatch):
+    rc, status = _check_with(monkeypatch, tmp_path, [*CATALOG, "terminal"], ["clarify", *BRIDGE])
+    assert rc == 1 and status["ok"] is False
+    assert [p for p in status["problems"] if p.startswith(("cli:", "telegram:"))] == [
+        "cli: LEAK terminal", "telegram: LEAK terminal"]
+    rc, status = _check_with(monkeypatch, tmp_path, CATALOG, ["clarify", *BRIDGE, "terminal"])
+    assert rc == 1 and "cli: LEAK terminal" in status["problems"]
+
+
+def test_check_judges_the_postures_the_same_way(tmp_path, monkeypatch):
+    seen = []
+
+    def tools(platform, enabled="config", assemble=True):
+        seen.append((platform, enabled, assemble))
+        if enabled == "config":
+            return list(CATALOG if not assemble else ["clarify", *BRIDGE])
+        return [*CATALOG, "terminal"] if not assemble else ["clarify", *BRIDGE]
+
+    monkeypatch.setattr(policy, "_bootstrap", lambda: None)
+    monkeypatch.setattr(policy, "_plugin_toolsets", lambda: [])
+    monkeypatch.setattr(policy, "_platforms", lambda: ["cli"])
+    monkeypatch.setattr(policy, "allowed_tool_names", lambda allowed: set())
+    monkeypatch.setattr(policy, "effective_tools", tools)
+    monkeypatch.setattr(policy, "media_check", lambda: [])
+    out = tmp_path / "status.json"
+    assert policy.main(["check", "--allow-file", str(tmp_path / "none"), "--status-file", str(out)]) == 1
+    problems = json.loads(out.read_text())["problems"]
+    assert "all-toolsets@cli: LEAK terminal" in problems and not any(p.startswith("cli:") for p in problems)
+    assert ("cli", None, False) in seen and ("cli", None, True) in seen
+
+
+class _Defs:
+    """A stand-in for Hermes's get_tool_definitions that records how it was called."""
+
+    def __init__(self, raw, assembled):
+        self.raw, self.assembled, self.calls = raw, assembled, []
+
+    def __call__(self, **kw):
+        self.calls.append(kw)
+        names = self.raw if kw.get("skip_tool_search_assembly") else self.assembled
+        return [{"function": {"name": n}} for n in names]
+
+
+def _fake_hermes(monkeypatch, defs):
+    import sys
+    import types
+
+    def module(name, **attrs):
+        mod = types.ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+        return mod
+
+    module("model_tools", get_tool_definitions=defs)
+    module("hermes_cli")
+    module("hermes_cli.config", load_config=lambda: {"agent": {"disabled_toolsets": ["terminal"]}})
+    module("hermes_cli.tools_config", _get_platform_tools=lambda config, platform: {"durable_park", "clarify"})
+    module("toolsets", session_disabled_toolsets=lambda disabled, platform: disabled,
+           session_platform_tool_drops=lambda platform: set())
+    module("agent")
+    module("agent.skill_utils", parse_config_string_list=lambda value: list(value or []))
+
+
+def test_effective_tools_assembled_is_what_the_model_sees_and_raw_is_the_catalog(monkeypatch):
+    defs = _Defs(["clarify", "parked_action_execute"], ["clarify", "tool_call", "tool_describe", "tool_search"])
+    _fake_hermes(monkeypatch, defs)
+    assert policy.effective_tools("telegram") == ["clarify", "tool_call", "tool_describe", "tool_search"]
+    assert policy.effective_tools("telegram", assemble=False) == ["clarify", "parked_action_execute"]
+    assert [bool(c.get("skip_tool_search_assembly")) for c in defs.calls] == [False, True]
+    assert all(c["enabled_toolsets"] == ["clarify", "durable_park"] for c in defs.calls)
+    assert all(c["disabled_toolsets"] == ["terminal"] for c in defs.calls)
+
+
+def test_allowed_tool_names_reads_the_catalog_not_the_bridge(monkeypatch):
+    defs = _Defs(["todo_list", "web_search"], ["web_search", "tool_call"])  # todo_list is deferred by default
+    _fake_hermes(monkeypatch, defs)
+    assert policy.allowed_tool_names(["todo", "web"]) == {"todo_list", "web_search"}
+    assert defs.calls[0]["skip_tool_search_assembly"] is True
+
+
+@pytest.mark.parametrize("current, wanted", [("off", "off"), (None, "off"), ("auto", "off"), ("garbage", "off"),
+                                               ("on", "on"), (True, "on"), ("true", "on"), ("ON", "on")])
+def test_tool_search_setting_keeps_an_admin_s_on_and_turns_everything_else_off(current, wanted):
+    raw = {} if current is None else {"tools": {"tool_search": {"enabled": current}}}
+    assert policy.tool_search_setting(raw) == wanted
+
+
+def test_desired_settings_writes_the_requested_tool_search_state(monkeypatch):
+    _stub_sources(monkeypatch)
+    assert policy.desired_settings([])["tools.tool_search.enabled"] == "off"
+    assert policy.desired_settings([], tool_search="on")["tools.tool_search.enabled"] == "on"
+    assert policy.desired_settings([], tool_search="off")["tools.tool_search.enabled"] == "off"
+    with pytest.raises(ValueError):
+        policy.desired_settings([], tool_search="auto")
+
+
+def _fake_config_module(monkeypatch, raw):
+    import sys
+    import types
+
+    writes = []
+    mod = types.ModuleType("hermes_cli.config")
+    mod.get_config_path = lambda: "config.yaml"
+    mod.require_readable_config_before_write = lambda path: raw
+    mod.set_config_value = lambda key, value, force=False: writes.append((key, value))
+    mod.unset_config_value = lambda key: writes.append((key, None))
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", mod)
+    return writes
+
+
+@pytest.mark.parametrize("current, written", [("on", None), ("off", None), ("auto", "off"), (True, "on")])
+def test_apply_leaves_an_admin_s_tool_search_on_alone(monkeypatch, current, written):
+    _stub_sources(monkeypatch)
+    raw = {"tools": {"tool_search": {"enabled": current}}, "gateway": {"strict": True, "trust_recent_files": False}}
+    writes = _fake_config_module(monkeypatch, raw)
+    assert policy.apply([]) == 0
+    tool_search_writes = [w for w in writes if w[0] == "tools.tool_search.enabled"]
+    assert tool_search_writes == ([] if written is None else [("tools.tool_search.enabled", written)])

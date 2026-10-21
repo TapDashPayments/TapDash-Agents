@@ -19,7 +19,8 @@ from .breaker import STATUS_FILENAME as BREAKER_STATUS_FILENAME, Breaker
 from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor, make_refusing_executor
 from .gatecall import GateHolder
 from .ledger import Ledger
-from .park_hook import DEFAULT_EXEMPT_TOOLS, DEFAULT_FORM_CHECKED_TOOLS, fail_closed_hook, make_pre_tool_call
+from .park_hook import (BRIDGE_CALL_TOOL, DEFAULT_EXEMPT_TOOLS, DEFAULT_FORM_CHECKED_TOOLS, fail_closed_hook,
+                        make_pre_tool_call)
 from .wake import drop_wake_hook, handle_wake, make_async_client_factory, make_audit_client_factory
 
 log = logging.getLogger("durable_park")
@@ -253,12 +254,13 @@ def foreign_pre_tool_call_hooks(ctx: Any, own: set[int], allowed: set[str]) -> l
 
 def _exempt_tools(ctx: Any, form_checked: list[re.Pattern]) -> tuple[str, ...]:
     """The ``exempt_tools`` setting. Anything listed runs with no approval and no ledger row, so:
-    an MCP tool (``mcp__...``) or a form-checked tool is refused as a bad setting (``BadSetting``: every call is
-    then refused), and any other name outside ``DEFAULT_EXEMPT_TOOLS`` is logged as an ERROR."""
+    an MCP tool (``mcp__...``), a form-checked tool or Tool Search's ``tool_call`` (it runs any hidden tool) is
+    refused as a bad setting (``BadSetting``: every call is then refused), and any other name outside
+    ``DEFAULT_EXEMPT_TOOLS`` is logged as an ERROR."""
     exempt = tuple(_names("exempt_tools", ctx.get_config("exempt_tools", list(DEFAULT_EXEMPT_TOOLS))))
     for name in exempt:
-        if name.startswith("mcp__") or any(p.fullmatch(name) for p in form_checked):
-            raise BadSetting(f"setting exempt_tools must not list MCP or form-checked tool {name!r}")
+        if name == BRIDGE_CALL_TOOL or name.startswith("mcp__") or any(p.fullmatch(name) for p in form_checked):
+            raise BadSetting(f"setting exempt_tools must not list MCP, form-checked or tool_call tool {name!r}")
     for name in exempt:
         if name not in DEFAULT_EXEMPT_TOOLS:
             log.error("exempt_tools lists %s: it runs with no approval and no ledger row", name)

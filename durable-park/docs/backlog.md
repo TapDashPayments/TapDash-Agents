@@ -21,7 +21,7 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 - Widen `risky_tools` beyond QuickBooks money moves: withHuman decides every call (spec 2026-10-21 §4.2); today the
   agent has no terminal or file tools, so nothing else needs gating yet.
 - More than one approver, or a backup approver (a withHuman escalation-path change; no code).
-- `tool_search` test and `docs/tool-rollout.md` (spec [section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md), section 8 item 9).
+- Tool Search: compatibility is built and documented ([runbook](runbook.md#turn-on-tool-search)); what is left is the live switch-on and its verification by an admin, and `docs/tool-rollout.md` (spec [section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md), section 8 item 9).
 - Dashboard pages: pending withHuman approvals, full withHuman view, live trace of tool calls (spec section 8 item 12).
 - The archived `ubuntu` Hermes install still holds Teams secrets (spec section 8 item 16).
 - Rev 8 rollback hazard: rev 8 auto-approves `hermes`/`mcp:` calls, so never activate it while the ask-every-call code runs ([runbook](runbook.md#rollback)).

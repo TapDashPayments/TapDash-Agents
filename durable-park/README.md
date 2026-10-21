@@ -8,11 +8,11 @@ later - and then the exact saved call runs once, in the same chat. It survives r
 Status: **v1 accepted on 2026-10-20**, QuickBooks **sandbox** only, on the test VM `proto-agents`
 ([acceptance results](docs/acceptance-2026-10-20.md)). The v1 tool lockdown was re-applied on proto-agents on 2026-10-21 03:16 UTC
 (the agent reaches only `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*`). durable-park asks withHuman about
-every tool call except `parked_action_execute` and `clarify`, and withHuman's pipeline decides which ones need a person
+every tool call except `parked_action_execute`, `clarify` and the read-only Tool Search catalog tools (`tool_search`, `tool_describe`; Hermes Tool Search is off until an admin turns it on, [runbook](docs/runbook.md#turn-on-tool-search)), and withHuman's pipeline decides which ones need a person
 ([spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
 
 Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
-`clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (58 platform keys; `hermes_tool_policy.py check` ok).
+`clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (on every platform key; `hermes_tool_policy.py check` prints the key count and ends `ok`).
 Hermes approvals stay off. The user `hermes` still has passwordless sudo until Clean Setup Phase 1
 ([spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1); the lockdown is a configuration guard,
 not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
@@ -82,6 +82,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 The unit tests never reach the network and never read real credentials (`tests/conftest.py` enforces both).
 Live checks against the sandbox run only on the VM: `DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live`.
+`tests/test_hermes_integration.py` runs the real Hermes functions the plugin leans on; it is skipped where Hermes is
+not importable (CI) and run on the VM ([runbook](docs/runbook.md#check-durable-park-against-the-real-hermes)).
 
 ## Docs
 

@@ -160,13 +160,14 @@ and after the gateway restart; a failed pre-restart check aborts without restart
   time: the built-in table (incl. `cron`), every gateway `Platform` (incl. `local`→`cli`,
   `msgraph_webhook`, `relay`, `sms`), every bundled platform plugin and its manifest alias (e.g. `teams`,
   `google_chat`, `irc`, `teams-platform`), every runtime-registered platform, `acp`, `tui`, `desktop`, and
-  any key already in the config (58 keys on the VM in October 2026);
+  any key already in the config (`hermes_tool_policy.py check` prints how many keys that is);
 - `known_plugin_toolsets.<key>` = all plugin toolsets (so none switches itself on);
 - `agent.disabled_toolsets` = every other toolset (terminal, file, code_execution, delegation, cronjob,
   skills, browser*, computer_use, memory, session_search, kanban, vision, web, …). Hermes subtracts it last
   at tool granularity, so it also covers sessions that do not use `platform_toolsets` (TUI coding posture,
   ACP, `HERMES_TUI_TOOLSETS`, cron jobs, subagents); `check` verifies those postures too;
-- `tools.tool_search.enabled: off`;
+- `tools.tool_search.enabled: off` (an admin may turn it on: `apply` keeps an `on`, and `check` then also judges the tools
+  behind Hermes's three bridge tools; [runbook](runbook.md#turn-on-tool-search));
 - `gateway.strict: true`, `gateway.trust_recent_files: false`: a model can make the gateway upload a file
   just by naming it (`MEDIA:/path`) - no tool needed. Non-strict, the ledger was deliverable. Now only the
   Hermes media caches are.
@@ -184,7 +185,8 @@ also when the check fails or crashes) for the gateway-start check. Exit codes: 0
 error or invalid allow file. How to open one: [runbook](runbook.md#open-a-toolset).
 
 `check` fails (and the deploy with it) if any tool other than `parked_action_execute`, `clarify`,
-`mcp__wh__quickbooks__*` and the tools of the opened toolsets is reachable on any key or posture, if
+`mcp__wh__quickbooks__*`, the tools of the opened toolsets and, with Tool Search on, the three bridge tools
+(`tool_search`, `tool_describe`, `tool_call`, visible all or none) is reachable on any key or posture, if
 `parked_action_execute` is missing, or if
 the wake secret, the ledger or a freshly written file would be deliverable. `hermes_mcp.sh` also fails if
 the gateway registers any `mcp__wh__` tool outside `mcp__wh__quickbooks__*` (it then stops the gateway). The
