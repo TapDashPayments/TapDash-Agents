@@ -55,6 +55,7 @@ running on the test VM.
 | Docker | Runs the tunnel container | system | Apache-2.0 | [site](https://www.docker.com) |
 | systemd | Runs the gateway, receiver, bridge and their restarts | system | LGPL-2.1 | [site](https://systemd.io) |
 | Telegram | Where people chat with the test bot, and where alerts go today (Teams next) | - | Telegram's service | [site](https://telegram.org) |
+| GitHub CLI (`gh`) | Opens pull requests from the VM; installed with apt and signed in as the admin user `ubuntu` only, not as `hermes` ([runbook](durable-park/docs/runbook.md#open-a-pull-request-from-the-vm)) | 2.46.0 | MIT | [github](https://github.com/cli/cli) |
 | pytest; Mermaid + jsdom | Tests; diagram check in CI | 9.1.1; 11.17.2 + 25.0.1 | MIT | [pytest](https://pytest.org) · [mermaid](https://mermaid.js.org) |
 
 **Ours (in this repo)**

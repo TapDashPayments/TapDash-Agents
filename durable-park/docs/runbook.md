@@ -19,6 +19,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 | VM | `proto-agents` (OVH VPS, Ubuntu 26.04, Hermes v0.22.3). Admins: `tailscale ssh ubuntu@proto-agents` (passwordless sudo). |
 | AI agents (e.g. Claude) | Current route: the Proto-Agents connector (see the last row), which runs as `hermes` with passwordless sudo. Older route (jump host, production; not for this VM): through the Hermes Server connector, piping scripts into `/tmp/dp-tools/vm` (runs as `hermes`) or `/tmp/dp-tools/vmroot` (root) on the jump host. |
 | Repo on the VM | `/home/hermes/tapdash-agents` (a clone of this repo). `/home/hermes/durable-park` links to its `durable-park/` folder. |
+| GitHub CLI | `gh` 2.46.0 (apt). Signed in as the admin user `ubuntu` only; `hermes` is not signed in (`gh auth status` as `hermes` says so). Pull requests are opened as `ubuntu`: [Open a pull request from the VM](#open-a-pull-request-from-the-vm). |
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
 | Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where alerts go). |
 | Teams bot | "TapDash Agent", served by the same `hermes` gateway on `127.0.0.1:3978`; the devtunnel `proto-agents-bot` (user `ubuntu`, unit `devtunnel-hermes`) forwards to it. |
@@ -73,7 +74,27 @@ stale. Instead it tells the agent to:
 Why: the dashboard chat's Hermes system prompt says "You are in the Hermes terminal UI (TUI)", which a small model
 read as having a terminal (2026-10-21). Because the paragraph names no tools, opening or closing a toolset (the
 [all-tools plan](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)) does not require editing it; the agent
-follows whatever tool list it is given. Check that the wording is still there after any change to `SOUL.md`.
+follows whatever tool list it is given. Check that the wording is still there after any change to `SOUL.md` (it was, on the live file, at 2026-10-21 20:10 UTC).
+
+### Live Hermes settings on proto-agents
+
+The settings below were changed on the VM itself (not by a repo change), so they are listed here. Checked live on
+2026-10-21 at about 20:10 UTC, as `hermes`. Print a key with `hermes config get <key>` (never print the whole file
+or `~/.hermes/.env`: they hold secrets).
+
+| Setting | Live value | Why |
+|---|---|---|
+| `tools.tool_search.enabled` | `on` (since 2026-10-21 19:59 UTC) | Cuts a new chat's input tokens; verification in [the record](acceptance-2026-10-21-tool-search.md). How it was switched on and off: [Turn on Tool Search](#turn-on-tool-search). |
+| `platforms.api_server.enabled` | `false` | Hermes v0.22.3 refuses to start the API server platform without `API_SERVER_KEY`, and nothing here uses it. With it enabled and no key the gateway reported `DEGRADED`. |
+| `platforms.ntfy.enabled` | `false` | Hermes has no adapter for ntfy and nothing here uses it; it also made the gateway report `DEGRADED`. |
+| `max_concurrent_sessions` | `20` | The key was present and empty, and Hermes warned about it; the owner chose 20. |
+| Secret references (`platforms.webhook.extra.routes.durable-park-wake.secret`, `mcp_servers.wh.headers.Authorization`) | bare `${VAR}` form | PR #28; no `${env:...}` is left in `config.yaml`. See [Config ref is not set](#every-hermes-command-prints-config-ref--is-not-set). |
+| Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *` | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). |
+| `hermes-dashboard` unit | `RestartPreventExitStatus=78` in the main unit file | See [Dashboard over HTTPS](#dashboard-over-https). |
+
+If `hermes-gateway` reports `DEGRADED` after a Hermes update, read `~/.hermes/logs/gateway.log` for the platform
+that failed to start before changing anything. To use `api_server` later, an admin sets `API_SERVER_KEY` in the
+secrets store first (typed in, never pasted into chat), then enables the platform.
 
 ## Dashboard over HTTPS
 
@@ -146,7 +167,7 @@ PY
 
    `git push` uses the VM's deploy key for this repo (`~/.ssh/tapdash_agents_deploy`, set in the clone's
    `core.sshCommand`). One-time per clone: `git config core.hooksPath .githooks`. Bigger changes go through a
-   pull request and an independent review instead (`CONTRIBUTING.md`).
+   pull request and an independent review instead (`CONTRIBUTING.md`; [how to open one from the VM](#open-a-pull-request-from-the-vm)).
 
 2. **Make it live**, only when nothing is waiting or running (check [waiting rows](#health-check) first).
 
@@ -164,6 +185,21 @@ PY
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
    `formcheck_status.json` within about a minute.
+
+### Open a pull request from the VM
+
+`hermes` has no GitHub login; `git push` works through the repo's deploy key. Pull requests are opened with the
+`gh` of the admin user `ubuntu`, which is signed in:
+
+```sh
+git push -u origin my-branch          # as hermes, from the worktree
+sudo -u ubuntu -H gh pr create --repo TapDashPayments/TapDash-Agents --head my-branch --base main \
+  --title '...' --body-file /tmp/pr-body.md     # the file must be readable by ubuntu; delete it afterwards
+```
+
+Fill in `.github/pull_request_template.md` for the body. Never print `gh auth token`. The login is a classic OAuth
+token with the `repo`, `workflow`, `read:org` and `gist` scopes, which reaches every repository of that GitHub account
+([backlog](backlog.md#later): replace it with a fine-grained token limited to this repository).
 
 ## Alerts and what to do
 
@@ -408,7 +444,8 @@ grep -c 'env:DURABLE_PARK' ~/.hermes/config.yaml                  # 0
 systemctl --user restart hermes-gateway
 ```
 
-Then run the [health check](#health-check); a CLI command no longer prints the warning.
+Then run the [health check](#health-check); a CLI command no longer prints the warning. proto-agents has been on the bare form since
+2026-10-21 (PR #28, applied live): `grep -c 'env:DURABLE_PARK' ~/.hermes/config.yaml` prints `0`.
 
 ### The sweep runs every 6 minutes, not 5
 
@@ -423,6 +460,9 @@ script, as `hermes` (it only changes when the next run is due and does not touch
 hermes cron edit "$(hermes cron list --all | awk '/^ +[0-9a-f]+ +\[/ {id=$1} $1=="Name:" && $2=="durable-park-sweep" {print id}')" --schedule '*/5 * * * *'
 hermes cron list --all | grep -A3 durable-park-sweep   # Schedule: */5 * * * *, Next run on a multiple of 5 minutes
 ```
+
+On proto-agents the live job `5982945c6071` was edited to `*/5 * * * *` on 2026-10-21 (after PR #28 changed the deploy
+script), and `hermes cron list` shows `Schedule:  */5 * * * *`.
 
 ## Plugin settings
 
@@ -574,7 +614,8 @@ and fix the plugin before turning Tool Search on. Without Hermes on the path the
 
 Hermes's Tool Search hides the 142 QuickBooks tool schemas (about 41-60k input tokens in every new chat) behind three
 bridge tools, `tool_search`, `tool_describe` and `tool_call`; the model sees a name listing and loads a schema only
-when it needs it. It is **off** on proto-agents until an admin turns it on. How it fits the hook:
+when it needs it. It is **on** on proto-agents since 2026-10-21 19:59 UTC (what was checked:
+[the record](acceptance-2026-10-21-tool-search.md)); the steps below switch it on again, or off. How it fits the hook:
 [architecture section 4b](architecture.md#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path).
 
 **The setting.** One key, in `~/.hermes/config.yaml`, set through Hermes's own CLI as the `hermes` user:

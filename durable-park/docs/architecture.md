@@ -435,8 +435,8 @@ form-checked tool's rules work, and writes `formcheck_status.json`. The sweep al
 Hermes's **Tool Search** (`tools.tool_search.enabled`, Hermes docs `website/docs/user-guide/features/tool-search.md`)
 hides every MCP and plugin tool behind three bridge tools Hermes synthesizes (never registers): `tool_search` and
 `tool_describe` read the session's own tool catalog, and `tool_call` runs a hidden tool. It cuts the schema tokens of
-the 142 QuickBooks tools from tens of thousands to a name listing. It is **off** until an admin turns it on
-([runbook](runbook.md#turn-on-tool-search)). What the park hook receives for each bridge tool, read in Hermes v0.22.3
+the 142 QuickBooks tools from tens of thousands to a name listing. It is **on** on proto-agents since 2026-10-21 19:59 UTC
+([runbook](runbook.md#turn-on-tool-search), [verification record](acceptance-2026-10-21-tool-search.md)). What the park hook receives for each bridge tool, read in Hermes v0.22.3
 and re-run against the real code on the VM (2026-10-21):
 
 | The model calls | `pre_tool_call` receives | durable-park | Hermes code |
@@ -519,8 +519,8 @@ replay store is not tied to the withHuman request id.
   `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
   `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`.
 - Since 2026-10-21 03:16 UTC the v1 lockdown is applied (`deploy/hermes_tool_policy.py`: tools limited to
-  `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`, plus Hermes's three Tool Search bridge tools once an admin turns
-  tool search on ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); on every platform key, `check` ok) and Hermes's own
+  `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`, plus Hermes's three Tool Search bridge tools (Tool Search has been on since
+  2026-10-21 19:59 UTC) ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); on every platform key, `check` ok) and Hermes's own
   approvals are off (`approvals.mode: off`). `gateway.strict: true` and `gateway.trust_recent_files: false` are set;
   with passwordless sudo they do not protect the ledger. Re-running `deploy/configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies this state and restarts the gateway, so the "no parked/approved/executing row"
