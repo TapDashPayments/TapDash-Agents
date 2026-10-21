@@ -296,7 +296,7 @@ plugins:
       settings:
         exempt_tools: [parked_action_execute, clarify]   # keep parked_action_execute
         form_checked_tools: ['mcp__wh__quickbooks__(create|update|delete)[_-](payment|bill)']  # optional
-        observer_hooks: []                                # module.qualname of reviewed hooks
+        observer_hooks: []                                # module.qualname of reviewed hooks; live values: "Hooks reviewed so far"
         # tool_policy_status: /path/to/tool_policy_status.json   # default: next to the ledger; leave unset
 ```
 
@@ -342,6 +342,16 @@ To allow one:
    call `next_call()` with no argument or with the exact `args` it was given, on every path. If you cannot confirm it, do not list it: remove or disable it instead.
 4. Add its exact name to `observer_hooks`, restart the gateway, and check one call is asked about normally again.
 5. Re-do this review whenever that plugin, script or command changes.
+
+Registration order does not make a foreign hook safe: Hermes merges `modify` from every `pre_tool_call` callback, so
+a hook that runs after durable-park, or sits lower in `config.yaml`, can still change the arguments. Only a reviewed
+observer may be listed.
+
+### Hooks reviewed so far
+
+| Name | Source | What it does | Reviewed (date) | Result |
+|---|---|---|---|---|
+| `platforms__raft.adapter._on_pre_tool_call` (full name `hermes_plugins.platforms__raft.adapter._on_pre_tool_call`) | Hermes Raft platform plugin, on `proto-agents` | Records telemetry about each call; always returns `None`, on every path including errors. Never returns `modify`, `block` or any other directive. | 2026-10-21 | Listed in `observer_hooks`; gateway restarted; calls asked about normally again |
 
 `<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook or middleware
 registry (e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
