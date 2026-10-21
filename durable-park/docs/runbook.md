@@ -385,6 +385,39 @@ asking) does not block the chat; the sweep cancels it once it is 10 minutes old 
 The sweep re-posts the wake every 5 minutes. If it still does not arrive: health check (gateway up? webhook route
 `/health`?), then `journalctl -u durable-park-receiver -n 20` for wake errors.
 
+### Every `hermes` command prints `Config ref '...' ... is not set`
+
+Harmless, and gone on a VM configured by the current `deploy/configure_hermes.sh` / `deploy/hermes_mcp.sh`: they
+write the secret references bare (`${DURABLE_PARK_WAKE_SECRET}`, `Bearer ${DURABLE_PARK_WH_TOKEN}`) because Hermes
+warns only for the `env:`-prefixed form, and config loads before the `command` secret source has set the
+variables ([why, and how a missing secret still shows](receiver-setup.md#files-and-owners)). A VM configured
+earlier still has the `env:` form in `config.yaml`; with no row `parked`, `approved` or `executing` ([waiting
+rows](#health-check)), as `hermes`:
+
+```sh
+cp -p ~/.hermes/config.yaml ~/.hermes/config.yaml.bak-refs-$(date -u +%Y%m%dT%H%M%SZ)
+hermes config set 'platforms.webhook.extra.routes.durable-park-wake.secret' '${DURABLE_PARK_WAKE_SECRET}'
+hermes config set 'mcp_servers.wh.headers.Authorization' 'Bearer ${DURABLE_PARK_WH_TOKEN}'
+grep -c 'env:DURABLE_PARK' ~/.hermes/config.yaml                  # 0
+systemctl --user restart hermes-gateway
+```
+
+Then run the [health check](#health-check); a CLI command no longer prints the warning.
+
+### The sweep runs every 6 minutes, not 5
+
+`hermes cron list | grep -A3 durable-park-sweep` shows `Schedule: every 5m`. Hermes re-arms an interval job from
+the previous run's time and its ticker runs every 60 s, so such a job runs about every 6 minutes. A cron
+expression is anchored to the wall clock (`cron/jobs.py` `compute_next_run`), so `deploy/configure_hermes.sh`
+creates the job as `*/5 * * * *` and, when it finds the job on another schedule, moves it over with
+`hermes cron edit` (a job already on `*/5 * * * *` is left alone). To change a live job without re-running the
+script, as `hermes` (it only changes when the next run is due and does not touch the ledger, so rows may be waiting):
+
+```sh
+hermes cron edit "$(hermes cron list --all | awk '/^ +[0-9a-f]+ +\[/ {id=$1} $1=="Name:" && $2=="durable-park-sweep" {print id}')" --schedule '*/5 * * * *'
+hermes cron list --all | grep -A3 durable-park-sweep   # Schedule: */5 * * * *, Next run on a multiple of 5 minutes
+```
+
 ## Plugin settings
 
 Settings live under `plugins.entries.durable-park.settings` in `~/.hermes/config.yaml` (user `hermes`). Edit the

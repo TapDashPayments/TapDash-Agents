@@ -10,7 +10,7 @@
 #     wh:
 #       url: https://app.withhuman.ai/gateway/mcp           # Streamable HTTP (Hermes's default transport)
 #       headers:
-#         Authorization: Bearer ${env:DURABLE_PARK_WH_TOKEN}
+#         Authorization: Bearer ${DURABLE_PARK_WH_TOKEN}
 #       trust: full                 # `untrusted` would block the plugin's dispatch_tool replay (probe report)
 #       tools: {include: ["quickbooks__*"], resources: false, prompts: false}   # v1: QuickBooks only
 #       enabled: true
@@ -86,8 +86,11 @@ as_hermes cp -p "$HERMES_HOME/config.yaml" "$HERMES_HOME/config.yaml.bak-hermes-
 log "backed up config.yaml to config.yaml.bak-hermes-mcp-$stamp"
 set_cfg() { hermes_cli config set "$1" "$2" >/dev/null; }
 set_cfg "mcp_servers.$SERVER.url" "$GATEWAY_URL"
-# shellcheck disable=SC2016  # a literal Hermes ${env:...} reference, resolved by Hermes at connect time
-set_cfg "mcp_servers.$SERVER.headers.Authorization" 'Bearer ${env:DURABLE_PARK_WH_TOKEN}'
+# Bare ${VAR}, not the env:-prefixed form: same resolution at connect time, but no "Config ref ... is not set" warning in
+# every Hermes process (the config loads before the secrets.command helper runs). An unset variable still fails
+# closed: Hermes refuses to connect a remote MCP server whose header keeps a literal ${...}.
+# shellcheck disable=SC2016  # a literal Hermes ${...} reference, resolved by Hermes at connect time
+set_cfg "mcp_servers.$SERVER.headers.Authorization" 'Bearer ${DURABLE_PARK_WH_TOKEN}'
 set_cfg "mcp_servers.$SERVER.trust" full
 set_cfg "mcp_servers.$SERVER.tools.include" "$TOOL_INCLUDE"
 set_cfg "mcp_servers.$SERVER.tools.resources" false

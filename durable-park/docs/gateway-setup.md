@@ -352,9 +352,12 @@ If the bridge is down, answers `401` or times out, the webhook block fails and t
 
 Hermes talks to the gateway directly over Streamable HTTP. It does not use the `withhuman mcp` stdio relay
 that production uses. Hermes's `mcp_servers` accepts `url` + `headers` (reference:
-`website/docs/reference/mcp-config-reference.md`), and `${env:VAR}` in `url`/`headers` is resolved when the
-server connects (`tools/mcp_tool_config.py:533-563`). An unresolved reference fails closed instead of sending
-the literal text.
+`website/docs/reference/mcp-config-reference.md`), and `${VAR}` in `url`/`headers` is resolved when the
+server connects (`_interpolate_env_vars`, `tools/mcp_tool_config.py:554-581`). An unresolved reference fails
+closed instead of sending the literal text (`_require_rendered_remote`, same file, `:585-599`). The reference is
+written bare, not as `${env:VAR}`: the two resolve alike, but the `env:` form makes every Hermes process log a
+"Config ref ... is not set" warning, because config loads before the `command` secret source runs (why, and how
+a missing secret is still noticed: [receiver-setup.md](receiver-setup.md#files-and-owners)).
 
 `deploy/hermes_mcp.sh` (as root or hermes, after provisioning; it refuses while
 `/etc/durable-park/instance_token` is missing) writes this entry with `hermes config set`:
@@ -364,7 +367,7 @@ mcp_servers:
   wh:
     url: https://app.withhuman.ai/gateway/mcp
     headers:
-      Authorization: Bearer ${env:DURABLE_PARK_WH_TOKEN}
+      Authorization: Bearer ${DURABLE_PARK_WH_TOKEN}
     trust: full                # untrusted blocks the plugin's dispatch_tool replay (dispatch-probe-report)
     tools: {include: ["quickbooks__*"], resources: false, prompts: false}   # v1: QuickBooks only
     enabled: true
