@@ -197,8 +197,8 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
    (`hermes_cli/plugins.py:109-166`, `VALID_HOOKS`, has no startup, ready or post-load event), so the proof is written
    from `register`. A plugin that fails to import, or overruns `plugins.load_timeout_seconds` (default 10 s;
    `hermes_cli/plugins_loader.py:40-60`, `:525-537`), is disposed with all its hooks and never writes it.
-5. systemd then runs the drop-in's `ExecStartPost=` (no `-`): `deploy/plugin_load_check.sh` polls once a second, up to
-   `DURABLE_PARK_LOAD_TIMEOUT` seconds (default 30; Hermes's own load deadline is 10 s and the live load takes about 2 s), for a `plugin_load.json` whose `pid` is the unit's `$MAINPID`.
+5. systemd then runs the drop-in's `ExecStartPost=` (no `-`): `deploy/plugin_load_check.sh` polls once a second until a
+   wall-clock deadline of `DURABLE_PARK_LOAD_TIMEOUT` real seconds (default 30, never cut short by whole-second rounding; Hermes's own load deadline is 10 s and the live load takes about 2 s), for a `plugin_load.json` whose `pid` is the unit's `$MAINPID`.
    Found (any mode, `refusing-*` included: the plugin is live and refusing) it prints one line and exits 0. Not found
    it prints `durable-park ALERT: the plugin did not load in this gateway ...` and exits 1, so systemd stops the
    gateway and no tool call runs unchecked. The drop-in's `StartLimitIntervalSec=600` / `StartLimitBurst=3` stop the

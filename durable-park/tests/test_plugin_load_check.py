@@ -1,5 +1,6 @@
 """deploy/plugin_load_check.sh (ExecStartPost of the gateway drop-in) and the drop-in that wires it."""
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -113,6 +114,43 @@ def test_the_timeout_counts_wall_time_not_loop_turns(tmp_path):
     slow.chmod(0o755)
     result, took = run_check(tmp_path, proof=good(), timeout="3", extra_env={"DURABLE_PARK_PYTHON": str(slow)})
     assert result.returncode == 1 and took < 8
+
+
+def _wait_for_second_fraction(fraction):
+    """Sleep until the wall clock is `fraction` of the way through a second (bash's $SECONDS counts whole wall seconds)."""
+    now = time.time()
+    target = math.floor(now) + fraction
+    if target <= now:
+        target += 1
+    time.sleep(target - now)
+
+
+@pytest.mark.parametrize("fraction", [0.80, 0.90])
+def test_the_wait_is_at_least_the_timeout_whatever_the_second_phase(tmp_path, fraction):
+    # Regression: counting whole $SECONDS gave up up to ~1 s early when the wait began late in a second (CI saw 1.05 s
+    # for TIMEOUT=2). A python that takes 0.3 s per call and fails makes the boundary crossing deterministic.
+    slow_fail = tmp_path / "slow-fail-python"
+    slow_fail.write_text("#!/bin/sh\nsleep 0.3\nexit 1\n")
+    slow_fail.chmod(0o755)
+    _wait_for_second_fraction(fraction)
+    result, took = run_check(tmp_path, proof=good(), timeout="2", extra_env={"DURABLE_PARK_PYTHON": str(slow_fail)})
+    assert result.returncode == 1 and result.stdout.strip() == ALERT.format(pid=4242)
+    assert 2 <= took < 6
+
+
+def test_every_missing_proof_run_waits_the_full_timeout(tmp_path):
+    # Natural (no stub) version: late-in-the-second starts, real python. Always >= TIMEOUT, never a second short.
+    for fraction in (0.93, 0.96, 0.98):
+        _wait_for_second_fraction(fraction)
+        result, took = run_check(tmp_path, timeout="2")
+        assert result.returncode == 1 and result.stdout.strip() == ALERT.format(pid=4242)
+        assert 2 <= took < 6, (fraction, took)
+
+
+def test_a_zero_padded_timeout_is_decimal_not_octal(tmp_path):
+    result, took = run_check(tmp_path, timeout="02")  # "08"/"09" would be invalid octal without 10#
+    assert result.returncode == 1 and result.stdout.strip() == ALERT.format(pid=4242)
+    assert 2 <= took < 6
 
 
 def test_unset_home_does_not_break_the_script(tmp_path):
