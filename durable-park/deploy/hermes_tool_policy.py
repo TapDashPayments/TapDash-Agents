@@ -382,6 +382,12 @@ def main(argv: list[str]) -> int:
         allowed = read_allowed(args.allow_file)
     except ValueError as exc:
         print(f"hermes_tool_policy.py: invalid allow file {args.allow_file}: {exc}", file=sys.stderr)
+        status_file = getattr(args, "status_file", None)
+        if status_file:  # the alert must name the real reason, not "did not write a report"
+            try:
+                write_status(status_file, False, [f"invalid allow file: {exc}"], [])
+            except OSError as werr:
+                print(f"hermes_tool_policy.py: cannot write status file {status_file}: {werr}", file=sys.stderr)
         return 2
     status_file = getattr(args, "status_file", None)
     problems: list[str] = []

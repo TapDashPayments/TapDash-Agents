@@ -69,6 +69,7 @@ die() { printf 'configure_hermes: ERROR: %s\n' "$*" >&2; exit 1; }
 [[ -n "$HERMES_HOMEDIR" && -d "$HERMES_HOME" ]] || die "no Hermes home for user $HERMES_USER"
 [[ -x "$HERMES_BIN" ]] || die "hermes launcher not found at $HERMES_BIN"
 [[ -f "$REPO/plugin/durable_park/plugin.yaml" ]] || die "repo layout not found under $REPO"
+[[ "$REPO" != *[[:space:]]* ]] || die "the checkout path contains whitespace ($REPO); move it (the systemd ExecStartPre= line cannot hold it)"
 HERMES_UID=$(id -u "$HERMES_USER")
 RUNTIME_DIR="/run/user/$HERMES_UID"
 
@@ -233,7 +234,8 @@ as_hermes install -d -m 0750 "$(dirname "$LEDGER")"   # also the bridge unit's R
 # The one list of toolsets opened beyond the v1 lockdown (read by apply and check). Created empty if missing,
 # never overwritten: an admin edits it as root (docs/runbook.md "Open a toolset").
 [[ -e "$ETC/allowed_toolsets" ]] || install -m 640 -o root -g hermes /dev/null "$ETC/allowed_toolsets"
-tool_policy apply || die "could not apply the agent tool policy"
+# Propagate the script's exit code: 2 = invalid allow file (nothing applied, nothing restarted), 1 = anything else.
+tool_policy apply || { rc=$?; printf 'configure_hermes: ERROR: %s\n' "could not apply the agent tool policy (exit $rc)" >&2; exit "$rc"; }
 # Check BEFORE any restart: a failed check stops here and the running gateway keeps its old process.
 policy_report=$(tool_policy check) \
     || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed (nothing restarted)"; }

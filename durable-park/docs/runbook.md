@@ -191,6 +191,8 @@ again.`) when it passes.
 |---|---|---|
 | `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
 | `hermes python not found` | Not exactly one `~/.hermes/installs/*/facts.json`, or its Python is missing | Check that directory; the same lookup is `hermes_python()` in `deploy/configure_hermes.sh` |
+| `the tool policy check did not write a report` | The check was killed (the 60 s timeout), crashed, or could not write its report; the wrapper then wrote this failing report itself | `journalctl --user -u hermes-gateway` for `tool_policy_check:` lines; run `deploy/hermes_tool_policy.py check --status-file /tmp/x.json` by hand as `hermes` in Hermes's Python and read the error |
+| `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
 | a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
 | `stale` | The gateway started without the drop-in (the report is older than 15 minutes) | Install the drop-in, restart the gateway |
 
@@ -372,7 +374,8 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
    Not Phase-2-gated but still risky: `desktop_ui`, `catalog`, `browser-cdp`, `a2a`, `connections`; open them
    through the file only after their pipeline rule exists ([spec section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
    An allow file the `hermes` user cannot read (for example a pre-existing one with mode 600 root:root) makes
-   `apply` exit 2 and the deploy stop (fails closed); fix it with
+   `apply` exit 2 and `configure_hermes.sh` exit 2 too (nothing applied, nothing restarted; `hermes_mcp.sh` stops
+   as well), and at gateway start the report says `invalid allow file: <reason>`; fix it with
    `chgrp hermes` and `chmod 640` on the file (or, if it is empty, re-create it with
    `install -m 640 -o root -g hermes /dev/null /etc/durable-park/allowed_toolsets`).
 3. Apply and check, as the `hermes` user in Hermes's own Python (or just re-run `deploy/hermes_mcp.sh`, which does both):

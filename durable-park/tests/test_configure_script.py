@@ -251,9 +251,24 @@ def test_policy_wrapper_keeps_the_report_a_passing_check_wrote(tmp_path):
 
 def test_drop_in_path_rewrite_uses_the_checkout():
     line = next(l for l in SCRIPT.read_text().splitlines() if l.startswith("sed "))
-    expr = re.search(r'^sed "([^"]+)"', line).group(1).replace("$REPO", "/srv/some repo")
+    expr = re.search(r'^sed "([^"]+)"', line).group(1).replace("$REPO", "/srv/checkout")
     out = subprocess.run(["sed", expr], input=DROP_IN.read_text(), capture_output=True, text=True, check=True).stdout
-    assert "ExecStartPre=-/bin/bash /srv/some repo/deploy/tool_policy_check.sh" in out
+    assert "ExecStartPre=-/bin/bash /srv/checkout/deploy/tool_policy_check.sh" in out
     assert "%h/durable-park" not in out
     assert "Environment=DURABLE_PARK_POLICY_STATUS=%h/.hermes/" in out  # %h stays for systemd
     assert 'trap \'rm -f "$dropin_tmp"\' EXIT' in SCRIPT.read_text()
+
+
+def test_a_checkout_path_with_whitespace_is_refused():
+    text = SCRIPT.read_text()
+    guard = text.index('[[ "$REPO" != *[[:space:]]* ]]')
+    assert "die" in text[guard:guard + 200] and "whitespace" in text[guard:guard + 200]
+    assert guard < text.index("tool_policy apply")
+
+
+def test_an_invalid_allow_file_makes_the_script_exit_2_with_nothing_applied():
+    text = SCRIPT.read_text()
+    at = text.index("tool_policy apply")
+    block = text[at - 20:at + 260]
+    assert "rc=$?" in block and 'exit "$rc"' in block and "could not apply the agent tool policy" in block
+    assert "tool_policy apply || die" not in text

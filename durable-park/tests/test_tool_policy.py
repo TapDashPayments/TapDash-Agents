@@ -71,7 +71,7 @@ def _checks(text):
 
 def test_configure_checks_the_policy_before_and_after_the_restart():
     text = (DEPLOY / "configure_hermes.sh").read_text()
-    apply_at = text.index("tool_policy apply || die")
+    apply_at = text.index("tool_policy apply")
     restarts = [text.index('systemctl restart "user@$HERMES_UID.service"'),
                 text.index("user_systemctl restart hermes-gateway")]
     checks = _checks(text)
@@ -183,6 +183,20 @@ def test_cli_usage_errors_exit_2(tmp_path, monkeypatch, capsys):
         assert policy.main(argv) == 2, argv
     assert "Phase 2" in capsys.readouterr().err
     assert not (tmp_path / "s.json").exists()
+
+
+def test_invalid_allow_file_with_a_status_file_writes_the_reason_then_exits_2(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: (_ for _ in ()).throw(AssertionError("must not start Hermes")))
+    bad = tmp_path / "bad"
+    bad.write_text("terminal\n")
+    out = tmp_path / "status.json"
+    out.write_text('{"ok": true, "checked_at": "2099-01-01T00:00:00Z", "problems": [], "allowed": []}')
+    assert policy.main(["check", "--allow-file", str(bad), "--status-file", str(out)]) == 2
+    status = json.loads(out.read_text())
+    assert status["ok"] is False and status["allowed"] == [] and status["checked_at"].endswith("Z")
+    assert len(status["problems"]) == 1 and status["problems"][0].startswith("invalid allow file: ")
+    assert "Phase 2" in status["problems"][0]
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".status")] == []  # no temp file left
 
 
 def test_check_writes_status_file_on_failure(tmp_path, monkeypatch):
