@@ -1,8 +1,8 @@
 # QuickBooks behind the withHuman gateway (tunnel)
 
-By design the agent does not hold QuickBooks credentials (true under the v1 tool lockdown, until 2026-10-21; on
-proto-agents today it is only a convention, because the agent's terminal runs as `hermes` with passwordless sudo and
-can read `/etc/durable-park/tunnel.env`; see [architecture](architecture.md#the-three-guarantees)). A withHuman **tunnel** container
+By design the agent does not hold QuickBooks credentials (the v1 tool lockdown, re-applied 2026-10-21 03:16 UTC, enforces it as a
+configuration guard; it is not a permission boundary, because `hermes` has passwordless sudo and the file
+`/etc/durable-park/tunnel.env` is readable with it; see [architecture](architecture.md#the-three-guarantees)). A withHuman **tunnel** container
 (`wh-tunnel`) runs on the VM, makes one outbound HTTPS connection to
 `app.withhuman.ai`, and starts the Intuit QuickBooks MCP server as a child
 process. Every call goes through the withHuman approval pipeline first.

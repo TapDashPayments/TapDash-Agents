@@ -33,13 +33,20 @@ Rules:
 - Root steps (copying into `/opt`, restarting system units) should be done by an admin in their own terminal. That is
   a convention, not a block: the Hermes agent and Claude (through the Proto-Agents connector) both run as `hermes`
   with passwordless sudo, so either can do them.
-- **One agent, full toolset (since 2026-10-21).** The `hermes` install is the only agent on the VM. It has every Hermes
-  tool and Hermes's own approvals are off, so durable-park (the 12 QuickBooks money-move tool types) is the **only**
-  approval gate; terminal and file actions are not gated. **This is not a security boundary today:** the agent's terminal runs locally
-  as `hermes` (passwordless sudo), so it can read `/etc/durable-park/*` (QuickBooks secret and refresh token, withHuman
-  tunnel token), change `/opt/durable-park`, forge ledger rows and call QuickBooks directly, bypassing withHuman.
-  Accepted by Yaakov on 2026-10-20 for the exploration phase on a QuickBooks sandbox; containing the agent's tools
-  comes before real credentials ([backlog](backlog.md#before-real-books)). Why: [spec](../../docs/specs/2026-10-20-one-agent-merge-design.md). The old `ubuntu` user's
+- **One agent, v1 lockdown re-applied (since 2026-10-21 03:16 UTC).** The `hermes` install is the only agent on the VM.
+  Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
+  `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (58 platform keys; `hermes_tool_policy.py check` ok).
+  Hermes approvals stay off. The user `hermes` still has passwordless sudo until Clean Setup Phase 1
+  ([spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1); the lockdown is a configuration guard,
+  not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
+  `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
+  row" rule applies.
+  durable-park (the 12 QuickBooks money-move tool types) is an approval gate for QuickBooks only; the agent has no
+  terminal or file tools to gate. **This is not a security boundary today:** with passwordless sudo, an agent that got
+  such a tool could read `/etc/durable-park/*` (QuickBooks secret and refresh token, withHuman tunnel token), change
+  `/opt/durable-park`, forge ledger rows and call QuickBooks directly, bypassing withHuman. Accepted by Yaakov on
+  2026-10-20 for the exploration phase on a QuickBooks sandbox; containing the agent's tools comes before real
+  credentials ([backlog](backlog.md#before-real-books)). The old `ubuntu` user's
   Hermes install (gateway and dashboard units) is stopped and kept as an archive; do not start it next to this one.
 - **Restarting `hermes-gateway` also restarts the Teams bot** (and briefly drops Telegram). The dashboard is its own unit
   and keeps running. The "no `parked`, `approved` or `executing` row" rule below still applies before any restart.
@@ -103,7 +110,7 @@ PY
    | any file in `bridge/` | root, admin: copy each changed file, e.g. `sudo install -m 0644 -o root -g root /home/hermes/durable-park/bridge/app.py /opt/durable-park/bridge/app.py`, then `sudo systemctl restart durable-park-bridge` |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
-   | `deploy/` (units, policy, Hermes config) | **Not on proto-agents (decided 2026-10-20, live 2026-10-21):** `configure_hermes.sh` re-applies the v1 tool lockdown. Edit `~/.hermes/config.yaml` by hand (keep comments), then `systemctl --user restart hermes-gateway`. |
+   | `deploy/` (units, policy, Hermes config) | On proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
@@ -196,9 +203,9 @@ Example: make DocuSign `createEnvelope` need approval. Every place that has to a
    **rule 2**, so the bridge decides its replays ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
    other `mcp__wh__` tool registers. Allow the new server there.
-3. **Tool lockdown**: no step on proto-agents, since the lockdown is lifted (the agent has every tool). Only if the
-   v1 lockdown is ever re-applied: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*`; allow the
-   new prefix.
+3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify` and
+   `parked_action_execute`); allow the new prefix, then re-apply it (restarts the gateway: no parked, approved or
+   executing row).
 4. **Risky list**: the plugin parks tools matching `risky_tools` (Hermes setting
    `plugins.entries.durable-park.settings.risky_tools`, default `DEFAULT_RISKY_TOOLS` in
    `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in the default.

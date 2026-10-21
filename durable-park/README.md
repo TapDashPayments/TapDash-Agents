@@ -6,16 +6,22 @@ stopped and saved, an approver approves or denies it in [withHuman](https://with
 later - and then the exact saved call runs once, in the same chat. It survives restarts and never retries on its own.
 
 Status: **v1 accepted on 2026-10-20**, QuickBooks **sandbox** only, on the test VM `proto-agents`
-([acceptance results](docs/acceptance-2026-10-20.md)). Since 2026-10-21 (decided 2026-10-20) the proto-agents agent runs with the full
-Hermes toolset (the v1 tool lockdown was lifted, [spec](../docs/specs/2026-10-20-one-agent-merge-design.md)):
-durable-park gates QuickBooks money moves only.
+([acceptance results](docs/acceptance-2026-10-20.md)).
 
-**Known risk, accepted for now:** on proto-agents the agent's terminal and file tools run on the VM itself as a user
-with passwordless sudo, so a determined or hijacked agent can read every secret in `/etc/durable-park/` (including
-the QuickBooks credentials), forge ledger rows and call QuickBooks directly, bypassing withHuman. durable-park
-therefore gates QuickBooks money moves only when the agent does not go around it; it is not a security boundary
-yet. Yaakov accepted this on 2026-10-20 for the QuickBooks sandbox exploration phase. Containing the agent's tools
-is the first item in the [backlog](docs/backlog.md#before-real-books), before any real books.
+Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
+`clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (58 platform keys; `hermes_tool_policy.py check` ok).
+Hermes approvals stay off. The user `hermes` still has passwordless sudo until Clean Setup Phase 1
+([spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1); the lockdown is a configuration guard,
+not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
+`hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
+row" rule applies.
+
+**Known risk, accepted for now:** while the user `hermes` has passwordless sudo, the lockdown does not stop a
+determined or hijacked agent that finds a way to run code as that user: it could read every secret in
+`/etc/durable-park/` (including the QuickBooks credentials), forge ledger rows and call QuickBooks directly, bypassing
+withHuman. durable-park therefore is not a security boundary yet. Yaakov accepted this on 2026-10-20 for the QuickBooks
+sandbox exploration phase. Clean Setup Phase 1 (spec §4.1) is the first item in the [backlog](docs/backlog.md#before-real-books),
+before any real books.
 
 ## How it works
 
@@ -50,7 +56,7 @@ The open-source and third-party pieces it is built on (versions, licenses, links
 | `bridge/` | The gateway bridge service (withHuman's pipeline asks it "is this call approved?"). |
 | `receiver/` | The webhook receiver (withHuman tells it a decision was made) and one-time provisioning. |
 | `scripts/` | The 5-minute sweep (safety net and alerts), run by Hermes cron. |
-| `deploy/` | Deploy script, systemd units, the v1 tool lockdown (not applied on proto-agents: decided 2026-10-20, live 2026-10-21), the QuickBooks tunnel container. |
+| `deploy/` | Deploy script, systemd units, the v1 tool lockdown (re-applied on proto-agents 2026-10-21 03:16 UTC as a stopgap), the QuickBooks tunnel container. |
 | `tests/` | Unit tests (no network). `tests/live/` holds manual tests for the VM. |
 | `docs/` | Architecture, runbook and setup guides (below). |
 
@@ -73,7 +79,7 @@ Live checks against the sandbox run only on the VM: `DURABLE_PARK_LIVE=1 .venv/b
 | [runbook.md](docs/runbook.md) | Check health, deploy a change, act on an alert, troubleshoot, rotate secrets |
 | [form-check.md](docs/form-check.md) | Understand the check that runs before anyone is asked |
 | [gateway-setup.md](docs/gateway-setup.md) | Set up QuickBooks behind the withHuman gateway, the bridge and the pipeline rules |
-| [receiver-setup.md](docs/receiver-setup.md) | Set up the receiver, provisioning and (history) the v1 tool lockdown |
+| [receiver-setup.md](docs/receiver-setup.md) | Set up the receiver, provisioning and the v1 tool lockdown |
 | [backlog.md](docs/backlog.md) | See what is still open, and what must be done before real books |
 | [acceptance-2026-10-20.md](docs/acceptance-2026-10-20.md) | See what was tested for v1 (the record) |
 | [plans/](docs/plans/) | The original build plan (historical) |
