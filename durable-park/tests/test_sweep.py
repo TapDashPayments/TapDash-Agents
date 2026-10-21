@@ -285,6 +285,16 @@ def test_retention_error_does_not_stop_the_sweep(world, monkeypatch, capsys):
     assert "retention failed (RuntimeError)" in captured.err
 
 
+def test_orphan_cancel_error_does_not_stop_the_sweep(world, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(sweep, "_cancel_orphan_parks", boom)
+    parked = world.row("parked", request_id="req-1")
+    assert world.main(monkeypatch) == 0
+    assert parked in [p for p, _, _ in world.posted]  # the wakes still went out
+    assert "orphan cancel failed (RuntimeError)" in capsys.readouterr().err
+
+
 def test_sweep_defaults_match_the_deployment():
     args = sweep.parse_args(["--ledger", "/x/ledger.db"])
     assert args.wake_secret_file == "/etc/durable-park/wake_secret"

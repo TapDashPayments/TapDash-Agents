@@ -137,9 +137,11 @@ The approval was used but no result was recorded (gateway crash, session expired
 
 `durable-park: P-XXXXXXXX (<tool>) never got an approval request; cancelled after 10 minutes`
 
-The gateway stopped between saving the park and asking withHuman. The sweep cancelled the row (note `no approval
-request after 10 minutes (cancelled by the sweep)`); the action did not run and was never put to an approver. Ask the
-bot again (a new park and a new approval). If this repeats, check why the gateway restarts (`journalctl --user -u hermes-gateway`).
+No request id was ever attached to the row: usually the gateway stopped between saving the park and asking
+withHuman, but the request MAY exist at withHuman (the gateway stopped between withHuman answering and the row
+recording the request, or withHuman errored after creating it and the cancel failed). The sweep cancelled the row
+(note `no approval request after 10 minutes (cancelled by the sweep)`); the action did not run. A request may stay
+open in withHuman; approving it does nothing (fails closed); cancel or let it expire. Ask the bot again (a new park and a new approval). If this repeats, check why the gateway restarts (`journalctl --user -u hermes-gateway`).
 
 ### Ledger retention
 

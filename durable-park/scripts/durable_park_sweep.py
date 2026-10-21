@@ -4,7 +4,8 @@
 * a ``parked`` row with an approval request          -> post a wake (a decision may have been missed)
 * an ``approved`` row the chat was not told about    -> post a wake (the first injection failed)
 * a denied/expired/cancelled row with a request that the chat was not told about -> post a wake
-* a ``parked`` row with no approval request older than 10 minutes -> cancel it and print one alert line
+* a ``parked`` row with no request id attached older than 10 minutes -> cancel it and print one alert line
+  (a request may still be open at withHuman; approving it does nothing)
 * an ``executing`` row older than 10 minutes         -> mark ``unknown`` and print one alert line
 * ``allowed``/``refused``/``cancelled`` rows older than ``--retention-days`` (default 30) are deleted, silently
 * the gateway's form-check report (``formcheck_status.json`` next to the ledger) missing, older than
@@ -37,7 +38,7 @@ from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
 
 DEFAULT_SECRET_FILE = "/etc/durable-park/wake_secret"
 STALE_EXECUTING = timedelta(minutes=10)
-ORPHAN_PARK = timedelta(minutes=10)  # a parked row with no approval request this old will never get one
+ORPHAN_PARK = timedelta(minutes=10)  # a parked row with no request id this old will never get one attached
 DEFAULT_RETENTION_DAYS = 30
 FORMCHECK_STATUS = "formcheck_status.json"
 FORMCHECK_STATE = "formcheck_alert_state.json"
@@ -106,9 +107,12 @@ def _mark_stale_executing(ledger, now: datetime) -> None:
 
 
 def _cancel_orphan_parks(ledger, now: datetime) -> None:
-    """Cancel ``parked`` rows that never got an approval request (the gateway died before asking) so they stop
-    blocking their chat. Never reached withHuman, so nothing can be approved later. The CAS also loses
-    cleanly to a hook that attaches a request at the same moment (``set_request_id`` needs ``parked``)."""
+    """Cancel ``parked`` rows with no request id attached so they stop blocking their chat. Usually the gateway
+    died before asking, but a request MAY exist at withHuman: the gateway died between withHuman answering
+    ``Pending`` and ``set_request_id``, or a cancel of a request created before an error failed. Such a request
+    can stay open there; approving it does nothing (the row is ``cancelled``, so the bridge and the executor
+    fail closed). The CAS also loses cleanly to a hook that attaches a request at the same moment
+    (``set_request_id`` needs ``parked``)."""
     for row in ledger.list_by_status("parked"):
         if row.request_id:
             continue
@@ -258,7 +262,10 @@ def main(argv=None) -> int:
     ledger = _load_ledger_module().Ledger(args.ledger)
 
     _mark_stale_executing(ledger, datetime.now(timezone.utc))
-    _cancel_orphan_parks(ledger, datetime.now(timezone.utc))
+    try:
+        _cancel_orphan_parks(ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+        _err(f"orphan cancel failed ({type(exc).__name__})")
     try:
         _formcheck_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the self-check alert must never stop the sweep
