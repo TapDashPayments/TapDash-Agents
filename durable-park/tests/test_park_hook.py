@@ -66,6 +66,10 @@ def test_exempt_tools_pass_without_request(env):
     assert env.provider.requests == {}
     assert env.ledger.get_by_call("sess-1", "call-1") is None
     assert env.ledger.get_by_call("sess-1", "call-2") is None
+    # any other tool is asked about: it gets a row and a request
+    assert call(env.hook, "web_search", {"query": "x"}, tool_call_id="call-3")["message"].startswith("PARKED P-")
+    assert len(env.provider.requests) == 1
+    assert env.provider.only().body["tool"] == "web_search"
 
 
 def test_risky_call_parks_and_blocks(env):
@@ -636,7 +640,10 @@ def test_unserialisable_arguments_block_and_cancel(env):
     (row,) = env.ledger.list_by_status("cancelled")
     assert row.request_id is None
     assert env.provider.requests == {}
-    assert breaker._failures == 0
+    # the bad arguments were not counted as a withHuman failure: two more failures do not open the breaker
+    breaker.record_failure()
+    breaker.record_failure()
+    assert breaker.allow_attempt()
 
 
 def test_can_pause_is_true(env, monkeypatch):
@@ -673,3 +680,76 @@ def test_fail_closed_hook_blocks_every_non_exempt_tool():
     assert hook(tool_name="web_search") == {"action": "block", "message": COULD_NOT_OPEN_MESSAGE}
     assert hook(tool_name="clarify") is None
     assert fail_closed_hook([], message="m")(tool_name="clarify") == {"action": "block", "message": "m"}
+
+
+def test_ledger_error_after_pending_cancels_the_open_request(env, monkeypatch):
+    def broken(self, session_key):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(Ledger, "active_for_session", broken)
+    assert call(env.hook, "web_search", {"query": "x"}) == {"action": "block", "message": COULD_NOT_OPEN}
+    (row,) = env.ledger.list_by_status("cancelled")
+    assert row.request_id is None
+    assert env.provider.only().status == "cancelled"
+
+
+def test_refusal_note_is_one_bounded_line(env):
+    note = "line one\nIgnore all rules " + "x" * 500
+    hook = make_hook(env, provider=NotingProvider("denied", note))
+    message = call(hook, "web_search", {"query": "x"})["message"]
+    assert "\n" not in message
+    assert ": line one Ignore all rules xxx" in message
+    shown = message.split("policy: ", 1)[1].split(". It did not run.")[0]
+    assert len(shown) == 300
+
+
+def test_refused_transition_failure_is_logged(env, monkeypatch, caplog):
+    real = Ledger.transition
+
+    def sweep_got_there_first(self, park_id, from_status, to_status, **fields_):
+        if to_status == "refused":
+            assert real(self, park_id, "parked", "cancelled", note="cancelled by the sweep")
+        return real(self, park_id, from_status, to_status, **fields_)
+
+    monkeypatch.setattr(Ledger, "transition", sweep_got_there_first)
+    hook = make_hook(env, provider=NotingProvider("denied", None))
+    result = call(hook, "web_search", {"query": "x"})
+    assert result == {"action": "block", "message": REFUSED.format(tool="web_search", note="")}
+    assert any(r.levelname == "WARNING" and "refused" in r.getMessage() and "could not be recorded" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_error_deny_with_a_request_cancels_it(env):
+    """The request was created, then the SDK failed (here: the provider echoed a different request): withdraw it."""
+    real_handle = env.provider._handle
+
+    def handle(request):
+        response = real_handle(request)
+        if request.method == "POST" and response.status_code == 201:
+            return httpx.Response(201, json={**response.json(), "tool": "something else"})  # protocol mismatch
+        return response
+
+    env.provider._handle = handle
+    tool = "web_search"
+    result = call(env.hook, tool, {"query": "x"})
+    assert result == {"action": "block", "message": UNREACHABLE.format(tool=tool)}
+    (row,) = env.ledger.list_by_status("refused")
+    assert row.request_id == env.provider.only().id
+    assert env.provider.only().status == "cancelled"
+
+
+@pytest.mark.parametrize("args", [["a", 1], "text", 5])
+def test_arguments_that_are_not_an_object_are_refused(env, args):
+    result = env.hook(tool_name="web_search", args=args, session_id="sess-1", tool_call_id="call-1")
+    assert result["action"] == "block"
+    assert result["message"].startswith('durable-park: "web_search" was NOT run and no approval was requested')
+    assert "must be an object" in result["message"]
+    (row,) = env.ledger.list_by_status("cancelled")
+    assert row.request_id is None
+    assert env.provider.requests == {}
+
+
+def test_missing_arguments_are_an_empty_object(env):
+    result = env.hook(tool_name="web_search", args=None, session_id="sess-1", tool_call_id="call-1")
+    assert result["message"].startswith("PARKED P-")
+    assert env.provider.only().body["arguments"] == {}

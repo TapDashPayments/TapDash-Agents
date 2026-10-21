@@ -1,6 +1,7 @@
-"""SQLite ledger of parked tool calls.
+"""SQLite ledger of the tool calls durable-park asked withHuman about.
 
-One row per risky tool call that was held for a human decision. All state
+One row per tool call that was asked about (exempt tools get none): decided at once (``allowed``/``refused``),
+or held for a human decision (``parked`` and on). All state
 changes go through ``Ledger.transition`` (a compare-and-swap on ``status``)
 so concurrent hooks, the sweep and the gateway bridge cannot race a row
 into two states.

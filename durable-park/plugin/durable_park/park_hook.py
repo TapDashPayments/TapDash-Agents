@@ -18,6 +18,7 @@ from .breaker import Breaker
 from .formcheck import FormChecker, FormCheckUnavailable
 from .gatecall import build_call, server_label
 from .ledger import Ledger, args_digest, call_key
+from .wake import one_line
 
 log = logging.getLogger("durable_park")
 
@@ -90,7 +91,16 @@ _NOTE_MARKER = "Their note: "
 
 
 def _reviewer_note(reason: str) -> str:
-    return reason.split(_NOTE_MARKER, 1)[1] if _NOTE_MARKER in reason else ""
+    """The reviewer's note, flattened to one bounded line (the same treatment the wake gives notes)."""
+    return one_line(reason.split(_NOTE_MARKER, 1)[1]) if _NOTE_MARKER in reason else ""
+
+
+def _cancel_request(gate: Any, request_id: str, park_id: str) -> None:
+    """Withdraw a request at withHuman so nobody approves a call that will never run. Never raises."""
+    try:
+        gate.client.cancel(request_id)
+    except Exception as exc:  # noqa: BLE001 - the call is blocked either way
+        log.error("could not cancel request for %s (%s)", park_id, type(exc).__name__)
 
 
 def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_checked: list[re.Pattern], *,
@@ -115,7 +125,9 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
         if tool in exempt_names:
             return None
         park_id: str | None = None
-        request_opened = False
+        request_opened = False  # the request id is attached to the row (the row now owns the request)
+        gate: Any = None
+        pending_rid: str | None = None  # a request withHuman holds open for a person, not attached yet
         try:
             # Step 2: a foreign hook could change the arguments after approval: refuse everything.
             foreign = list(foreign_hooks_fn()) if foreign_hooks_fn is not None else []
@@ -132,13 +144,13 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
             tool_call_id = str(kw.get("tool_call_id") or "")
             if not session_id or not tool_call_id:
                 return _block(NO_CALL_ID_MESSAGE)
-            args = kw.get("args")
-            args = args if isinstance(args, dict) else {}
+            raw_args = kw.get("args")
+            args = {} if raw_args is None else raw_args
 
             # Step 4: never ask about a call the server would reject: check the form first (form-checked
             # tools only). A replay of a call that is already recorded passed this check then and is not
             # checked again, so a later rules hiccup can never say "no approval was requested" for it.
-            if is_form_checked(tool) and ledger.get_by_call(session_id, tool_call_id) is None:
+            if is_form_checked(tool) and isinstance(args, dict) and ledger.get_by_call(session_id, tool_call_id) is None:
                 try:
                     problem = checker.check(tool, args)
                 except FormCheckUnavailable as exc:
@@ -164,6 +176,12 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 return _block(NOT_PARKED_MESSAGE.format(park_id=row.park_id, status=row.status))
             if row.request_id:
                 return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool))
+            if not isinstance(args, dict):
+                # Asking about a stand-in ({}) while the real value would run is not allowed: refuse it.
+                log.info("refused %s tool=%s: arguments are not an object", row.park_id, tool)
+                ledger.transition(row.park_id, "parked", "cancelled", note="arguments are not an object")
+                park_id = None
+                return _block(INVALID_ARGS_MESSAGE.format(tool=tool, problem="arguments must be an object"))
 
             # Step 6: withHuman is known to be down: refuse at once, without a request.
             if breaker is not None and not breaker.allow_attempt():
@@ -198,8 +216,13 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                         breaker.record_failure()
                     else:
                         breaker.record_success()
-                ledger.transition(row.park_id, "parked", "refused", request_id=verdict.request_id,
-                                  note=f"withHuman {verdict.status}: {verdict.reason}")
+                if unreachable and verdict.request_id:
+                    # The request exists but the SDK could not finish: withdraw it so it does not wait for a person.
+                    _cancel_request(gate, verdict.request_id, row.park_id)
+                if not ledger.transition(row.park_id, "parked", "refused", request_id=verdict.request_id,
+                                         note=f"withHuman {verdict.status}: {verdict.reason}"):
+                    log.warning("refused %s could not be recorded (the row left parked); the call was not run",
+                                row.park_id)
                 park_id = None
                 log.info("refused %s tool=%s (withHuman %s)", row.park_id, tool, verdict.status)
                 if unreachable:
@@ -214,15 +237,13 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
             # past a decision (a parked row counts only once its request is attached, D11) wins.
             if breaker is not None:
                 breaker.record_success()
-            rid = verdict.request_id
+            rid = pending_rid = verdict.request_id
             busy = next((other for other in ledger.active_for_session(session_key)
                          if other.park_id != row.park_id
                          and (other.status in ("approved", "executing") or other.request_id)), None)
             if busy is not None:
-                try:
-                    gate.client.cancel(rid)
-                except Exception as exc:  # noqa: BLE001 - the call is blocked either way
-                    log.error("could not cancel request for %s (%s)", row.park_id, type(exc).__name__)
+                _cancel_request(gate, rid, row.park_id)
+                pending_rid = None
                 ledger.transition(row.park_id, "parked", "cancelled",
                                   note=f"already waiting for {busy.park_id}; request {rid} cancelled")
                 park_id = None
@@ -231,17 +252,19 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 # The row left `parked` (the sweep cancelled it) while the request was being opened:
                 # withdraw the request so nobody is asked to approve a call that will never run.
                 log.warning("approval request for %s could not be attached; cancelling it", row.park_id)
-                try:
-                    gate.client.cancel(rid)
-                except Exception as exc:  # noqa: BLE001 - the call is blocked either way
-                    log.error("could not cancel orphan request for %s (%s)", row.park_id, type(exc).__name__)
+                _cancel_request(gate, rid, row.park_id)
+                pending_rid = None
                 park_id = None
                 return _block(COULD_NOT_OPEN_MESSAGE)
             request_opened = True
+            pending_rid = None
             log.info("parked %s tool=%s", row.park_id, tool)
             return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool))
         except Exception as exc:  # noqa: BLE001 - step 11: a bug must never let a call through
             log.error("park hook failed for tool=%s: %s", tool, type(exc).__name__)
+            if pending_rid is not None and gate is not None:
+                # withHuman holds a request the row never got: withdraw it, nobody may approve a call that won't run.
+                _cancel_request(gate, pending_rid, park_id or "?")
             if park_id is not None and not request_opened:
                 try:
                     ledger.transition(park_id, "parked", "cancelled", note=f"park hook error: {type(exc).__name__}")

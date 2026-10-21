@@ -132,7 +132,7 @@ flowchart LR
 |---|---|---|
 | park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`): checks the form (form-checked tools only), saves the call, and asks withHuman once. An instant approval lets the tool run (row `allowed`); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
-| ledger | `plugin/durable_park/ledger.py` | SQLite record of every parked call and its state. The single source of truth. |
+| ledger | `plugin/durable_park/ledger.py` | SQLite record of every tool call that was asked about and its state. The single source of truth. |
 | wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. |
 | executor | `plugin/durable_park/executor.py` | The `parked_action_execute` tool. Consumes the approval and replays the saved call exactly once. |
 | approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key), and one shared gate that is rebuilt when the token file changes. |
@@ -234,7 +234,7 @@ stateDiagram-v2
   parked --> approved: wake - approved in withHuman
   parked --> denied: wake - denied
   parked --> expired: wake - no decision in 168 h
-  parked --> cancelled: wake - cancelled, chat already waiting, or hook error
+  parked --> cancelled: wake - cancelled, chat already waiting, args not an object,<br/>request not attached, hook error, or sweep (no request after 10 min)
   parked --> allowed: withHuman approved at once, tool runs
   parked --> refused: withHuman refused at once, or unreachable
   approved --> executing: executor claims it
@@ -292,7 +292,9 @@ flowchart TD
   seen -->|"another call with this id"| reused["Block: id reused"]
   seen -->|"already decided"| again["Block: already allowed, refused,<br/>denied ...; not run again"]
   seen -->|"parked with a request"| repeat["Block: PARKED (repeat)"]
-  seen -->|"parked, no request yet"| breaker{"Breaker open?"}
+  seen -->|"parked, no request yet"| obj{"Arguments an object?"}
+  obj -->|"no"| bobj["Row cancelled<br/>Block: arguments must be an object"]
+  obj -->|"yes"| breaker{"Breaker open?"}
   breaker -->|"yes"| down["Row refused<br/>Block: withHuman unreachable"]
   breaker -->|"no"| ask["Ask withHuman once<br/>AAP check, can pause"]
   ask -->|"Allow, consumed"| runs["Row allowed<br/>tool runs"]
@@ -306,10 +308,14 @@ flowchart TD
 - **Allow** means the SDK already consumed the approval. If the row cannot move to `allowed` (the sweep cancelled
   it meanwhile), the call is blocked and the spent approval is not used again.
 - **Deny** with status `error` (withHuman unreachable, credential refused, bad answer) counts as a breaker failure;
-  every other Deny (denied, expired, cancelled, consumed) is an answer and resets the breaker. A reviewer's note is
-  passed to the model in the refusal.
+  if a request was already created it is cancelled, so it never waits for a person. Every other Deny (denied,
+  expired, cancelled, consumed) is an answer and resets the breaker. A reviewer's note is passed to the model in the
+  refusal, as one line of at most 300 characters.
 - **Any error** in the hook (token file unreadable, arguments that are not strict JSON, a ledger error) blocks the
-  call with "could not open an approval request"; the row is cancelled when no request was attached to it.
+  call with "could not open an approval request"; the row is cancelled when no request was attached to it, and a
+  request withHuman opened for a person but the row never got is cancelled too.
+- **Arguments that are not an object** (a list, a string, a number) are refused before withHuman is asked: the
+  request would show a stand-in while the real value ran.
 - If the ledger cannot be opened at start, a fail-closed hook blocks every tool call except the exempt ones.
 
 The background self-check (every 30 minutes, inside the gateway) proves the checker, the registry and every

@@ -53,8 +53,10 @@ def is_wake_event(event: Any) -> bool:
     return getattr(platform, "value", platform) == "webhook"
 
 
-def _one_line(note: str | None) -> str:
+def one_line(note: str | None) -> str:
+    """A reviewer note as one line of at most ``MAX_NOTE_CHARS`` (also used by the park hook's refusal)."""
     return " ".join((note or "").split())[:MAX_NOTE_CHARS]
+
 
 
 def inject_text(row: ParkRow) -> str | None:
@@ -62,7 +64,7 @@ def inject_text(row: ParkRow) -> str | None:
     if row.status == "approved":
         return APPROVED_TEXT.format(park_id=row.park_id, tool=row.tool)
     if row.status in ("denied", "cancelled"):
-        note = _one_line(row.note)
+        note = one_line(row.note)
         return DENIED_TEXT.format(park_id=row.park_id, tool=row.tool, status=row.status.upper(),
                                   note=f": {note}" if note else "")
     if row.status == "expired":
