@@ -28,6 +28,10 @@ safety items needs finishing: [what is left](durable-park/docs/backlog.md#before
 **Admins start here:** [runbook](durable-park/docs/runbook.md) (health check, deploy, alerts, troubleshooting,
 secrets, rollback) and [architecture](durable-park/docs/architecture.md) (what runs where).
 
+**Agent dashboard:** <http://proto-agents.taila95862.ts.net:9119/> (web UI of the Hermes agent on `proto-agents`). Reachable only
+from a device signed in to our Tailscale network (not on the public internet); asks for a login. Details in the
+[runbook](durable-park/docs/runbook.md#access-and-ground-rules).
+
 ## Built on
 
 durable-park is a thin layer of our own code between open-source and third-party pieces. Versions are the ones
