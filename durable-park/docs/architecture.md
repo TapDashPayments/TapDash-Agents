@@ -169,18 +169,25 @@ The foreign-hook guard reads Hermes's hook registry (`ctx._manager.iter_hook_cal
 Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) on every call; durable-park's own callbacks are recognised by
 object identity. The dependency is listed in `compat.py`, so a Hermes upgrade warns to re-verify it.
 
-**The withHuman entry pipeline** (configured in the withHuman app, not in this repo; as of October 2026,
-revision 8):
+**The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
+configured in the withHuman app; as of October 2026, rev N (to be saved; see Task 13)). Every rule for agent
+`proto-agents` also requires that agent; blocks run in order and the first to decide ends the pipeline.
 
-| Order | When | Then |
-|---|---|---|
-| 1 | Agent `proto-agents` and (server starts with `park:` or tool starts with `mcp__wh__`) - a park request | Ask an approver |
-| 2 | Server `quickbooks` and the tool is one of the 12 money types (create/update/delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Webhook block `durable-park-bridge`: answers approve or human (human asks an approver) |
-| 3 | Everything else (reads and other writes) | Approve |
+| Order | Block | When | Then |
+|---|---|---|---|
+| 1 | `pa-park-money` | server `park:quickbooks` and the tool is one of the 12 money types (create/update/delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Ask an approver |
+| 2 | `block-06ebcdd6` | server `quickbooks` and a money tool (the gateway replay) | Webhook block `durable-park-bridge`: approves only a call matching an approved park, otherwise asks an approver |
+| 3 | `pa-gateway-other` | server `quickbooks`, not a money move | Approve (already asked as `park:quickbooks`) |
+| 4 | `pa-park-quickbooks-other` | server `park:quickbooks`, not a money move | Approve (the gateway decides the real call again) |
+| 5 | `pa-hermes-read` | server `hermes` and a read-only tool (web_search, web_extract, vision_analyze, memory, session_search, todo_list, kanban_list, kanban_show, kanban_attachments, skills_list, skill_view, image_generate) | Approve |
+| 6 | `pa-hermes-local-deny` | server `hermes` and a local machine tool (terminal, execute_code, process_manage, process, write_file, patch, read_file, search_files, delegate_task, cronjob_manage, cronjob, skill_manage) | Deny |
+| 7 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
+| 8 | `pa-default-human` | any other `proto-agents` call (including a missing server) | Ask an approver |
+| 9 | `hermes` | other agents: tool name contains `Stripe` | Ask an approver |
+| 10 | `approve-every-call` | everything else | Approve |
 
-Since the park hook asks about every tool call, revision 8 sends every `park:` request to an approver (QuickBooks
-reads included, rule 1) and approves every `hermes` and `mcp:` request at once (rule 3). Activate the revision
-written for asking about every call before this park hook goes live.
+Rev 8 and the earlier approve-all behaviour end when the revision above is activated; activate it before this park
+hook goes live. A tool name missing from rules 5 and 6 falls through to rule 8, so a person decides.
 
 **Who approves:** the people on the approvers' escalation path in withHuman (today `notify-yaakov-yehuda`, one
 approver). Adding or changing approvers is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park

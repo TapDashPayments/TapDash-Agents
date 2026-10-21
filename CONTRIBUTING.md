@@ -52,6 +52,8 @@ See the rules: `python3 tools/docs_check/check_docs.py --explain`.
 **Adding a file?** Add it to a rule in `docs-map.json` (or to `exempt` if it is a test or a doc). CI fails until
 you do. Example: `durable-park/plugin/durable_park/breaker.py` (the withHuman circuit breaker) is mapped to
 `architecture.md` in the "Plugin wiring, wake, executor, approval calls" rule.
+The withHuman entry pipeline kept as a reviewed file (`durable-park/deploy/withhuman/entry-pipeline.json`) is mapped to
+`architecture.md`: change the file, change the pipeline table there in the same commit.
 
 **Really no doc change needed** (no change in behaviour or interface: a typo, a comment, a local rename)? Add a
 trailer line to a commit message with the reason:

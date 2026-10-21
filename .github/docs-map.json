@@ -81,6 +81,11 @@
       ]
     },
     {
+      "name": "withHuman entry pipeline file",
+      "code": ["durable-park/deploy/withhuman/*.json"],
+      "docs": ["durable-park/docs/architecture.md"]
+    },
+    {
       "name": "QuickBooks tunnel",
       "code": ["durable-park/deploy/tunnel/**"],
       "docs": ["durable-park/docs/gateway-setup.md"]
