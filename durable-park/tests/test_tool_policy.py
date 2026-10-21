@@ -344,7 +344,9 @@ CATALOG = ["clarify", "mcp__wh__quickbooks__get_company_info", "parked_action_ex
 BRIDGE = ["tool_call", "tool_describe", "tool_search"]
 
 
-def test_the_bridge_names_match_the_plugin_constants_and_hermes():
+def test_the_bridge_names_match_the_plugin_constants():
+    # Both sides are local constants: they are pinned to the names Hermes really synthesizes by
+    # tests/test_hermes_integration.py (skipped where Hermes is not importable).
     assert policy.BRIDGE_TOOL_NAMES == frozenset({"tool_search", "tool_describe", "tool_call"})
     assert policy.BRIDGE_TOOL_NAMES == frozenset(park_hook.BRIDGE_TOOLS)
     for name in policy.BRIDGE_TOOL_NAMES:  # strict by default: nothing is allowed by name, bridge or not

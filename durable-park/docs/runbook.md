@@ -36,14 +36,15 @@ Rules:
   Proto-Agents connector (which runs as `hermes` with passwordless sudo), do root steps.
 - **One agent, v1 lockdown re-applied (since 2026-10-21 03:16 UTC).** The `hermes` install is the only agent on the VM.
   Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
-  `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (58 platform keys; `hermes_tool_policy.py check` ok).
+  `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (on every platform key; `hermes_tool_policy.py check` prints the key count and ends `ok`).
   Hermes approvals stay off. The user `hermes` still has passwordless sudo until Clean Setup Phase 1
   ([spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1); the lockdown is a configuration guard,
   not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
   row" rule applies.
-  durable-park asks withHuman about every tool call except `parked_action_execute` and `clarify` (withHuman's
-  pipeline decides which need a person); today that means the QuickBooks tools, since the agent has no terminal or
+  durable-park asks withHuman about every tool call except the exempt tools (`parked_action_execute`, `clarify`,
+  `tool_search`, `tool_describe`); withHuman's
+  pipeline decides which need a person; today that means the QuickBooks tools, since the agent has no terminal or
   file tools. **This is not a security boundary today:** with passwordless sudo, an agent that got
   such a tool could read `/etc/durable-park/*` (QuickBooks secret and refresh token, withHuman tunnel token), change
   `/opt/durable-park`, forge ledger rows and call QuickBooks directly, bypassing withHuman. Accepted by Yaakov on
@@ -198,7 +199,7 @@ Applies while the v1 tool lockdown is applied (it is on proto-agents). Before ev
 `deploy/tool_policy_check.sh` (`ExecStartPre=-`, so a failure never stops the gateway). It runs `hermes_tool_policy.py
 check --status-file` and writes `plugin-data/durable-park/tool_policy_status.json` next to the ledger
 (`ok`, `checked_at`, `problems`, `allowed`). The plugin reads it at load: a missing report, `ok: false`, or a report
-older than 15 minutes makes it refuse every tool call except `parked_action_execute` and `clarify` (the log says
+older than 15 minutes makes it refuse every tool call except the exempt tools (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`) (the log says
 `durable-park tool policy check failed (<reason>)` at ERROR, which lands in `~/.hermes/logs/errors.log`); wakes are dropped and `parked_action_execute` answers
 "refused" without touching the row, so an approved park stays approved. Telegram, Teams and the sweep keep running.
 The sweep alerts once when the report is missing or failed, and once (`durable-park: the tool policy check passes
@@ -383,7 +384,7 @@ plugins:
 
 - `exempt_tools`, `form_checked_tools` and `observer_hooks` must be lists of strings. A wrong type (a number,
   `true`, a mapping, an empty `observer_hooks:` that YAML reads as null) makes durable-park refuse every call
-  except `parked_action_execute` and `clarify`; the log says `durable-park setting <name> must be a list of
+  except the exempt tools (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`); the log says `durable-park setting <name> must be a list of
   strings`. Fix it and restart.
 - `exempt_tools`: anything listed here runs with no approval and no ledger row. Keep it to
   `parked_action_execute`, `clarify` and Tool Search's two read-only catalog tools (`tool_search`, `tool_describe`).
@@ -476,8 +477,8 @@ that has to agree:
    replays ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
    other `mcp__wh__` tool registers. Allow the new server there.
-3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify` and
-   `parked_action_execute`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
+3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify`,
+   `parked_action_execute` and, once Tool Search is on, the three bridge tools `tool_search`, `tool_describe`, `tool_call`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
    list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
 4. **Form-checked list**: the plugin form-checks tools matching the form-checked patterns (setting
    `plugins.entries.durable-park.settings.form_checked_tools`, see [Plugin settings](#plugin-settings); default
@@ -487,6 +488,28 @@ that has to agree:
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
 
 The form check needs nothing: it reads each tool's rules from Hermes automatically.
+
+## Check durable-park against the real Hermes
+
+CI has no Hermes, so `tests/test_hermes_integration.py` is skipped there. It runs the real Hermes functions that decide
+what the park hook receives for a Tool Search `tool_call` (`agent.tool_executor._parse_tool_call`) and the real bridge
+tool names, and pins the unit tests' copies of both to them. Run it on the VM after a Hermes upgrade and before
+turning Tool Search on. It needs no gateway restart and no config change: `HERMES_HOME` is an empty scratch directory
+and Hermes code is only imported. The Hermes venv has no pytest, so borrow the pure-Python pytest packages from the
+durable-park venv (from a worktree, never the live clone's tree):
+
+```sh
+cd ~/tapdash-agents-wt/<worktree>/durable-park
+PY=$(python3 -I -c 'import glob,json,os; f=glob.glob(os.path.expanduser("~/.hermes/installs/*/facts.json"))[0]; print(json.load(open(f))["packages"]["venv"]["environment"]+"/bin/python")')
+SP=$(ls -d ~/tapdash-agents/durable-park/.venv/lib/python3*/site-packages); T=$HOME/scratch-pytest
+mkdir -p $T/libs && for m in _pytest pytest pluggy iniconfig pygments py.py; do ln -sfn $SP/$m $T/libs/$m; done
+PYTHONPATH=$HOME/.hermes/hermes-agent:$T/libs PATH=$HOME/stubbin:$PATH \
+  $PY -m pytest -q -W error -p no:cacheprovider --basetemp=$T/base tests/test_hermes_integration.py
+```
+
+It must pass with no skips (a skip means Hermes was not importable). A failure after an upgrade means Hermes changed
+what the hook receives: read [section 4b](architecture.md#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)
+and fix the plugin before turning Tool Search on. Without Hermes on the path the module skips, which is what CI sees.
 
 ## Turn on Tool Search
 
@@ -509,7 +532,8 @@ off with `hermes config set tools.tool_search.enabled off`.
 
 **Before:**
 
-1. The code of this change is live (a merged branch, [deploy a change](#deploy-a-change)), so the plugin exempts the
+1. [`tests/test_hermes_integration.py` passes against the real Hermes](#check-durable-park-against-the-real-hermes).
+   The code of this change is live (a merged branch, [deploy a change](#deploy-a-change)), so the plugin exempts the
    two catalog tools and refuses a `tool_call` wrapper and the policy check knows the bridge. With older code the
    check fails (`LEAK tool_call`...) and every call is refused: safe, but nothing works until the code is live.
 2. No ledger row is `parked`, `approved` or `executing` (the query under [Open a toolset](#open-a-toolset), step 1; a

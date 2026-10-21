@@ -30,7 +30,7 @@ terminal tools** (the v1 tool lockdown, `deploy/hermes_tool_policy.py`); that ho
 agent that goes looking for a way round it, but it is a configuration guard, not a permission boundary.
 
 Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
-`clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (58 platform keys; `hermes_tool_policy.py check` ok).
+`clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (on every platform key; `hermes_tool_policy.py check` prints the key count and ends `ok`).
 Hermes approvals stay off. The user `hermes` still has passwordless sudo until Clean Setup Phase 1
 ([spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1); the lockdown is a configuration guard,
 not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
@@ -165,7 +165,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 `exempt_tools`, `form_checked_tools` and `observer_hooks` must each be a list of strings (a lone string counts as a
 one-item list). Any other type (a number, `true`, a mapping, an empty `key:` that YAML reads as null, a list with a
 non-string) is logged (`durable-park setting <name> must be a list of strings`) and durable-park refuses every call
-except `parked_action_execute` and `clarify`, as it does for any other error while loading: `register` never raises,
+except the exempt tools (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`), as it does for any other error while loading: `register` never raises,
 because Hermes would then drop all of durable-park's hooks and run every tool unchecked
 (`hermes_cli/plugins_loader.py:525-537`).
 
@@ -485,7 +485,7 @@ and re-run against the real code on the VM (2026-10-21):
 | Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
 | The plugin did not load at all (import error, missing dependency or `_vendor`, overran `plugins.load_timeout_seconds`, or disabled in `config.yaml`): Hermes drops every registration and runs with no `pre_tool_call` hook | `plugin_load_check.sh` (`ExecStartPost`) finds no `plugin_load.json` for the gateway's pid within the timeout and fails, so systemd stops the gateway; after 3 starts in 10 minutes it stays stopped. If the gateway is somehow running anyway, the sweep alerts once. | Fix the plugin ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)) |
 | Ledger cannot be opened at start | Every tool call except the exempt ones is blocked; wakes are dropped; no executor tool. | Fix the ledger file |
-| A plugin setting has the wrong type, or loading fails after the ledger opened | Every tool call except `parked_action_execute` and `clarify` is blocked; wakes are dropped. | Fix the setting ([runbook](runbook.md#plugin-settings)), restart the gateway |
+| A plugin setting has the wrong type, or loading fails after the ledger opened | Every tool call except the exempt tools (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`) is blocked; wakes are dropped. | Fix the setting ([runbook](runbook.md#plugin-settings)), restart the gateway |
 | Another park is still waiting in the chat | A new call that withHuman sends to a person is blocked: "already waiting", and its request is cancelled. Calls withHuman answers at once still run or are refused. A park can wait up to 168 h. | Decide the waiting one |
 
 Known gaps (see the [backlog](backlog.md)): an inject Hermes accepted but
@@ -516,7 +516,7 @@ replay store is not tied to the withHuman request id.
   `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`.
 - Since 2026-10-21 03:16 UTC the v1 lockdown is applied (`deploy/hermes_tool_policy.py`: tools limited to
   `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`, plus Hermes's three Tool Search bridge tools once an admin turns
-  tool search on ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); 58 platform keys, `check` ok) and Hermes's own
+  tool search on ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); on every platform key, `check` ok) and Hermes's own
   approvals are off (`approvals.mode: off`). `gateway.strict: true` and `gateway.trust_recent_files: false` are set;
   with passwordless sudo they do not protect the ledger. Re-running `deploy/configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies this state and restarts the gateway, so the "no parked/approved/executing row"

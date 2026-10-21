@@ -37,12 +37,16 @@ BRIDGE_NAMES = {"tool_search", "tool_describe", "tool_call"}
 
 def hermes_unwrap(name, args):
     """What Hermes hands the hook for a model tool call (tool_executor.py:399-441, tool_search.py:578-613,
-    tool_search_validation.py:139-170), for the cases that matter here. Checked against the real code on the
-    VM: a single valid entry unwraps; a batch of two, ``{"calls": "nope"}``, a core tool and a connector name
-    keep the wrapper."""
+    tool_search_validation.py:139-170), for the cases that matter here. Pinned to the real
+    ``agent.tool_executor._parse_tool_call`` by tests/test_hermes_integration.py (runs where Hermes is importable):
+    a single valid entry (``calls`` as a list, one object or a JSON string; ``arguments`` as an object or a JSON
+    string; or the legacy ``{"name", "arguments"}`` shape) unwraps; a batch of two, ``{"calls": "nope"}``, a core tool,
+    a connector name and a nested ``tool_call`` keep the wrapper."""
     if name != "tool_call":
         return name, args
     calls = args.get("calls")
+    if calls is None and str(args.get("name") or "").strip():  # the legacy single shape
+        calls = [{"name": args.get("name"), "arguments": args.get("arguments")}]
     if isinstance(calls, str):
         try:
             calls = json.loads(calls)
@@ -193,6 +197,12 @@ def test_wrapped_non_risky_call_is_decided_like_any_other_call(env, auto, parked
         assert result["message"].startswith("PARKED P-") and row.status == "parked"
     else:
         assert result is None and row.status == "allowed"
+
+
+def test_the_legacy_single_shape_is_judged_like_the_batch_shape(env):
+    result = as_hermes(build(env), "tool_call", {"name": PAYMENT, "arguments": {"amount": 5}})
+    (row,) = env.ledger.list_by_status("parked")
+    assert result["action"] == "block" and row.tool == PAYMENT and row.args_digest == args_digest({"amount": 5})
 
 
 def test_the_parked_executor_is_exempt_when_reached_through_the_bridge(env):
