@@ -870,7 +870,31 @@ def test_instant_deny_records_refused_with_note(env):
     (row,) = env.ledger.list_by_status("refused")
     stored = provider.only()
     assert row.request_id == stored.id and stored.consumed_at is None
-    assert row.note.startswith("withHuman denied: ") and row.note.endswith("Their note: too big")
+    assert row.note == "withHuman denied: refused by withHuman policy: too big"
+
+
+def test_instant_deny_ledger_note_names_policy_not_a_reviewer(env):
+    provider = NotingProvider("denied", "over limit")
+    hook = make_hook(env, provider=provider)
+    call(hook, "mcp__wh__quickbooks__create_payment")
+    (row,) = env.ledger.list_by_status("refused")
+    assert row.note == "withHuman denied: refused by withHuman policy: over limit"
+    assert "reviewer" not in row.note.lower()
+
+
+def test_instant_deny_without_note_ledger_says_policy(env):
+    hook = make_hook(env, provider=NotingProvider("denied", None))
+    call(hook, "web_search", {"query": "x"})
+    (row,) = env.ledger.list_by_status("refused")
+    assert row.note == "withHuman denied: refused by withHuman policy"
+
+
+def test_instant_deny_note_is_one_line_and_capped(env):
+    hook = make_hook(env, provider=NotingProvider("denied", "a\nb " + "x" * 500))
+    result = call(hook, "web_search", {"query": "x"})
+    assert "\n" not in result["message"]
+    (row,) = env.ledger.list_by_status("refused")
+    assert "\n" not in row.note and len(row.note) < 400
 
 
 def test_instant_deny_without_note_has_no_note(env):

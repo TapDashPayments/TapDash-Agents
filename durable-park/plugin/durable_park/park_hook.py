@@ -94,6 +94,13 @@ def _reviewer_note(reason: str) -> str:
     return one_line(reason.split(_NOTE_MARKER, 1)[1]) if _NOTE_MARKER in reason else ""
 
 
+def _policy_note(note: str) -> str:
+    """Who decided an instant refusal. withHuman answered while the request was being created, so no person had
+    time to look at it: a pipeline rule decided. The AAP wire exposes no decider or channel (``decision`` holds only
+    ``status``, ``note``, ``decided_at``, ``expires_at``), so the text says "policy" and passes the note on."""
+    return "refused by withHuman policy" + (f": {note}" if note else "")
+
+
 def _cancel_request(gate: Any, request_id: str, park_id: str) -> None:
     """Withdraw a request at withHuman so nobody approves a call that will never run. Never raises."""
     try:
@@ -218,15 +225,19 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 if unreachable and verdict.request_id:
                     # The request exists but the SDK could not finish: withdraw it so it does not wait for a person.
                     _cancel_request(gate, verdict.request_id, row.park_id)
+                note = _reviewer_note(verdict.reason)
+                if verdict.status == "denied":  # the SDK's generic "A reviewer ... denied" would be false here
+                    ledger_note = f"withHuman denied: {_policy_note(note)}"
+                else:
+                    ledger_note = f"withHuman {verdict.status}: {verdict.reason}"
                 if not ledger.transition(row.park_id, "parked", "refused", request_id=verdict.request_id,
-                                         note=f"withHuman {verdict.status}: {verdict.reason}"):
+                                         note=ledger_note):
                     log.warning("refused %s could not be recorded (the row left parked); the call was not run",
                                 row.park_id)
                 park_id = None
                 log.info("refused %s tool=%s (withHuman %s)", row.park_id, tool, verdict.status)
                 if unreachable:
                     return _block(UNREACHABLE_MESSAGE.format(tool=tool))
-                note = _reviewer_note(verdict.reason)
                 return _block(REFUSED_MESSAGE.format(tool=tool, note=f": {note}" if note else ""))
 
             if not isinstance(verdict, Pending):  # not a verdict the SDK defines: fail closed (step 11)
