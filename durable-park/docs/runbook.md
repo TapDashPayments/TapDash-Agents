@@ -55,6 +55,14 @@ Rules:
 - QuickBooks is a **sandbox** company. Never connect real books before the [rotation](#rotate-secrets-before-production)
   and the open v2 items are done.
 
+### Agent persona (SOUL.md)
+
+`~/.hermes/SOUL.md` on the VM carries a capability paragraph (added 2026-10-21). It tells the agent that its only
+tools are QuickBooks through withHuman, `clarify` and `parked_action_execute`, that it has no terminal, file or web
+tools, and never to invent a park ID. **Update that paragraph whenever a toolset is opened** (the
+[all-tools plan](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)), or the agent will tell users it cannot do
+things it can, or the other way round.
+
 ## Dashboard over HTTPS
 
 The dashboard itself speaks plain HTTP on the Tailscale IP only (`hermes dashboard --host 100.99.171.75 --port 9119`).
@@ -71,6 +79,8 @@ front of it on the machine's Tailscale name, port 8443 (set up 2026-10-21):
   `tailscale serve status --json` lists `AllowFunnel` for port 443 only.
 - Undo: `tailscale serve --https=8443 off`, delete the drop-in, then `systemctl --user daemon-reload && systemctl --user restart hermes-dashboard`.
   The saved Serve config from before the change is in `/home/hermes/serve-backup/`.
+- A second drop-in, `~/.config/systemd/user/hermes-dashboard.service.d/50-exit78.conf`, sets `RestartPreventExitStatus=78`
+  (Hermes v0.22.3 asks for it). The main unit is hand-written, so `hermes gateway install` is not used for it.
 - Restarting `hermes-dashboard` does not touch the gateway, so the "no `parked`, `approved` or `executing` row" rule does not apply to it.
 
 ## Health check

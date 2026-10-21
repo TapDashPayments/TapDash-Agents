@@ -29,11 +29,14 @@ log = logging.getLogger("durable_park")
 
 EXECUTE_SCHEMA: dict[str, Any] = {
     "name": "parked_action_execute",
-    "description": "Run a previously parked action after you were told it was approved.",
+    "description": ("Run a previously parked action. Call it only after you were told in this chat that the "
+                    "park was APPROVED."),
     "parameters": {
         "type": "object",
         "properties": {
-            "park_id": {"type": "string", "description": "The park id from the PARKED message, e.g. P-1A2B3C4D."},
+            "park_id": {"type": "string",
+                    "description": ("The exact park ID given to you in a [durable-park] message in this chat. "
+                                    "Never guess or invent one.")},
         },
         "required": ["park_id"],
         "additionalProperties": False,
