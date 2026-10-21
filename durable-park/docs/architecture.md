@@ -128,7 +128,7 @@ flowchart LR
 | ledger | `plugin/durable_park/ledger.py` | SQLite record of every parked call and its state. The single source of truth. |
 | wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. |
 | executor | `plugin/durable_park/executor.py` | The `parked_action_execute` tool. Consumes the approval and replays the saved call exactly once. |
-| approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row. |
+| approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key), and one shared gate that is rebuilt when the token file changes. |
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
 | bridge | `bridge/app.py` | Answers withHuman's pipeline: "is this exact gateway call an approved park?" |
 | sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id after 10 minutes, alerts when the form checker is broken. |
@@ -344,6 +344,7 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | Value | Meaning | Where |
 |---|---|---|
 | 168 h | An approval request waits this long for a decision | `gatecall.py` |
+| 16 KiB / 1 KiB | Arguments over 16 KiB of canonical JSON are sent with every string cut to 1 KiB (`args_truncated`); the ledger keeps the exact arguments | `gatecall.py` |
 | 5 min | Sweep interval (fires about 1 min late, so about 6 min in practice) | Hermes cron |
 | 30 days | `allowed`, `refused` and `cancelled` rows older than this are deleted | `durable_park_sweep.py --retention-days` |
 | 10 min | An `executing` row older than this becomes `unknown` | `durable_park_sweep.py` |

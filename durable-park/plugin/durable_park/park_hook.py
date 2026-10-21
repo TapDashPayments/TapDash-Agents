@@ -9,7 +9,7 @@ from typing import Any, Callable
 from agentapprovalprotocol import Allow, Pending
 
 from .formcheck import FormChecker, FormCheckUnavailable
-from .gatecall import build_call
+from .gatecall import build_call, server_label
 from .ledger import Ledger, args_digest, call_key
 
 log = logging.getLogger("durable_park")
@@ -48,17 +48,9 @@ CHECK_UNAVAILABLE_MESSAGE = (
     "the call was not run and no approval was requested"
 )
 
-_SLUG = re.compile(r"mcp__wh__(.+?)__")
-
 
 def _block(message: str) -> dict[str, str]:
     return {"action": "block", "message": message}
-
-
-def gateway_slug(tool_name: str) -> str:
-    """``mcp__wh__quickbooks__create_payment`` -> ``quickbooks`` (empty if the name has no slug)."""
-    match = _SLUG.match(tool_name)
-    return match.group(1) if match else ""
 
 
 def default_session_key() -> str:
@@ -124,7 +116,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
 
             row = ledger.park(
                 session_key=session_key, session_id=session_id, tool_call_id=tool_call_id, tool=tool,
-                args=args, call_key=call_key(session_id, tool_call_id), server="park:" + gateway_slug(tool))
+                args=args, call_key=call_key(session_id, tool_call_id), server=server_label(tool))
             park_id = row.park_id
             if row.tool != tool or row.args_digest != args_digest(args):
                 # Providers may reuse a tool_call_id; never answer for a different call with the old park.
