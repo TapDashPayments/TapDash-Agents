@@ -376,7 +376,7 @@ The form check needs nothing: it reads each tool's rules from Hermes automatical
 
 The v1 tool lockdown is applied on proto-agents. The
 allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolsets`
-([format](receiver-setup.md#agent-tool-policy-v1-fix-for-the-ledger-bypass-lifted-on-proto-agents)).
+([format](receiver-setup.md#agent-tool-policy-v1-lockdown-re-applied-on-proto-agents)).
 
 1. Check no ledger row is `parked`, `approved` or `executing` (a gateway restart would strand it), with the
    ledger query from the [health check](#health-check) ("Waiting or stuck rows"); it must print nothing:
