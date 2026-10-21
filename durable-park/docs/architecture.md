@@ -185,7 +185,9 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
 The sweep reads the same report and alerts once on a failure and once on recovery. The report is written only at
 start, so a long-running gateway does not make it stale for the sweep (the plugin judges age at load). The sweep
 also reads `tool_policy_load.json` and alerts once when the plugin's verdict is not ok (this catches a stale
-report) and once when a later load passes.
+report) and once when a later load passes. When the start-time report itself failed, the load alert is skipped (the
+failure already alerted once, and the plugin refused for that same reason), so one failure gives one ALERT and one
+recovery line.
 
 The foreign-hook guard reads Hermes's hook registry (`ctx._manager.iter_hook_callbacks("pre_tool_call")`,
 Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) and its middleware registry

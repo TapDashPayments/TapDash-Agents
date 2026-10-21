@@ -289,13 +289,17 @@ def _policy_alert(ledger_path: str, now: datetime) -> None:
         print("durable-park: the tool policy check passes again.", flush=True)
         alerted = False
     _save_state(state_path, {"alerted": alerted})
-    _policy_load_alert(directory)
+    _policy_load_alert(directory, report_failed=problem is not None)
 
 
-def _policy_load_alert(directory: str) -> None:
+def _policy_load_alert(directory: str, *, report_failed: bool) -> None:
     """Alert once when the plugin reports at load that the tool policy check did not pass (it also catches a
     stale report, which the check above cannot see), and once when a later load passes. A missing or unreadable
-    verdict file is silent (an older plugin, or one that has not loaded yet)."""
+    verdict file is silent (an older plugin, or one that has not loaded yet). When the start-time report failed,
+    the plugin refused for the same reason and the alert above already said so: this one is skipped entirely
+    (no print, no state change), so a failure gives one ALERT and one recovery line."""
+    if report_failed:
+        return
     verdict = _load_state(os.path.join(directory, POLICY_LOAD))  # missing or unreadable -> {}
     ok = verdict.get("ok")
     state_path = os.path.join(directory, POLICY_LOAD_STATE)
