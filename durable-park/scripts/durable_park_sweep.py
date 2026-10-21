@@ -6,6 +6,7 @@
 * a denied/expired/cancelled row with a request that the chat was not told about -> post a wake
 * a ``parked`` row with no approval request older than 10 minutes -> cancel it and print one alert line
 * an ``executing`` row older than 10 minutes         -> mark ``unknown`` and print one alert line
+* ``allowed``/``refused``/``cancelled`` rows older than ``--retention-days`` (default 30) are deleted, silently
 * the gateway's form-check report (``formcheck_status.json`` next to the ledger) missing, older than
   75 minutes or failing on two sweeps in a row        -> print one alert line (and one when it recovers)
 
@@ -35,6 +36,7 @@ from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
 DEFAULT_SECRET_FILE = "/etc/durable-park/wake_secret"
 STALE_EXECUTING = timedelta(minutes=10)
 ORPHAN_PARK = timedelta(minutes=10)  # a parked row with no approval request this old will never get one
+DEFAULT_RETENTION_DAYS = 30
 FORMCHECK_STATUS = "formcheck_status.json"
 FORMCHECK_STATE = "formcheck_alert_state.json"
 FORMCHECK_STALE = timedelta(minutes=75)  # the gateway re-checks every 30 minutes
@@ -52,11 +54,23 @@ def _load_ledger_module():
     return module
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="durable-park sweep (Hermes cron --no-agent script)")
     parser.add_argument("--ledger", required=True, help="path of the ledger SQLite file")
     parser.add_argument("--wake-secret-file", default=DEFAULT_SECRET_FILE)
     parser.add_argument("--wake-url", default=DEFAULT_WAKE_URL)
+    parser.add_argument("--retention-days", type=_positive_int, default=DEFAULT_RETENTION_DAYS,
+                        help="delete allowed/refused/cancelled rows not updated for this many days (>= 1)")
     return parser.parse_args(argv)
 
 
@@ -104,6 +118,12 @@ def _cancel_orphan_parks(ledger, now: datetime) -> None:
                              note="no approval request after 10 minutes (cancelled by the sweep)"):
             print(f"durable-park: {row.park_id} ({row.tool}) never got an approval request; "
                   "cancelled after 10 minutes", flush=True)
+
+
+def _apply_retention(ledger, now: datetime, days: int) -> None:
+    """Delete finished rows with nothing left to decide (``allowed``, ``refused``, ``cancelled``) once they are
+    ``days`` old. Prints nothing; SQLite keeps the freed pages for reuse (the file shrinks only on VACUUM)."""
+    ledger.delete_finished_before((now - timedelta(days=days)).strftime(_STAMP))
 
 
 def _wake_targets(ledger) -> list[str]:
@@ -233,6 +253,10 @@ def main(argv=None) -> int:
                     continue
                 if not 200 <= code < 300:
                     _err(f"wake {park_id} returned HTTP {code}")
+    try:
+        _apply_retention(ledger, datetime.now(timezone.utc), args.retention_days)
+    except Exception as exc:  # noqa: BLE001 - housekeeping must never stop the sweep
+        _err(f"retention failed ({type(exc).__name__})")
     return status
 
 

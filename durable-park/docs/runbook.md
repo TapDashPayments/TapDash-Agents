@@ -139,6 +139,15 @@ The gateway stopped between saving the park and asking withHuman. The sweep canc
 request after 10 minutes (cancelled by the sweep)`); the action did not run and was never put to an approver. Ask the
 bot again (a new park and a new approval). If this repeats, check why the gateway restarts (`journalctl --user -u hermes-gateway`).
 
+### Ledger retention
+
+The sweep deletes `allowed`, `refused` and `cancelled` rows 30 days after their last update (the wrapper passes
+`--retention-days 30`; the value must be at least 1). It prints nothing; a failure goes to stderr as
+`retention failed (<ErrorType>)` and never stops the rest of the sweep. Rows holding an outcome or a human decision
+(`executed`, `failed`, `unknown`, `denied`, `expired`) are never deleted. SQLite reuses freed space but the file
+does not shrink by itself; to shrink it, stop the gateway, check that no row is `parked`, `approved` or `executing`,
+then run `sqlite3 <ledger> 'VACUUM;'` as `hermes`.
+
 ### Form checker not working
 
 `durable-park ALERT: the form checker is not working - <reason>. Risky actions will be refused until it is fixed.`

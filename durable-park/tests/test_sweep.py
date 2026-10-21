@@ -41,7 +41,7 @@ class World:
         if request_id:
             self.ledger.set_request_id(row.park_id, f"{request_id}-{self.n}")
         path = {"parked": [], "approved": ["approved"], "denied": ["denied"], "expired": ["expired"],
-                "cancelled": ["cancelled"], "executing": ["approved", "executing"],
+                "cancelled": ["cancelled"], "allowed": ["allowed"], "executing": ["approved", "executing"],
                 "executed": ["approved", "executing", "executed"]}[status]
         previous = "parked"
         for nxt in path:
@@ -58,6 +58,13 @@ class World:
         con = sqlite3.connect(self.ledger.path, isolation_level=None)
         try:
             con.execute("UPDATE parks SET created_at=? WHERE park_id=?", (stamp(minutes), park_id))
+        finally:
+            con.close()
+
+    def age(self, park_id, days):
+        con = sqlite3.connect(self.ledger.path, isolation_level=None)
+        try:
+            con.execute("UPDATE parks SET updated_at=? WHERE park_id=?", (stamp(days * 24 * 60), park_id))
         finally:
             con.close()
 
@@ -252,6 +259,30 @@ def test_sweep_blank_secret_is_an_error(world, monkeypatch, capsys):
     world.secret_file.write_text("  \n")
     assert world.main(monkeypatch) == 1
     assert world.posted == [] and "wake secret" in capsys.readouterr().err
+
+
+def test_retention_days_flag(world, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exc:
+        sweep.parse_args(["--ledger", "/x/ledger.db", "--retention-days", "0"])
+    assert exc.value.code == 2
+    assert sweep.parse_args(["--ledger", "/x/ledger.db"]).retention_days == 30
+    old = world.row("allowed", request_id="r")
+    world.age(old, 31)
+    fresh = world.row("allowed", request_id="r")
+    assert world.main(monkeypatch) == 0
+    assert world.ledger.get(old) is None
+    assert world.ledger.get(fresh) is not None
+    assert capsys.readouterr().out == ""
+
+
+def test_retention_error_does_not_stop_the_sweep(world, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("disk")
+    monkeypatch.setattr(sweep, "_apply_retention", boom)
+    assert world.main(monkeypatch) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "retention failed (RuntimeError)" in captured.err
 
 
 def test_sweep_defaults_match_the_deployment():

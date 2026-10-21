@@ -221,6 +221,8 @@ stateDiagram-v2
   parked --> denied: wake - denied
   parked --> expired: wake - no decision in 168 h
   parked --> cancelled: wake - cancelled, or hook could not open the request
+  parked --> allowed: withHuman approved at once, no human asked
+  parked --> refused: withHuman denied at once, no human asked
   approved --> executing: executor claims it
   executing --> executed: tool succeeded
   executing --> failed: tool error, or approval refused
@@ -229,11 +231,17 @@ stateDiagram-v2
   denied --> [*]
   expired --> [*]
   cancelled --> [*]
+  allowed --> [*]
+  refused --> [*]
   executed --> [*]
   failed --> [*]
   unknown --> [*]
 ```
 
+- `allowed` and `refused` are final: withHuman decided the call instantly (an automatic rule, no person asked), so
+  nothing waits and nothing runs later from the ledger. They are not "waiting" statuses. The sweep deletes
+  `allowed`, `refused` and `cancelled` rows 30 days after their last update (`--retention-days`); rows that hold an
+  outcome (`executed`, `failed`, `unknown`) or a human decision (`denied`, `expired`) are kept.
 - `unknown` is final on purpose: the approval was already used, so the call is never retried automatically. A
   person checks QuickBooks (runbook: [UNKNOWN outcome](runbook.md#outcome-unknown)).
 - `gateway_passed_at` is set when the bridge approves the gateway call (once per row). `notified_at` is set when the
@@ -337,6 +345,7 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 |---|---|---|
 | 168 h | An approval request waits this long for a decision | `gatecall.py` |
 | 5 min | Sweep interval (fires about 1 min late, so about 6 min in practice) | Hermes cron |
+| 30 days | `allowed`, `refused` and `cancelled` rows older than this are deleted | `durable_park_sweep.py --retention-days` |
 | 10 min | An `executing` row older than this becomes `unknown` | `durable_park_sweep.py` |
 | 30 min | Form self-check interval | `formcheck.py` |
 | 75 min | Form-check report older than this is treated as broken | `durable_park_sweep.py` |

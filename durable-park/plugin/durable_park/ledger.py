@@ -21,9 +21,10 @@ from typing import Any, Iterator
 ACTIVE_STATUSES = ("parked", "approved", "executing")
 
 # Allowed (from_status -> to_status) edges. ``executing -> expired`` is used
-# only when the approval gate refuses before anything ran.
+# only when the approval gate refuses before anything ran. ``allowed``/``refused`` are terminal rows for calls
+# withHuman decided instantly (nothing parked, nothing to execute later).
 TRANSITIONS: dict[str, frozenset[str]] = {
-    "parked": frozenset({"approved", "denied", "expired", "cancelled"}),
+    "parked": frozenset({"approved", "denied", "expired", "cancelled", "allowed", "refused"}),
     "approved": frozenset({"executing"}),
     "executing": frozenset({"executed", "failed", "unknown", "expired"}),
 }
@@ -227,6 +228,16 @@ class Ledger:
                 "UPDATE parks SET request_id=?, updated_at=? WHERE park_id=? AND status='parked' AND request_id IS NULL",
                 (request_id, _now(), park_id))
             return cur.rowcount == 1
+
+    def delete_finished_before(self, cutoff: str) -> int:
+        """Delete ``allowed``/``refused``/``cancelled`` rows last updated before ``cutoff`` (the ledger's own
+        ``%Y-%m-%dT%H:%M:%S.%fZ`` stamp, compared as a string); returns the count. Rows that carry a decision
+        or an outcome someone may still need to look up (executed, denied, expired, failed, unknown) stay."""
+        with self._connect() as con:
+            cur = con.execute(
+                "DELETE FROM parks WHERE status IN ('allowed','refused','cancelled') AND updated_at < ?",
+                (cutoff,))
+            return cur.rowcount
 
     def mark_notified(self, park_id: str) -> None:
         now = _now()
