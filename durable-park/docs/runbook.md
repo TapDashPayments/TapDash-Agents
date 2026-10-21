@@ -223,12 +223,15 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 | `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
 | a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
 | `stale` | The report was written more than 15 minutes **before the gateway process started** (the gateway started without the drop-in, so no fresh report). The gateway's uptime no longer matters, and a plugin reload inside the running gateway stays fine. A process started more than 15 minutes after the last gateway start (for example a manual `hermes` run) is refused, which is correct: the start check did not run for it (it fails closed but does not write the verdict) | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). Visible through the `tool_policy_load.json` alert above. **In a side process this is not an error:** the cron sweep (every 5 minutes) and CLI runs log `durable-park: tool policy report predates this side process (expected for the cron sweep and CLI runs); refusing every tool call in this process` once, at INFO (it does not reach `errors.log`; look for it in `agent.log`), and still refuse every tool call. Only the gateway's own `stale` is an ERROR |
+| `unreadable checked_at` | The report's `checked_at` is missing or not a `YYYY-MM-DDTHH:MM:SSZ` time. Not a normal aging effect: the report was edited, truncated or written by something else. **ERROR in every process** (the sweep and CLI runs too) | Re-run the start check: `systemctl --user restart hermes-gateway` (only when nothing is waiting or running) writes a fresh report; if it comes back, find what wrote the file |
+| `checked_at in the future` | The report is dated more than a minute ahead of this process's clock: clock skew (check `timedatectl`) or a hand-written report. **ERROR in every process**, never downgraded to the side-process INFO line | Fix the clock, then restart the gateway as above so the start check writes a fresh report |
 
 Reading `errors.log`: `durable-park tool policy check failed (<reason>); refusing every tool call` at ERROR is always a
 real problem, so fix it with the table above. The one verdict that is expected in a process that is not the gateway is
-`stale` (the start check ran for the gateway, not for the sweep or a CLI run), and that case logs the INFO line above
-instead, so the sweep no longer fills `errors.log` every few minutes. Every other problem, in any process, and `stale` in the
-gateway, still log at ERROR.
+`stale`, meaning only that the report is too old for that process (the start check ran for the gateway, not for the
+sweep or a CLI run), and that case logs the INFO line above
+instead, so the sweep no longer fills `errors.log` every few minutes. Every other problem, in any process (including
+`unreadable checked_at` and `checked_at in the future`), and `stale` in the gateway, still log at ERROR.
 
 Before go-live, time the check once on the VM (`time bash deploy/tool_policy_check.sh` as `hermes`): it must
 finish well under 60 s (the check's own timeout; systemd also has a start timeout, `TimeoutStartSec`, to stay inside).

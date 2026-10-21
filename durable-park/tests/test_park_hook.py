@@ -1170,6 +1170,10 @@ def write_policy_report(path, *, ok=True, age_minutes=0, problems=()):
                                 "problems": list(problems), "allowed": []}))
 
 
+UNREADABLE_CHECKED_AT = "unreadable checked_at"
+FUTURE_CHECKED_AT = "checked_at in the future"
+
+
 def test_policy_problem(tmp_path):
     path = tmp_path / "status.json"
     now = datetime.now(timezone.utc)
@@ -1185,9 +1189,11 @@ def test_policy_problem(tmp_path):
     write_policy_report(path, ok=True, age_minutes=14)
     assert policy_problem(str(path), now) is None
     write_policy_report(path, ok=True, age_minutes=-30)  # a clock far in the future is not "fresh"
-    assert policy_problem(str(path), now) == "stale"
+    assert policy_problem(str(path), now) == FUTURE_CHECKED_AT
     path.write_text(json.dumps({"ok": True, "checked_at": "garbage"}))
-    assert policy_problem(str(path), now) == "stale"
+    assert policy_problem(str(path), now) == UNREADABLE_CHECKED_AT
+    path.write_text(json.dumps({"ok": True}))  # no checked_at at all
+    assert policy_problem(str(path), now) == UNREADABLE_CHECKED_AT
     path.write_text(json.dumps({"ok": "yes", "checked_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}))
     assert policy_problem(str(path), now) is not None  # only a real true passes
 
@@ -1204,8 +1210,8 @@ def test_policy_problem_is_judged_against_process_start_not_wall_clock(tmp_path)
     assert policy_problem(str(path), now, process_start=start) == "stale"
     write_policy_report(path, age_minutes=60)  # written after this process started is fine
     assert policy_problem(str(path), now, process_start=start) is None
-    write_policy_report(path, age_minutes=-30)  # future-dated beyond a minute is still stale
-    assert policy_problem(str(path), now, process_start=start) == "stale"
+    write_policy_report(path, age_minutes=-30)  # future-dated beyond a minute is its own verdict, not "stale"
+    assert policy_problem(str(path), now, process_start=start) == FUTURE_CHECKED_AT
 
 
 def test_policy_problem_defaults_to_this_process_start(tmp_path, monkeypatch):
@@ -1439,6 +1445,31 @@ def test_other_policy_problems_in_a_side_process_still_log_error(tmp_path, monke
     data.mkdir()
     if report == "failed":
         write_policy_report(data / "tool_policy_status.json", ok=False, problems=["x"])
+    ctx = FakeCtx(data)
+    with caplog.at_level("DEBUG", logger="durable_park"):
+        register(ctx)
+    records = _durable_park_records(caplog)
+    assert ("ERROR", f"durable-park tool policy check failed ({problem}); refusing every tool call") in records
+    assert not any(m == STALE_SIDE_PROCESS for _, m in records)
+    _assert_refuses_everything(ctx)
+
+
+@pytest.mark.parametrize("anomaly,problem", [("garbage", UNREADABLE_CHECKED_AT), ("future", FUTURE_CHECKED_AT)])
+@pytest.mark.parametrize("gateway", [False, True])
+def test_a_report_anomaly_logs_error_in_every_process(tmp_path, monkeypatch, caplog, anomaly, problem, gateway):
+    """Only a report that is merely too old may be quiet in a side process: an unparsable or future-dated
+    ``checked_at`` (clock skew, tampering) is a real anomaly and stays an ERROR everywhere."""
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: gateway)
+    monkeypatch.setattr(durable_park, "_logged_not_gateway", False)
+    monkeypatch.setattr(durable_park, "_logged_stale_side_process", False)
+    data = tmp_path / "data"
+    data.mkdir()
+    report = data / "tool_policy_status.json"
+    if anomaly == "future":
+        write_policy_report(report, age_minutes=-30)
+    else:
+        report.write_text(json.dumps({"ok": True, "checked_at": "garbage"}))
     ctx = FakeCtx(data)
     with caplog.at_level("DEBUG", logger="durable_park"):
         register(ctx)

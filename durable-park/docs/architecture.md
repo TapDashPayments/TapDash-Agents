@@ -176,16 +176,18 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
    script both ensure the gateway starts), writing a failing report itself when there is no Python or the check left
    no new report.
 2. Hermes loads the plugin. `register` validates the settings, then reads that report. A problem (missing, failed,
-   written more than 15 minutes before this process started) registers the fail-closed hook (`POLICY_MESSAGE`; only the default exempt tools pass, never the configured list), the wake
+   written more than 15 minutes before this process started, unreadable or future-dated `checked_at`) registers the fail-closed hook (`POLICY_MESSAGE`; only the default exempt tools pass, never the configured list), the wake
    dropper, and an executor that refuses without touching the ledger; nothing else is opened.
    Age is judged against this process's own start (`PROCESS_START`, set at import), not the wall clock, so the
    gateway's uptime does not matter. Every Hermes process loads plugins (the gateway, the 5-minute cron sweep, CLI
    runs) and each fails closed on its own; only the gateway (`is_gateway_process()`: argv has `gateway run`) writes
    its verdict, `tool_policy_load.json` next to the ledger (`ok`, `problem`, `checked_at`; atomic, never raises).
    Other processes log `tool policy: load verdict not written (not the gateway process)` once and write nothing.
-   A `stale` report in such a process is expected (the start check ran for the gateway, not for it): the same
-   refusal, but logged once at INFO (`durable-park: tool policy report predates this side process ...`) so it does
-   not reach `errors.log`. Every other problem in any process, and `stale` in the gateway, log at ERROR.
+   A `stale` report (only too old; `policy_problem` returns distinct verdicts `unreadable checked_at` and
+   `checked_at in the future` for the anomalies) in such a process is expected (the start check ran for the
+   gateway, not for it): the same refusal, but logged once at INFO (`durable-park: tool policy report predates
+   this side process ...`) so it does not reach `errors.log`. Every other problem in any process, and `stale` in
+   the gateway, log at ERROR.
 3. Otherwise the ledger opens and the normal hook, wake handler and executor register.
 4. As the last step of every path that ends with a `pre_tool_call` hook registered (normal, policy refusal, ledger
    unavailable, and the `except` path of `register`), the gateway process writes the **load proof**
