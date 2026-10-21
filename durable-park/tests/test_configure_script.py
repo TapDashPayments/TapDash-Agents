@@ -199,10 +199,47 @@ def test_policy_wrapper_stub_that_fails_without_writing(tmp_path):
     assert report["ok"] is False and report["problems"] and report["allowed"] == []
 
 
-def test_policy_wrapper_never_leaves_an_old_passing_report(tmp_path):
-    code, status = _run_wrapper_with_stub(tmp_path, STUB_FAILS, existing=OLD_PASS)
-    assert code == 0
+def _old_report_run(tmp_path, *, mv_fails):
+    """Stub exits 1 and leaves an OLD passing report (mtime in the past); optionally ``mv`` fails, which is what
+    an unwritable directory does to the wrapper's own write (cannot be made unwritable as root)."""
+    extra = {}
+    if mv_fails:
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "mv").write_text("#!/bin/sh\nexit 1\n")
+        (bindir / "mv").chmod(0o755)
+        extra = {"PATH": f"{bindir}:/usr/bin:/bin"}
+    home = tmp_path / "hermes"
+    (home / "installs" / "x").mkdir(parents=True)
+    env_dir = tmp_path / "venv"
+    (env_dir / "bin").mkdir(parents=True)
+    (env_dir / "bin" / "python").write_text("#!/bin/sh\n" + STUB_FAILS)
+    (env_dir / "bin" / "python").chmod(0o755)
+    (home / "installs" / "x" / "facts.json").write_text(
+        json.dumps({"packages": {"venv": {"environment": str(env_dir)}}}))
+    status = tmp_path / "state" / "tool_policy_status.json"
+    status.parent.mkdir()
+    status.write_text(OLD_PASS)
+    subprocess.run(["touch", "-d", "2020-01-01", str(status)], check=True)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "HERMES_HOME": str(home),
+           "DURABLE_PARK_POLICY_STATUS": str(status), **extra}
+    result = subprocess.run(["bash", str(POLICY_WRAPPER)], env=env, capture_output=True, text=True)
+    return result, status
+
+
+def test_policy_wrapper_replaces_an_old_passing_report_the_check_did_not_refresh(tmp_path):
+    result, status = _old_report_run(tmp_path, mv_fails=False)
+    assert result.returncode == 0
     assert json.loads(status.read_text())["ok"] is False
+    assert "could not be refreshed" not in result.stderr
+
+
+def test_policy_wrapper_says_so_when_it_cannot_refresh_the_report(tmp_path):
+    result, status = _old_report_run(tmp_path, mv_fails=True)
+    assert result.returncode == 0
+    assert "durable-park: tool policy report could not be refreshed (directory not writable?)" in result.stderr
+    assert status.read_text() == OLD_PASS  # the old file stays; the plugin's 15-minute check is the backstop
+    assert [p.name for p in status.parent.iterdir()] == [status.name]  # no temp file left
 
 
 def test_policy_wrapper_keeps_the_report_a_passing_check_wrote(tmp_path):

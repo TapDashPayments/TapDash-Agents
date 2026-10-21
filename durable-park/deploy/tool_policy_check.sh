@@ -18,12 +18,20 @@ write_failing() {
     local dir tmp
     dir=$(dirname -- "$STATUS")
     mkdir -p -- "$dir" 2>/dev/null || true
-    tmp=$(mktemp "$dir/.status-XXXXXX.tmp" 2>/dev/null) || { log "cannot write $STATUS"; return 0; }
+    tmp=$(mktemp "$dir/.status-XXXXXX.tmp" 2>/dev/null) || return 1
     printf '{"ok": false, "checked_at": "%s", "problems": ["%s"], "allowed": []}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >"$tmp" || { rm -f -- "$tmp"; return 0; }
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >"$tmp" || { rm -f -- "$tmp"; return 1; }
     chmod 0644 -- "$tmp"
-    mv -f -- "$tmp" "$STATUS" || rm -f -- "$tmp"
-    return 0
+    mv -f -- "$tmp" "$STATUS" || { rm -f -- "$tmp"; return 1; }
+}
+
+# Record a failure; when even that cannot be written (directory not writable?) say so and carry on: an old
+# passing report may remain, and the plugin's 15-minute staleness check is the backstop.
+fail_report() {
+    write_failing "$1" || {
+        log "durable-park: tool policy report could not be refreshed (directory not writable?)"
+        command -v logger >/dev/null 2>&1 && logger -t durable-park "tool policy report could not be refreshed" || true
+    }
 }
 
 # Hermes's own Python environment, read from its facts.json: the same lookup as hermes_python() in
@@ -37,17 +45,16 @@ print(json.load(open(facts[0]))["packages"]["venv"]["environment"] + "/bin/pytho
 }
 
 main() {
-    local py rc
-    # No earlier report may survive this run: a stale pass must never be left behind when the directory turns
-    # out to be unwritable (the plugin then sees no report and refuses).
-    rm -f -- "$STATUS" 2>/dev/null || true
-    py=$(hermes_python) && [[ -x "$py" ]] || { log "hermes python not found"; write_failing "hermes python not found"; return 0; }
+    local py rc start
+    py=$(hermes_python) && [[ -x "$py" ]] || { log "hermes python not found"; fail_report "hermes python not found"; return 0; }
+    start=$(date +%s)
     rc=0
     timeout 60 "$py" -I "$REPO/deploy/hermes_tool_policy.py" check --status-file "$STATUS" || rc=$?
-    if [[ ! -e "$STATUS" ]]; then
-        # the check was killed, crashed, or could not write: record a failure ourselves
-        log "the check left no report (exit $rc)"
-        write_failing "the tool policy check did not write a report"
+    # A report older than this run (or none) was not written by the check: it was killed, crashed, or could not
+    # write (an unwritable directory also keeps an old passing report from being replaced or removed).
+    if [[ ! -e "$STATUS" || $(stat -c %Y -- "$STATUS" 2>/dev/null || echo 0) -lt $start ]]; then
+        log "the check left no new report (exit $rc)"
+        fail_report "the tool policy check did not write a report"
     elif [[ $rc -ne 0 ]]; then
         log "the tool policy check failed (exit $rc); the plugin will refuse tool calls"
     fi

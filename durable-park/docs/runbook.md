@@ -195,7 +195,9 @@ again.`) when it passes.
 | `stale` | The gateway started without the drop-in (the report is older than 15 minutes) | Install the drop-in, restart the gateway |
 
 Fix it, then `systemctl --user restart hermes-gateway` (only when nothing is waiting or running): the check runs
-again at the start. `systemctl --user show hermes-gateway -p ExecStartPre` shows the drop-in is active.
+again at the start. If the report directory is not writable the script cannot replace an old report: it logs
+`durable-park: tool policy report could not be refreshed (directory not writable?)` (journal) and the plugin's
+15-minute staleness check refuses calls once the old report ages out. `systemctl --user show hermes-gateway -p ExecStartPre` shows the drop-in is active.
 
 ### withHuman could not be reached
 
