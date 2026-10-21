@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# DO NOT RE-RUN on proto-agents. On 2026-10-20 Yaakov decided the agent gets every Hermes tool
+# (withHuman/durable-park remains the only gate). This script re-applies the v1 tool lockdown
+# via hermes_tool_policy.py. See docs/specs/2026-10-20-one-agent-merge-design.md §4.1.
 # durable-park deploy for the proto VM (Hermes Agent v0.22.2). Idempotent: safe to re-run.
 #
 #   sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh
