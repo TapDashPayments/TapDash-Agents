@@ -258,7 +258,8 @@ previous proof first (`ExecStartPre`), so a proof from an earlier process can ne
 Symptom: `systemctl --user status hermes-gateway` shows `failed` or `start-limit-hit`, and the journal has
 `durable-park ALERT: the plugin did not load in this gateway (pid N); stopping the gateway so no tool call runs unchecked`.
 The drop-in's `ExecStartPost=` (`deploy/plugin_load_check.sh`, no `-`) fails the unit when no `plugin_load.json` for
-the gateway's pid appears within `DURABLE_PARK_LOAD_TIMEOUT` seconds (default 30; Hermes's own load deadline is 10 s and
+the gateway's pid appears within `DURABLE_PARK_LOAD_TIMEOUT` seconds of real time (default 30, always waited in full: the
+deadline is a wall-clock one; Hermes's own load deadline is 10 s and
 the live gateway loads the plugin in about 2 s, well inside systemd's default 90 s start timeout).
 
 1. Find the reason in the journal: `journalctl --user -u hermes-gateway -n 200 --no-pager | grep -i -E "durable|plugin"`.
