@@ -1,35 +1,58 @@
-"""The ``pre_tool_call`` hook: block risky tool calls, record them, open one approval request."""
+"""The ``pre_tool_call`` hook: ask withHuman about every tool call, record it, run or refuse or park it.
+
+Every tool call except the exempt ones gets one ledger row and one Agent Approval Protocol request. An
+instant ``Allow`` lets the tool run (row ``allowed``), an instant ``Deny`` refuses it (row ``refused``), and
+``Pending`` parks it until a person decides (row ``parked``; the executor runs it later). Every path except
+``Allow`` blocks the call; any error blocks it too.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
-from agentapprovalprotocol import Allow, Pending
+from agentapprovalprotocol import Allow, Deny, Pending
 
+from .breaker import Breaker
 from .formcheck import FormChecker, FormCheckUnavailable
 from .gatecall import build_call, server_label
 from .ledger import Ledger, args_digest, call_key
 
 log = logging.getLogger("durable_park")
 
-# Regex ``fullmatch`` against the Hermes tool name (``mcp__wh__<slug>__<tool>``).
-DEFAULT_RISKY_TOOLS: tuple[str, ...] = (
+# Tools that are never asked about: the executor of an approved park (its call was approved already) and
+# ``clarify`` (asking the user a question).
+DEFAULT_EXEMPT_TOOLS: tuple[str, ...] = ("parked_action_execute", "clarify")
+
+# Tools whose arguments are checked against the tool's own rules before withHuman is asked (regex
+# ``fullmatch`` against the Hermes tool name ``mcp__wh__<slug>__<tool>``). Which calls need a person is
+# withHuman's pipeline rule now, not this list.
+DEFAULT_FORM_CHECKED_TOOLS: tuple[str, ...] = (
     r"mcp__wh__quickbooks__(create|update|delete)[_-]"
     r"(payment|bill_payment|transfer|deposit|journal_entry|refund_receipt|sales_receipt"
     r"|credit_memo|vendor_credit|purchase|invoice|bill)",
     r"mcp__wh__docusign__(createEnvelope|updateEnvelope|triggerWorkflow|cancelWorkflowInstance"
     r"|pauseNewWorkflowInstances|resumeWorkflow)",
 )
+DEFAULT_RISKY_TOOLS = DEFAULT_FORM_CHECKED_TOOLS  # old name, still imported by the plugin entry point
 
 PARK_MESSAGE = (
     'PARKED {park_id}: "{tool}" needs human approval in withHuman and has NOT run. '
     "Do not retry it or try another way to do it. Tell the user it is waiting for approval; "
     "you will be told here when it is decided."
 )
-NO_SESSION_MESSAGE = "durable-park: no chat session; risky tool refused"
-NO_CALL_ID_MESSAGE = "durable-park: no tool call id; risky tool refused"
+NO_SESSION_MESSAGE = "durable-park: no chat session; the tool call was refused"
+NO_CALL_ID_MESSAGE = "durable-park: no tool call id; the tool call was refused"
+REFUSED_MESSAGE = (
+    'durable-park: "{tool}" was refused by withHuman policy{note}. It did not run. '
+    "Do not retry it or work around it; tell the user."
+)
+UNREACHABLE_MESSAGE = 'durable-park: withHuman could not be reached; "{tool}" did not run. Try again later.'
+FOREIGN_HOOK_MESSAGE = (
+    "durable-park: another plugin hook could change tool arguments after approval ({names}); every tool call "
+    "is refused until an admin removes it or lists it in observer_hooks."
+)
 COULD_NOT_OPEN_MESSAGE = "durable-park: could not open an approval request; the call was not run"
 ALREADY_WAITING_MESSAGE = (
     "durable-park: {park_id} is already waiting for approval in this chat; "
@@ -62,24 +85,46 @@ def default_session_key() -> str:
     return get_session_env("HERMES_SESSION_KEY", "") or ""
 
 
-def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: list[re.Pattern],
+# The SDK's denial text puts the reviewer's note after this marker (agentapprovalprotocol/_gate.py ``_settled``).
+_NOTE_MARKER = "Their note: "
+
+
+def _reviewer_note(reason: str) -> str:
+    return reason.split(_NOTE_MARKER, 1)[1] if _NOTE_MARKER in reason else ""
+
+
+def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_checked: list[re.Pattern], *,
+                       exempt: Iterable[str] = DEFAULT_EXEMPT_TOOLS, breaker: Breaker | None = None,
+                       foreign_hooks_fn: Callable[[], list[str]] | None = None,
                        session_key_fn: Callable[[], str] | None = None,
                        form_checker: FormChecker | None = None) -> Callable[..., dict | None]:
-    """Build the hook. ``gate_factory`` is called per park so the token file is read lazily.
-    ``form_checker`` validates a risky call's arguments against the tool's rules before anything is
-    parked or asked (default: the rules Hermes registered for the tool)."""
+    """Build the hook. ``gate_factory`` is called per call (e.g. ``GateHolder.get``). ``form_checker``
+    validates a form-checked call's arguments against the tool's rules before anything is recorded or asked
+    (default: the rules Hermes registered for the tool). ``breaker`` (optional) stops asking withHuman while
+    it is unreachable. ``foreign_hooks_fn`` (optional) names other plugins' ``pre_tool_call`` hooks that could
+    change arguments after approval; while it names any, every non-exempt call is refused."""
     checker = form_checker if form_checker is not None else FormChecker()
+    exempt_names = frozenset(exempt)
 
-    def is_risky(tool_name: str) -> bool:
-        return any(p.fullmatch(tool_name) for p in risky)
+    def is_form_checked(tool_name: str) -> bool:
+        return any(p.fullmatch(tool_name) for p in form_checked)
 
     def pre_tool_call(**kw: Any) -> dict[str, str] | None:
         tool = str(kw.get("tool_name") or "")
-        if not is_risky(tool):
+        # Step 1: exempt tools are never asked about.
+        if tool in exempt_names:
             return None
         park_id: str | None = None
         request_opened = False
         try:
+            # Step 2: a foreign hook could change the arguments after approval: refuse everything.
+            foreign = list(foreign_hooks_fn()) if foreign_hooks_fn is not None else []
+            if foreign:
+                names = ", ".join(foreign)
+                log.error("foreign pre_tool_call hook(s) present (%s); refusing tool=%s", names, tool)
+                return _block(FOREIGN_HOOK_MESSAGE.format(names=names))
+
+            # Step 3: a call must belong to a chat and carry an id.
             session_key = (session_key_fn or default_session_key)() or ""
             if not session_key:
                 return _block(NO_SESSION_MESSAGE)
@@ -90,21 +135,10 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
             args = kw.get("args")
             args = args if isinstance(args, dict) else {}
 
-            def other_active(*, earlier_than: str | None = None):
-                for row in ledger.active_for_session(session_key):  # oldest first
-                    if row.park_id == earlier_than:
-                        return None  # only rows created before ours count
-                    if (row.session_id, row.tool_call_id) != (session_id, tool_call_id):
-                        return row
-                return None
-
-            if (busy := other_active()) is not None:
-                return _block(ALREADY_WAITING_MESSAGE.format(park_id=busy.park_id))
-
-            # Never ask a human to approve a call the server would reject: check the form first. A replay of
-            # a call that is already parked passed this check when it was parked and is not checked again,
-            # so a later rules hiccup can never tell the model "no approval was requested" for it.
-            if ledger.get_by_call(session_id, tool_call_id) is None:
+            # Step 4: never ask about a call the server would reject: check the form first (form-checked
+            # tools only). A replay of a call that is already recorded passed this check then and is not
+            # checked again, so a later rules hiccup can never say "no approval was requested" for it.
+            if is_form_checked(tool) and ledger.get_by_call(session_id, tool_call_id) is None:
                 try:
                     problem = checker.check(tool, args)
                 except FormCheckUnavailable as exc:
@@ -114,49 +148,99 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
                     log.info("refused tool=%s: arguments break its rules", tool)
                     return _block(INVALID_ARGS_MESSAGE.format(tool=tool, problem=problem))
 
+            # Step 5: one row per (session_id, tool_call_id); a replay gets the existing row.
             row = ledger.park(
                 session_key=session_key, session_id=session_id, tool_call_id=tool_call_id, tool=tool,
                 args=args, call_key=call_key(session_id, tool_call_id), server=server_label(tool))
             park_id = row.park_id
             if row.tool != tool or row.args_digest != args_digest(args):
-                # Providers may reuse a tool_call_id; never answer for a different call with the old park.
+                # Providers may reuse a tool_call_id; never answer for a different call with the old row.
                 log.warning("tool call id reused for a different call: %s tool=%s", row.park_id, tool)
                 park_id = None  # the existing row belongs to the earlier call; leave it alone
                 return _block(ID_REUSED_MESSAGE)
             if row.status != "parked":
+                # Decided already (including an instant allowed/refused): never run or ask again.
+                park_id = None
                 return _block(NOT_PARKED_MESSAGE.format(park_id=row.park_id, status=row.status))
             if row.request_id:
                 return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool))
 
-            # Two risky calls in one turn can both pass the check above; the earlier row wins.
-            if (earlier := other_active(earlier_than=row.park_id)) is not None:
-                ledger.transition(row.park_id, "parked", "cancelled", note="superseded by earlier park")
+            # Step 6: withHuman is known to be down: refuse at once, without a request.
+            if breaker is not None and not breaker.allow_attempt():
+                log.warning("refused %s tool=%s: withHuman unreachable (breaker open)", row.park_id, tool)
+                ledger.transition(row.park_id, "parked", "refused", note="error: withHuman unreachable (breaker open)")
                 park_id = None
-                return _block(ALREADY_WAITING_MESSAGE.format(park_id=earlier.park_id))
+                return _block(UNREACHABLE_MESSAGE.format(tool=tool))
 
+            # Step 7: ask withHuman once.
             gate = gate_factory()
-            verdict = gate.check(build_call(row))
-            if isinstance(verdict, Pending):
-                if not ledger.set_request_id(row.park_id, verdict.request_id):
-                    # The row left `parked` (the sweep cancelled it) while the request was being opened:
-                    # withdraw the request so nobody is asked to approve a call that will never run.
-                    log.warning("approval request for %s could not be attached; cancelling it", row.park_id)
-                    try:
-                        gate.client.cancel(verdict.request_id)
-                    except Exception as exc:  # noqa: BLE001 - the call is blocked either way
-                        log.error("could not cancel orphan request for %s (%s)", row.park_id, type(exc).__name__)
+            verdict = gate.check(build_call(row), can_pause=True)
+
+            # Step 8: instant approval, already consumed by the SDK: record it, then let the tool run.
+            if isinstance(verdict, Allow):
+                if breaker is not None:
+                    breaker.record_success()
+                if not ledger.transition(row.park_id, "parked", "allowed", request_id=verdict.request_id,
+                                         note="withHuman: approved"):
+                    # The row left `parked` meanwhile: the consumed approval is spent and nothing runs.
+                    log.warning("approval for %s could not be recorded; the call was not run", row.park_id)
                     park_id = None
                     return _block(COULD_NOT_OPEN_MESSAGE)
-                request_opened = True
-                log.info("parked %s tool=%s", row.park_id, tool)
-                return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool))
-            # Deny (any status, including "error") or an unexpected Allow: fail closed.
-            reason = getattr(verdict, "status", "allow" if isinstance(verdict, Allow) else "unknown")
-            log.warning("could not open approval request for %s tool=%s (%s)", row.park_id, tool, reason)
-            ledger.transition(row.park_id, "parked", "cancelled", note=f"approval request not opened: {reason}")
-            park_id = None
-            return _block(COULD_NOT_OPEN_MESSAGE)
-        except Exception as exc:  # noqa: BLE001 - a bug must never let a risky call through
+                park_id = None
+                log.info("allowed %s tool=%s", row.park_id, tool)
+                return None
+
+            # Step 9: instant refusal (policy) or an error reaching withHuman.
+            if isinstance(verdict, Deny):
+                unreachable = verdict.status == "error"
+                if breaker is not None:
+                    if unreachable:
+                        breaker.record_failure()
+                    else:
+                        breaker.record_success()
+                ledger.transition(row.park_id, "parked", "refused", request_id=verdict.request_id,
+                                  note=f"withHuman {verdict.status}: {verdict.reason}")
+                park_id = None
+                log.info("refused %s tool=%s (withHuman %s)", row.park_id, tool, verdict.status)
+                if unreachable:
+                    return _block(UNREACHABLE_MESSAGE.format(tool=tool))
+                note = _reviewer_note(verdict.reason)
+                return _block(REFUSED_MESSAGE.format(tool=tool, note=f": {note}" if note else ""))
+
+            if not isinstance(verdict, Pending):  # not a verdict the SDK defines: fail closed (step 11)
+                raise TypeError(f"unexpected verdict {type(verdict).__name__}")
+
+            # Step 10: a person must decide. One waiting park per chat: another row that is waiting for or
+            # past a decision (a parked row counts only once its request is attached, D11) wins.
+            if breaker is not None:
+                breaker.record_success()
+            rid = verdict.request_id
+            busy = next((other for other in ledger.active_for_session(session_key)
+                         if other.park_id != row.park_id
+                         and (other.status in ("approved", "executing") or other.request_id)), None)
+            if busy is not None:
+                try:
+                    gate.client.cancel(rid)
+                except Exception as exc:  # noqa: BLE001 - the call is blocked either way
+                    log.error("could not cancel request for %s (%s)", row.park_id, type(exc).__name__)
+                ledger.transition(row.park_id, "parked", "cancelled",
+                                  note=f"already waiting for {busy.park_id}; request {rid} cancelled")
+                park_id = None
+                return _block(ALREADY_WAITING_MESSAGE.format(park_id=busy.park_id))
+            if not ledger.set_request_id(row.park_id, rid):
+                # The row left `parked` (the sweep cancelled it) while the request was being opened:
+                # withdraw the request so nobody is asked to approve a call that will never run.
+                log.warning("approval request for %s could not be attached; cancelling it", row.park_id)
+                try:
+                    gate.client.cancel(rid)
+                except Exception as exc:  # noqa: BLE001 - the call is blocked either way
+                    log.error("could not cancel orphan request for %s (%s)", row.park_id, type(exc).__name__)
+                park_id = None
+                return _block(COULD_NOT_OPEN_MESSAGE)
+            request_opened = True
+            log.info("parked %s tool=%s", row.park_id, tool)
+            return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool))
+        except Exception as exc:  # noqa: BLE001 - step 11: a bug must never let a call through
             log.error("park hook failed for tool=%s: %s", tool, type(exc).__name__)
             if park_id is not None and not request_opened:
                 try:
@@ -168,11 +252,12 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], risky: l
     return pre_tool_call
 
 
-def fail_closed_hook(risky: list[re.Pattern]) -> Callable[..., dict | None]:
-    """Hook used when the ledger is unusable: every risky call is refused."""
+def fail_closed_hook(exempt: Iterable[str], message: str = COULD_NOT_OPEN_MESSAGE) -> Callable[..., dict | None]:
+    """Hook used when durable-park cannot work (e.g. the ledger is unusable): every non-exempt call is refused."""
+    exempt_names = frozenset(exempt)
 
     def pre_tool_call(**kw: Any) -> dict[str, str] | None:
         tool = str(kw.get("tool_name") or "")
-        return _block(COULD_NOT_OPEN_MESSAGE) if any(p.fullmatch(tool) for p in risky) else None
+        return None if tool in exempt_names else _block(message)
 
     return pre_tool_call

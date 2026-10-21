@@ -1,4 +1,4 @@
-"""The form check: a risky call's arguments must follow the tool's own input rules before it is parked."""
+"""The form check: a form-checked call's arguments must follow the tool's own input rules before it is parked."""
 
 import json
 
@@ -172,7 +172,7 @@ def test_selfcheck_ok_when_all_risky_rules_compile():
 
 def test_selfcheck_fails_when_no_risky_tools_registered():
     status = selfcheck(["mcp__wh__quickbooks__search_bills"], lambda t: BILL_SCHEMA)
-    assert status["ok"] is False and "no risky tools" in status["problems"][0]
+    assert status["ok"] is False and "no form-checked tools" in status["problems"][0]
 
 
 def test_selfcheck_fails_when_rules_missing():
@@ -242,7 +242,7 @@ def test_selfcheck_loop_reports_tools_lost_after_they_were_seen(tmp_path):
     selfcheck_loop(FormChecker(lambda tool: BILL_SCHEMA, coerce_fn=same), lambda: next(lists), [re.compile(RISKY[0])], str(path),
                    sleep=lambda s: None, iterations=1)
     status = json.loads(path.read_text())
-    assert status["ok"] is False and "no risky tools" in status["problems"][0]
+    assert status["ok"] is False and "no form-checked tools" in status["problems"][0]
 
 
 def test_selfcheck_loop_never_raises(tmp_path):

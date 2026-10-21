@@ -11,7 +11,7 @@ from . import formcheck
 from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor
 from .gatecall import make_gate
 from .ledger import Ledger
-from .park_hook import DEFAULT_RISKY_TOOLS, fail_closed_hook, make_pre_tool_call
+from .park_hook import DEFAULT_EXEMPT_TOOLS, DEFAULT_RISKY_TOOLS, fail_closed_hook, make_pre_tool_call
 from .wake import drop_wake_hook, handle_wake, make_async_client_factory
 
 log = logging.getLogger("durable_park")
@@ -54,8 +54,8 @@ def register(ctx) -> None:
         Path(ledger_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         ledger = Ledger(str(Path(ledger_path).expanduser()))
     except Exception as exc:  # noqa: BLE001
-        log.error("durable-park ledger unavailable (%s); refusing all risky tools", type(exc).__name__)
-        ctx.register_hook("pre_tool_call", fail_closed_hook(risky))
+        log.error("durable-park ledger unavailable (%s); refusing every tool call", type(exc).__name__)
+        ctx.register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS))
         ctx.register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         return
     # Register the wake hook first so a later registration failure can never leave wakes reaching the agent.

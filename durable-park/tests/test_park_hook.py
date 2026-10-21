@@ -10,11 +10,26 @@ from durable_park import register
 from durable_park.executor import EXECUTE_SCHEMA
 from durable_park.gatecall import build_call, bounded_http, make_gate
 from durable_park.ledger import Ledger, call_key
-from durable_park.park_hook import DEFAULT_RISKY_TOOLS, make_pre_tool_call
+from agentapprovalprotocol import Gate
+
+from durable_park.breaker import Breaker
+from durable_park.park_hook import DEFAULT_FORM_CHECKED_TOOLS, make_pre_tool_call
 
 SESSION_KEY = "agent:main:telegram:dm:42"
 COULD_NOT_OPEN = "durable-park: could not open an approval request; the call was not run"
-RISKY = [re.compile(p) for p in DEFAULT_RISKY_TOOLS]
+RISKY = [re.compile(p) for p in DEFAULT_FORM_CHECKED_TOOLS]
+UNREACHABLE = 'durable-park: withHuman could not be reached; "{tool}" did not run. Try again later.'
+REFUSED = ('durable-park: "{tool}" was refused by withHuman policy{note}. It did not run. '
+           "Do not retry it or work around it; tell the user.")
+NO_SESSION = "durable-park: no chat session; the tool call was refused"
+NO_CALL_ID = "durable-park: no tool call id; the tool call was refused"
+FOREIGN = ("durable-park: another plugin hook could change tool arguments after approval ({names}); every tool "
+           "call is refused until an admin removes it or lists it in observer_hooks.")
+
+
+def already_waiting(park_id):
+    return (f"durable-park: {park_id} is already waiting for approval in this chat; "
+            f"this call was not run. Do not retry it; wait until {park_id} is decided.")
 
 
 def park_message(park_id, tool):
@@ -28,8 +43,16 @@ def env(tmp_path):
     ledger = Ledger(str(tmp_path / "ledger.db"))
     provider = FakeProvider(auto=None)
     hook = make_pre_tool_call(
-        ledger, lambda: make_gate(BASE_URL, TOKEN, client=provider.client(retry_budget=0.5)), RISKY, lambda: SESSION_KEY)
+        ledger, lambda: make_gate(BASE_URL, TOKEN, client=provider.client(retry_budget=0.5)), RISKY,
+        session_key_fn=lambda: SESSION_KEY)
     return SimpleNamespace(ledger=ledger, provider=provider, hook=hook, tmp_path=tmp_path)
+
+
+def make_hook(env, *, provider=None, ledger=None, session_key_fn=lambda: SESSION_KEY, **kw):
+    provider = provider or env.provider
+    return make_pre_tool_call(
+        ledger or env.ledger, lambda: make_gate(BASE_URL, TOKEN, client=provider.client(retry_budget=0.5)), RISKY,
+        session_key_fn=session_key_fn, **kw)
 
 
 def call(hook, tool, args=None, session_id="sess-1", tool_call_id="call-1"):
@@ -37,10 +60,12 @@ def call(hook, tool, args=None, session_id="sess-1", tool_call_id="call-1"):
                 tool_call_id=tool_call_id, task_id="", turn_id="t1", api_request_id="", middleware_trace=[])
 
 
-def test_non_risky_passes(env):
-    assert call(env.hook, "mcp__wh__quickbooks__search_customers") is None
-    assert env.ledger.list_by_status("parked") == []
+def test_exempt_tools_pass_without_request(env):
+    assert call(env.hook, "clarify") is None
+    assert call(env.hook, "parked_action_execute", tool_call_id="call-2") is None
     assert env.provider.requests == {}
+    assert env.ledger.get_by_call("sess-1", "call-1") is None
+    assert env.ledger.get_by_call("sess-1", "call-2") is None
 
 
 def test_risky_call_parks_and_blocks(env):
@@ -83,30 +108,34 @@ def test_second_risky_call_blocked_while_parked(env):
     first = call(env.hook, "mcp__wh__quickbooks__create_payment")
     (row,) = env.ledger.list_by_status("parked")
     second = call(env.hook, "mcp__wh__quickbooks__create_bill", tool_call_id="call-2")
-    assert second["action"] == "block"
-    assert row.park_id in second["message"]
-    assert "already waiting" in second["message"]
     assert first["message"].startswith("PARKED ")
-    assert len(env.ledger.list_by_status("parked")) == 1
-    assert len(env.provider.requests) == 1
+    assert second == {"action": "block", "message": already_waiting(row.park_id)}
+    assert env.ledger.list_by_status("parked") == [env.ledger.get(row.park_id)]
+    # the second call's request was created (withHuman had no instant answer) and then withdrawn
+    assert len(env.provider.requests) == 2
+    loser = env.ledger.get_by_call("sess-1", "call-2")
+    assert loser.status == "cancelled" and loser.request_id is None
+    (rid,) = [r for r in env.provider.requests if r != row.request_id]
+    assert env.provider.requests[rid].status == "cancelled"
+    assert rid in loser.note and row.park_id in loser.note
 
 
 def test_no_session_key_blocks(env):
-    hook = make_pre_tool_call(
-        env.ledger, lambda: make_gate(BASE_URL, TOKEN, client=env.provider.client()), RISKY, lambda: "")
+    hook = make_hook(env, session_key_fn=lambda: "")
     result = call(hook, "mcp__wh__quickbooks__create_payment")
-    assert result == {"action": "block", "message": "durable-park: no chat session; risky tool refused"}
+    assert result == {"action": "block", "message": NO_SESSION}
     assert env.ledger.list_by_status("parked") == []
     assert env.provider.requests == {}
 
 
 def test_provider_error_blocks(env):
     env.provider.intercept = lambda request: httpx.Response(401, json={"error": "bad token"})
-    result = call(env.hook, "mcp__wh__quickbooks__create_payment")
-    assert result == {"action": "block", "message": COULD_NOT_OPEN}
+    tool = "mcp__wh__quickbooks__create_payment"
+    result = call(env.hook, tool)
+    assert result == {"action": "block", "message": UNREACHABLE.format(tool=tool)}
     assert env.ledger.list_by_status("parked") == []
-    (row,) = env.ledger.list_by_status("cancelled")
-    assert row.request_id is None
+    (row,) = env.ledger.list_by_status("refused")
+    assert row.request_id is None and row.note.startswith("withHuman error")
     # the failed park does not wedge the chat: the next risky call can park
     env.provider.intercept = None
     again = call(env.hook, "mcp__wh__quickbooks__create_bill", tool_call_id="call-2")
@@ -117,49 +146,62 @@ def test_gate_factory_failure_fails_closed(env):
     def broken_factory():
         raise OSError("token file missing")
 
-    hook = make_pre_tool_call(env.ledger, broken_factory, RISKY, lambda: SESSION_KEY)
+    hook = make_pre_tool_call(env.ledger, broken_factory, RISKY, session_key_fn=lambda: SESSION_KEY)
     assert call(hook, "mcp__wh__quickbooks__create_payment") == {"action": "block", "message": COULD_NOT_OPEN}
     assert env.ledger.list_by_status("parked") == []
 
 
-def test_allow_at_park_time_fails_closed(env):
-    env.provider.auto = "approved"  # should not happen in production; the hook must still refuse
+def test_instant_allow_runs_and_records_allowed(env):
+    env.provider.auto = "approved"  # a pipeline rule approved it at once
     result = call(env.hook, "mcp__wh__quickbooks__create_payment")
-    assert result == {"action": "block", "message": COULD_NOT_OPEN}
-    assert env.ledger.list_by_status("parked") == []
-    assert len(env.ledger.list_by_status("cancelled")) == 1
+    assert result is None
+    stored = env.provider.only()
+    assert stored.consumed_at is not None  # the approval was consumed exactly once, by this call
+    assert [c for c in env.provider.calls if c[1].endswith("/consume")] == [("POST", f"/{stored.id}/consume")]
+    (row,) = env.ledger.list_by_status("allowed")
+    assert row.request_id == stored.id and row.note == "withHuman: approved"
+    assert env.ledger.list_by_status("parked", "cancelled", "refused") == []
 
 
 def test_missing_tool_call_id_blocks(env):
     result = call(env.hook, "mcp__wh__quickbooks__create_payment", tool_call_id="")
-    assert result["action"] == "block"
+    assert result == {"action": "block", "message": NO_CALL_ID}
     assert env.ledger.list_by_status("parked") == []
     assert env.provider.requests == {}
 
 
 def test_concurrent_loser_is_cancelled(env):
-    """A call that parks after an earlier active park appeared (race) backs out."""
+    """Another call of this chat got its request attached while ours was being asked: ours backs out."""
     class Racy(Ledger):
         raced = False
 
         def active_for_session(self, session_key):
             if not self.raced:
                 self.raced = True
-                self.park(session_key=session_key, session_id="sess-1", tool_call_id="call-0",
-                          tool="mcp__wh__quickbooks__create_bill", args={"a": 1},
-                          call_key=call_key("sess-1", "call-0"), server="park:quickbooks")
-                return []  # the pre-check ran just before the other call parked
+                other = self.park(session_key=session_key, session_id="sess-1", tool_call_id="call-0",
+                                  tool="mcp__wh__quickbooks__create_bill", args={"a": 1},
+                                  call_key=call_key("sess-1", "call-0"), server="park:quickbooks")
+                assert self.set_request_id(other.park_id, "req-other")
             return super().active_for_session(session_key)
 
     ledger = Racy(str(env.tmp_path / "racy.db"))
-    hook = make_pre_tool_call(
-        ledger, lambda: make_gate(BASE_URL, TOKEN, client=env.provider.client()), RISKY, lambda: SESSION_KEY)
+    hook = make_hook(env, ledger=ledger)
     result = call(hook, "mcp__wh__quickbooks__create_payment", tool_call_id="call-1")
-    first = ledger.get(ledger.active_for_session(SESSION_KEY)[0].park_id)
-    assert result["action"] == "block" and "already waiting" in result["message"]
-    assert first.tool_call_id == "call-0" and first.status == "parked"
-    assert [r.tool_call_id for r in ledger.list_by_status("cancelled")] == ["call-1"]
-    assert env.provider.requests == {}
+    first = ledger.get_by_call("sess-1", "call-0")
+    assert result == {"action": "block", "message": already_waiting(first.park_id)}
+    assert first.status == "parked" and first.request_id == "req-other"
+    (loser,) = ledger.list_by_status("cancelled")
+    assert loser.tool_call_id == "call-1" and loser.request_id is None
+    assert env.provider.only().status == "cancelled"
+
+
+def test_parked_row_without_request_does_not_make_the_chat_busy(env):
+    """A row still being asked (no request id yet) does not count as waiting (D11)."""
+    env.ledger.park(session_key=SESSION_KEY, session_id="sess-1", tool_call_id="call-0",
+                    tool="mcp__wh__quickbooks__create_bill", args={"a": 1},
+                    call_key=call_key("sess-1", "call-0"), server="park:quickbooks")
+    result = call(env.hook, "mcp__wh__quickbooks__create_payment", tool_call_id="call-1")
+    assert result["message"].startswith("PARKED P-")
 
 
 class FakeCtx:
@@ -193,9 +235,11 @@ def test_register_wires_pre_tool_call_with_default_settings(tmp_path):
     assert tool.toolset == "durable_park" and tool.schema == EXECUTE_SCHEMA and callable(tool.handler)
     assert {"risky_tools", "aap_base_url", "token_file", "ledger_path"} <= set(ctx.asked)
     assert (tmp_path / "data" / "ledger.db").exists()  # default ledger_path under state.data_dir
-    # defaults classify risky tools; non-risky ones pass without touching the network or token file
-    assert ctx.hooks["pre_tool_call"](tool_name="mcp__wh__quickbooks__search_customers", args={},
-                                      session_id="s", tool_call_id="c") is None
+    # every non-exempt tool is asked (here: refused, there is no chat session); exempt tools pass
+    result = ctx.hooks["pre_tool_call"](tool_name="mcp__wh__quickbooks__search_customers", args={},
+                                        session_id="s", tool_call_id="c")
+    assert result == {"action": "block", "message": NO_SESSION}
+    assert ctx.hooks["pre_tool_call"](tool_name="clarify", args={}, session_id="s", tool_call_id="c2") is None
 
 
 def test_register_honours_settings_and_fails_closed_without_token(tmp_path, monkeypatch):
@@ -208,9 +252,7 @@ def test_register_honours_settings_and_fails_closed_without_token(tmp_path, monk
     register(ctx)
     assert (tmp_path / "custom.db").exists()
     hook = ctx.hooks["pre_tool_call"]
-    # the custom list replaces the defaults
-    assert hook(tool_name="mcp__wh__quickbooks__create_payment", args={}, session_id="s", tool_call_id="c") is None
-    # custom pattern is risky and has a chat session; only the unreadable token file can stop it
+    # it has a chat session; only the unreadable token file can stop it (every non-exempt tool is asked)
     result = hook(tool_name="mcp__wh__custom__do_it", args={}, session_id="s", tool_call_id="c")
     assert result == {"action": "block", "message": COULD_NOT_OPEN}
     (row,) = Ledger(str(tmp_path / "custom.db")).list_by_status("cancelled")
@@ -223,7 +265,9 @@ def test_register_fails_closed_when_ledger_cannot_open(tmp_path):
     hook = ctx.hooks["pre_tool_call"]
     result = hook(tool_name="mcp__wh__quickbooks__create_payment", args={}, session_id="s", tool_call_id="c")
     assert result == {"action": "block", "message": COULD_NOT_OPEN}
-    assert hook(tool_name="mcp__wh__quickbooks__search_customers", args={}, session_id="s", tool_call_id="c") is None
+    assert hook(tool_name="mcp__wh__quickbooks__search_customers", args={}, session_id="s",
+                tool_call_id="c") == {"action": "block", "message": COULD_NOT_OPEN}
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") is None
     assert ctx.tools == {}  # without a ledger there is nothing to execute
 
 
@@ -270,16 +314,17 @@ def test_same_id_same_args_replay_keeps_parked_message(env):
     assert len(env.provider.requests) == 1
 
 
-def test_transport_error_blocks_and_cancels(env):
+def test_transport_error_blocks_and_refuses(env):
     def boom(request):
         raise httpx.ConnectError("network down")
 
     env.provider.intercept = boom
-    result = call(env.hook, "mcp__wh__quickbooks__create_payment")
-    assert result == {"action": "block", "message": COULD_NOT_OPEN}
+    tool = "mcp__wh__quickbooks__create_payment"
+    result = call(env.hook, tool)
+    assert result == {"action": "block", "message": UNREACHABLE.format(tool=tool)}
     assert env.ledger.list_by_status("parked") == []
-    (row,) = env.ledger.list_by_status("cancelled")
-    assert row.request_id is None
+    (row,) = env.ledger.list_by_status("refused")
+    assert row.request_id is None and row.note.startswith("withHuman error")
 
 
 def test_make_gate_bounds_network_waits():
@@ -340,10 +385,7 @@ CHECK_UNAVAILABLE = ('durable-park: the arguments of "mcp__wh__quickbooks__creat
 
 
 def checked_env(env, schema_fn):
-    hook = make_pre_tool_call(
-        env.ledger, lambda: make_gate(BASE_URL, TOKEN, client=env.provider.client(retry_budget=0.5)), RISKY,
-        lambda: SESSION_KEY, form_checker=FormChecker(schema_fn))
-    return hook
+    return make_hook(env, form_checker=FormChecker(schema_fn))
 
 
 def test_invalid_args_blocked_before_parking(env):
@@ -389,10 +431,13 @@ def test_rules_lookup_crash_fails_closed(env):
     assert result == {"action": "block", "message": CHECK_UNAVAILABLE}
 
 
-def test_non_risky_tools_are_not_checked(env):
+def test_only_form_checked_tools_are_form_checked(env):
     def boom(tool):
-        raise AssertionError("non-risky tools must not be checked")
-    assert call(checked_env(env, boom), "mcp__wh__quickbooks__search_customers", args={}) is None
+        raise AssertionError("tools outside form_checked must not be form-checked")
+    result = call(checked_env(env, boom), "mcp__wh__quickbooks__search_customers", args={})
+    # not form-checked, but still asked: withHuman had no instant answer, so it parks
+    assert result["message"].startswith("PARKED P-")
+    assert len(env.provider.requests) == 1
 
 
 def test_fixed_retry_after_invalid_parks_once(env):
@@ -422,7 +467,7 @@ def test_register_starts_selfcheck_next_to_the_ledger(tmp_path, monkeypatch):
     ctx = FakeCtx(tmp_path / "data")
     register(ctx)
     ((checker, n_risky, path),) = started
-    assert isinstance(checker, FormChecker) and n_risky == len(DEFAULT_RISKY_TOOLS)
+    assert isinstance(checker, FormChecker) and n_risky == len(DEFAULT_FORM_CHECKED_TOOLS)
     assert path == str(tmp_path / "data" / "formcheck_status.json")
 
 
@@ -456,3 +501,175 @@ def test_request_id_not_attached_to_a_row_the_sweep_cancelled(env, monkeypatch):
     assert result == {"action": "block", "message": COULD_NOT_OPEN}
     assert env.provider.only().status == "cancelled"
     assert env.ledger.list_by_status("parked") == []
+
+
+# ---- every tool call is asked (spec 4.2) ----------------------------------------------------------
+
+class NotingProvider(FakeProvider):
+    """Decides every new request at once with a reviewer note (FakeProvider's ``auto`` carries no note)."""
+
+    def __init__(self, status, note):
+        super().__init__(auto=None)
+        self.decide_on_create = (status, note)
+
+    def _handle(self, request):
+        response = super()._handle(request)
+        if request.method == "POST" and response.status_code == 201:
+            stored = self.requests[response.json()["id"]]
+            self._decide(stored, *self.decide_on_create)
+            return httpx.Response(201, json=stored.wire())
+        return response
+
+
+def test_instant_deny_records_refused_with_note(env):
+    provider = NotingProvider("denied", "too big")
+    hook = make_hook(env, provider=provider)
+    tool = "mcp__wh__quickbooks__create_payment"
+    result = call(hook, tool)
+    assert result == {"action": "block", "message": REFUSED.format(tool=tool, note=": too big")}
+    (row,) = env.ledger.list_by_status("refused")
+    stored = provider.only()
+    assert row.request_id == stored.id and stored.consumed_at is None
+    assert row.note.startswith("withHuman denied: ") and row.note.endswith("Their note: too big")
+
+
+def test_instant_deny_without_note_has_no_note(env):
+    hook = make_hook(env, provider=NotingProvider("denied", None))
+    result = call(hook, "web_search", {"query": "x"})
+    assert result == {"action": "block", "message": REFUSED.format(tool="web_search", note="")}
+
+
+def test_every_tool_gets_a_request_with_server_label(env):
+    env.provider.auto = "approved"
+    assert call(env.hook, "web_search", {"query": "x"}) is None
+    assert call(env.hook, "mcp__github__x", {"a": 1}, tool_call_id="call-2") is None
+    servers = {s.body["tool"]: s.body["server"] for s in env.provider.requests.values()}
+    assert servers == {"web_search": "hermes", "mcp__github__x": "mcp:github"}
+    assert {r.server for r in env.ledger.list_by_status("allowed")} == {"hermes", "mcp:github"}
+
+
+def test_request_body_is_redacted_and_carries_context(env):
+    call(env.hook, "web_search", {"query": "x", "password": "hunter2"})
+    (row,) = env.ledger.list_by_status("parked")
+    body = env.provider.only().body
+    assert body["arguments"] == {"query": "x", "password": "[redacted]"}
+    assert body["context"]["args_sha256"] == row.args_digest
+    assert "hunter2" in row.args_json  # the ledger keeps the real arguments for the executor
+
+
+def test_breaker_open_refuses_without_request(env):
+    breaker = Breaker(None)
+    hook = make_hook(env, breaker=breaker)
+    attempts = []
+
+    def boom(request):
+        attempts.append(request)
+        raise httpx.ConnectError("network down")
+
+    env.provider.intercept = boom
+    for i in range(3):
+        result = call(hook, "web_search", {"query": "x"}, tool_call_id=f"c{i}")
+        assert result == {"action": "block", "message": UNREACHABLE.format(tool="web_search")}
+    assert not breaker.allow_attempt()
+    env.provider.intercept = None  # withHuman is back, but the breaker is still cooling down
+    seen = len(attempts)
+    result = call(hook, "web_search", {"query": "x"}, tool_call_id="c3")
+    assert result == {"action": "block", "message": UNREACHABLE.format(tool="web_search")}
+    assert env.provider.requests == {} and len(attempts) == seen
+    row = env.ledger.get_by_call("sess-1", "c3")
+    assert row.status == "refused" and row.request_id is None and "breaker" in row.note
+
+
+def test_breaker_success_after_policy_decisions(env):
+    breaker = Breaker(None)
+    hook = make_hook(env, breaker=breaker, provider=NotingProvider("denied", None))
+    breaker.record_failure()
+    breaker.record_failure()
+    call(hook, "web_search", {"query": "x"})
+    breaker.record_failure()
+    assert breaker.allow_attempt()  # the deny was an answer from withHuman: the failure count was reset
+
+
+def test_foreign_hook_blocks_every_non_exempt_call(env, caplog):
+    hook = make_hook(env, foreign_hooks_fn=lambda: ["x.y"])
+    assert call(hook, "web_search") == {"action": "block", "message": FOREIGN.format(names="x.y")}
+    assert call(hook, "mcp__wh__quickbooks__create_payment", tool_call_id="c2") == {
+        "action": "block", "message": FOREIGN.format(names="x.y")}
+    assert call(hook, "clarify", tool_call_id="c3") is None
+    assert env.provider.requests == {}
+    assert env.ledger.get_by_call("sess-1", "call-1") is None
+    assert any("x.y" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records)
+
+
+@pytest.mark.parametrize("tool", ["web_search", "terminal", "mcp__github__x", "mcp__wh__quickbooks__create_payment"])
+def test_no_session_blocks_every_non_exempt_tool(env, tool):
+    hook = make_hook(env, session_key_fn=lambda: "")
+    assert call(hook, tool) == {"action": "block", "message": NO_SESSION}
+    assert call(hook, "clarify", tool_call_id="c2") is None
+    assert env.provider.requests == {}
+    assert env.ledger.get_by_call("sess-1", "call-1") is None
+
+
+def test_reused_call_id_after_allow_is_not_run_again(env):
+    env.provider.auto = "approved"
+    assert call(env.hook, "web_search", {"query": "x"}) is None
+    (row,) = env.ledger.list_by_status("allowed")
+    again = call(env.hook, "web_search", {"query": "x"})
+    assert again == {"action": "block",
+                     "message": f"durable-park: {row.park_id} is already allowed; this call was not run again"}
+    assert len(env.provider.requests) == 1
+
+
+def test_reused_call_id_after_refuse_is_not_asked_again(env):
+    hook = make_hook(env, provider=NotingProvider("denied", None))
+    call(hook, "web_search", {"query": "x"})
+    (row,) = env.ledger.list_by_status("refused")
+    again = call(hook, "web_search", {"query": "x"})
+    assert again["message"] == f"durable-park: {row.park_id} is already refused; this call was not run again"
+
+
+def test_unserialisable_arguments_block_and_cancel(env):
+    breaker = Breaker(None)
+    hook = make_hook(env, breaker=breaker)
+    result = call(hook, "web_search", {"query": float("nan")})
+    assert result == {"action": "block", "message": COULD_NOT_OPEN}
+    (row,) = env.ledger.list_by_status("cancelled")
+    assert row.request_id is None
+    assert env.provider.requests == {}
+    assert breaker._failures == 0
+
+
+def test_can_pause_is_true(env, monkeypatch):
+    seen = []
+    real = Gate.check
+
+    def spy(self, call_, **kwargs):
+        seen.append(kwargs)
+        return real(self, call_, **kwargs)
+
+    monkeypatch.setattr(Gate, "check", spy)
+    call(env.hook, "web_search", {"query": "x"})
+    assert seen == [{"can_pause": True}]
+
+
+def test_allow_that_cannot_be_recorded_does_not_run(env, monkeypatch):
+    env.provider.auto = "approved"
+    real = Ledger.transition
+
+    def sweep_got_there_first(self, park_id, from_status, to_status, **fields_):
+        if to_status == "allowed":
+            assert real(self, park_id, "parked", "cancelled", note="cancelled by the sweep")
+        return real(self, park_id, from_status, to_status, **fields_)
+
+    monkeypatch.setattr(Ledger, "transition", sweep_got_there_first)
+    assert call(env.hook, "web_search", {"query": "x"}) == {"action": "block", "message": COULD_NOT_OPEN}
+    assert env.ledger.list_by_status("allowed") == []
+
+
+def test_fail_closed_hook_blocks_every_non_exempt_tool():
+    from durable_park.park_hook import COULD_NOT_OPEN_MESSAGE, fail_closed_hook
+
+    hook = fail_closed_hook(["clarify"])
+    assert hook(tool_name="web_search") == {"action": "block", "message": COULD_NOT_OPEN_MESSAGE}
+    assert hook(tool_name="clarify") is None
+    assert fail_closed_hook([], message="m")(tool_name="clarify") == {"action": "block", "message": "m"}

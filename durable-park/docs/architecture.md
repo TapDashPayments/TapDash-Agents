@@ -9,7 +9,7 @@ the root README's [Built on](../../README.md#built-on) table.
 - [1. System map](#1-system-map)
 - [2. The approval journey, step by step](#2-the-approval-journey-step-by-step)
 - [3. Ledger states](#3-ledger-states)
-- [4. Form check before parking](#4-form-check-before-parking)
+- [4. Tool call: form check, then one question to withHuman](#4-tool-call-form-check-then-one-question-to-withhuman)
 - [5. When things go wrong](#5-when-things-go-wrong)
 - [6. Where everything runs](#6-where-everything-runs)
 - [7. Secrets and who can read them](#7-secrets-and-who-can-read-them)
@@ -45,6 +45,9 @@ What that means today:
   a Hermes upgrade, a hijack), it could read everything in `/etc/durable-park/`, including the QuickBooks client
   secret, the refresh token and the withHuman tunnel token in `tunnel.env`; change the code in `/opt/durable-park`;
   forge ledger rows; and call QuickBooks directly, **bypassing withHuman**.
+- Even so, durable-park asks withHuman about every tool call except `parked_action_execute` and `clarify`, and
+  withHuman's pipeline decides which need a person; with the lockdown the only non-QuickBooks tool the agent reaches
+  is `clarify`. It is an approval gate, not a boundary, while the agent could reach a terminal.
 - Yaakov accepted this on 2026-10-20 for the exploration phase, on a test VM with a QuickBooks **sandbox** company.
   The decision: Clean Setup Phase 1 (spec §4.1), then Phase 2 (§4.5) before any local tool opens; the docker backend
   and `approvals.deny` were dropped. Both are the first items in the [backlog](backlog.md#before-real-books) and are
@@ -73,7 +76,7 @@ flowchart LR
   subgraph VM["Test VM proto-agents"]
     subgraph HG["Hermes gateway - user hermes"]
       agent["Agent (LLM)"]
-      hook["park hook<br/>+ form check"]
+      hook["park hook<br/>+ form check + breaker"]
       exec["parked_action_execute<br/>(executor tool)"]
       wake["wake handler"]
       selfck["form self-check<br/>every 30 min"]
@@ -81,6 +84,7 @@ flowchart LR
     end
     ledger[("ledger.db")]
     fstatus[("formcheck_status.json")]
+    bstatus[("breaker_status.json")]
     route["Hermes webhook route<br/>127.0.0.1:8644"]
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
     bridge["bridge<br/>127.0.0.1:8791 - user hermes"]
@@ -91,9 +95,11 @@ flowchart LR
   end
 
   chat -->|"message"| agent
-  agent -->|"risky tool call"| hook
+  agent -->|"every tool call<br/>(except exempt)"| hook
   hook -->|"saves the exact call"| ledger
-  hook -->|"opens request, server park:quickbooks"| aap
+  hook -->|"asks once: server park:slug,<br/>mcp:alias or hermes"| aap
+  aap -->|"allow (tool runs), refuse,<br/>or pending (parked)"| hook
+  hook -->|"open / closed"| bstatus
   aap -->|"asks"| approver
   approver -->|"approve or deny"| aap
   aap -->|"request.resolved, signed"| funnelA
@@ -118,12 +124,13 @@ flowchart LR
   sweep -->|"re-wakes missed decisions"| route
   selfck -->|"writes"| fstatus
   sweep -->|"reads"| fstatus
-  sweep -->|"alerts: UNKNOWN, form checker broken"| chat
+  sweep -->|"reads"| bstatus
+  sweep -->|"alerts: UNKNOWN, form checker broken,<br/>withHuman unreachable"| chat
 ```
 
 | Part | Code | What it does |
 |---|---|---|
-| park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. Blocks risky calls, checks the form, saves the call, opens the approval request. |
+| park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`): checks the form (form-checked tools only), saves the call, and asks withHuman once. An instant approval lets the tool run (row `allowed`); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
 | ledger | `plugin/durable_park/ledger.py` | SQLite record of every parked call and its state. The single source of truth. |
 | wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. |
@@ -143,6 +150,10 @@ revision 8):
 | 1 | Agent `proto-agents` and (server starts with `park:` or tool starts with `mcp__wh__`) - a park request | Ask an approver |
 | 2 | Server `quickbooks` and the tool is one of the 12 money types (create/update/delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Webhook block `durable-park-bridge`: answers approve or human (human asks an approver) |
 | 3 | Everything else (reads and other writes) | Approve |
+
+Since the park hook asks about every tool call, revision 8 sends every `park:` request to an approver (QuickBooks
+reads included, rule 1) and approves every `hermes` and `mcp:` request at once (rule 3). Activate the revision
+written for asking about every call before this park hook goes live.
 
 **Who approves:** the people on the approvers' escalation path in withHuman (today `notify-yaakov-yehuda`, one
 approver). Adding or changing approvers is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
@@ -211,9 +222,11 @@ Notes:
 
 ## 3. Ledger states
 
-Every parked call is one row in `ledger.db`. Moves happen only along these edges (`ledger.TRANSITIONS`), with a
-compare-and-set, so two processes can never both move the same row. `parked`, `approved` and `executing` count as
-"waiting" and block new risky calls in the same chat.
+Every tool call the park hook asks about is one row in `ledger.db` (exempt tools get none). Moves happen only along
+these edges (`ledger.TRANSITIONS`), with a compare-and-set, so two processes can never both move the same row. A
+row starts `parked` while withHuman is asked; an instant answer moves it to `allowed` or `refused` at once. While
+another row of the same chat is `approved` or `executing`, or `parked` **with** a request id, a new call that needs a
+person is refused ("already waiting"); a `parked` row whose request is still being opened does not count.
 
 ```mermaid
 stateDiagram-v2
@@ -221,9 +234,9 @@ stateDiagram-v2
   parked --> approved: wake - approved in withHuman
   parked --> denied: wake - denied
   parked --> expired: wake - no decision in 168 h
-  parked --> cancelled: wake - cancelled, or hook could not open the request
-  parked --> allowed: withHuman approved at once, no human asked
-  parked --> refused: withHuman denied at once, no human asked
+  parked --> cancelled: wake - cancelled, chat already waiting, or hook error
+  parked --> allowed: withHuman approved at once, tool runs
+  parked --> refused: withHuman refused at once, or unreachable
   approved --> executing: executor claims it
   executing --> executed: tool succeeded
   executing --> failed: tool error, or approval refused
@@ -239,8 +252,11 @@ stateDiagram-v2
   unknown --> [*]
 ```
 
-- `allowed` and `refused` are final: withHuman decided the call instantly (an automatic rule, no person asked), so
-  nothing waits and nothing runs later from the ledger. They are not "waiting" statuses. The sweep deletes
+- `allowed` and `refused` are final: withHuman decided the call instantly (an automatic rule, no person asked), or
+  could not be reached (`refused`, note `withHuman error: ...` or `error: withHuman unreachable (breaker open)`), so
+  nothing waits and nothing runs later from the ledger. The request id is stored only in this final move, so a
+  wake never announces them. A replay of the same call id is blocked ("already allowed/refused"), never run or
+  asked again. They are not "waiting" statuses. The sweep deletes
   `allowed`, `refused` and `cancelled` rows 30 days after their last update (`--retention-days`); rows that hold an
   outcome (`executed`, `failed`, `unknown`) or a human decision (`denied`, `expired`) are kept.
 - `unknown` is final on purpose: the approval was already used, so the call is never retried automatically. A
@@ -248,27 +264,56 @@ stateDiagram-v2
 - `gateway_passed_at` is set when the bridge approves the gateway call (once per row). `notified_at` is set when the
   chat was told about a decision.
 
-## 4. Form check before parking
+## 4. Tool call: form check, then one question to withHuman
 
-Before parking, the hook checks the call against the rules Hermes registered for that tool (the same rules the
-model was shown). A broken call is sent back to the model to fix, so no approver is asked about a call QuickBooks
-would reject. Details and safety choices: [form-check.md](form-check.md).
+Every tool call goes through the park hook (`park_hook.make_pre_tool_call`) in this order. Every path except
+"tool runs" blocks the call. A form-checked tool (`DEFAULT_FORM_CHECKED_TOOLS`: the QuickBooks money moves and the
+DocuSign writes) is first checked against the rules Hermes registered for it (the same rules the model was shown),
+so no approver is asked about a call QuickBooks would reject. Details and safety choices:
+[form-check.md](form-check.md). Which calls need a person is a withHuman pipeline rule, not a list in the plugin.
 
 ```mermaid
 flowchart TD
-  start["Risky tool call"] --> again{"Already parked?<br/>(same chat call id)"}
-  again -->|"yes - a replay"| park["Park and open request<br/>(or repeat PARKED)"]
-  again -->|"no"| rules{"Rules for this tool<br/>found and usable?"}
-  rules -->|"no"| closed["Block: could not be checked<br/>(nothing parked, nobody asked)"]
-  rules -->|"yes"| prep["Copy args, run Hermes type fixing,<br/>drop withhuman_* fields"]
-  prep --> valid{"Args follow the rules?"}
+  start["Tool call"] --> exempt{"Exempt?<br/>parked_action_execute, clarify"}
+  exempt -->|"yes"| runs0["Tool runs<br/>(no row, nobody asked)"]
+  exempt -->|"no"| foreign{"Another plugin hook that<br/>could change the arguments?"}
+  foreign -->|"yes"| bforeign["Block: foreign hook<br/>(no row, nobody asked)"]
+  foreign -->|"no"| ids{"Chat session and<br/>tool call id?"}
+  ids -->|"no"| bids["Block: no chat session<br/>or no tool call id"]
+  ids -->|"yes"| fc{"Form-checked tool,<br/>call id not seen before?"}
+  fc -->|"yes"| rules{"Rules for this tool<br/>found and usable?"}
+  rules -->|"no"| closed["Block: could not be checked<br/>(no row, nobody asked)"]
+  rules -->|"yes"| valid{"Args follow the rules?<br/>after Hermes type fixing,<br/>withhuman_* dropped"}
   valid -->|"no"| fix["Block with the exact problem<br/>model fixes it and calls again"]
-  valid -->|"yes"| park
   fix -.->|"next try"| start
+  valid -->|"yes"| save["Save row, status parked<br/>(one per chat call id)"]
+  fc -->|"no"| save
+  save --> seen{"What is on the row?"}
+  seen -->|"another call with this id"| reused["Block: id reused"]
+  seen -->|"already decided"| again["Block: already allowed, refused,<br/>denied ...; not run again"]
+  seen -->|"parked with a request"| repeat["Block: PARKED (repeat)"]
+  seen -->|"parked, no request yet"| breaker{"Breaker open?"}
+  breaker -->|"yes"| down["Row refused<br/>Block: withHuman unreachable"]
+  breaker -->|"no"| ask["Ask withHuman once<br/>AAP check, can pause"]
+  ask -->|"Allow, consumed"| runs["Row allowed<br/>tool runs"]
+  ask -->|"Deny, error"| down
+  ask -->|"Deny, policy"| refused["Row refused<br/>Block: refused by withHuman policy"]
+  ask -->|"Pending"| busy{"Chat already waiting?<br/>another row approved, executing,<br/>or parked with a request"}
+  busy -->|"yes"| loser["Cancel the new request<br/>row cancelled<br/>Block: already waiting"]
+  busy -->|"no"| parked["Attach request id<br/>Block: PARKED, a person decides"]
 ```
 
-The background self-check (every 30 minutes, inside the gateway) proves the checker, the registry and every risky
-tool's rules work, and writes `formcheck_status.json`. The sweep alerts once if that report is missing, older than
+- **Allow** means the SDK already consumed the approval. If the row cannot move to `allowed` (the sweep cancelled
+  it meanwhile), the call is blocked and the spent approval is not used again.
+- **Deny** with status `error` (withHuman unreachable, credential refused, bad answer) counts as a breaker failure;
+  every other Deny (denied, expired, cancelled, consumed) is an answer and resets the breaker. A reviewer's note is
+  passed to the model in the refusal.
+- **Any error** in the hook (token file unreadable, arguments that are not strict JSON, a ledger error) blocks the
+  call with "could not open an approval request"; the row is cancelled when no request was attached to it.
+- If the ledger cannot be opened at start, a fail-closed hook blocks every tool call except the exempt ones.
+
+The background self-check (every 30 minutes, inside the gateway) proves the checker, the registry and every
+form-checked tool's rules work, and writes `formcheck_status.json`. The sweep alerts once if that report is missing, older than
 75 minutes, or failing on two sweeps in a row, and once when it recovers.
 
 ## 5. When things go wrong
@@ -276,6 +321,10 @@ tool's rules work, and writes `formcheck_status.json`. The sweep alerts once if 
 | Situation | What happens | Who acts |
 |---|---|---|
 | Denied in withHuman | Row `denied`; the chat is told it did not run. | Nobody |
+| withHuman refuses at once (a pipeline deny rule) | Row `refused`; the call is blocked with "refused by withHuman policy" (and the reviewer's note, if any). | Nobody |
+| withHuman cannot be reached | Row `refused`; the call is blocked with "withHuman could not be reached". After 3 errors in a row the breaker refuses at once for 30 s, then tries again; the sweep alerts once on open and once on close. | Check withHuman ([runbook](runbook.md#withhuman-could-not-be-reached)) |
+| Another plugin's `pre_tool_call` hook could change arguments after approval | Every tool call except the exempt ones is blocked. | An admin removes the hook or lists it in `observer_hooks` |
+| No chat session (e.g. a one-shot `hermes chat -q`) | Every tool call except the exempt ones is blocked. | Use a chat |
 | No decision in 168 h | Row `expired`; the chat is told it can ask again. | Nobody |
 | Approval expired before running | Row `expired`; nothing ran. | Ask again if still wanted |
 | Gateway crashes after the approval was used | Row stays `executing`; after 10 min the sweep marks it `unknown` and alerts. Never retried. | Check QuickBooks ([runbook](runbook.md#outcome-unknown)) |
@@ -283,10 +332,10 @@ tool's rules work, and writes `formcheck_status.json`. The sweep alerts once if 
 | Tool returns a clear error | `failed`, error stored; nothing to check. | Fix and ask again |
 | A decision's wake is lost (Hermes down, wake refused) | The sweep re-posts wakes every 5 minutes until the chat is told. | Nobody |
 | Bridge cannot match the gateway call (args changed, bridge down, bad signature) | withHuman asks a person instead. Never auto-approves. | An approver decides |
-| Bad form (missing required field, wrong type) | Blocked before parking; the model is told the exact problem. | Nobody (the model fixes it) |
-| Form checker cannot run | Risky calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
-| Ledger cannot be opened at start | Every risky call is blocked; wakes are dropped; no executor tool. | Fix the ledger file |
-| Another park is still waiting in the chat | New risky call blocked: "already waiting". A park can wait up to 168 h, and the chat cannot start another risky action until it is decided. | Decide the waiting one |
+| Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
+| Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
+| Ledger cannot be opened at start | Every tool call except the exempt ones is blocked; wakes are dropped; no executor tool. | Fix the ledger file |
+| Another park is still waiting in the chat | A new call that withHuman sends to a person is blocked: "already waiting", and its request is cancelled. Calls withHuman answers at once still run or are refused. A park can wait up to 168 h. | Decide the waiting one |
 
 Known gaps (see the [backlog](backlog.md)): an inject Hermes accepted but
 dropped is never retried; the bridge's

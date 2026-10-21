@@ -13,13 +13,13 @@ from durable_park import executor as executor_mod
 from durable_park.executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor
 from durable_park.gatecall import build_call, make_gate
 from durable_park.ledger import Ledger
-from durable_park.park_hook import DEFAULT_RISKY_TOOLS, make_pre_tool_call
+from durable_park.park_hook import DEFAULT_FORM_CHECKED_TOOLS, make_pre_tool_call
 
 SESSION_KEY = "agent:main:telegram:dm:42"
 TOOL = "mcp__wh__quickbooks__create_payment"
 ARGS = {"amount": 5, "customer": "C-1"}
 EXPIRED = "The approval expired before it could run. Ask the user whether to request approval again."
-RISKY = [re.compile(p) for p in DEFAULT_RISKY_TOOLS]
+RISKY = [re.compile(p) for p in DEFAULT_FORM_CHECKED_TOOLS]
 
 
 class Crash(BaseException):
@@ -34,7 +34,7 @@ def env(tmp_path):
     def gate_factory():
         return make_gate(BASE_URL, TOKEN, client=provider.client(retry_budget=0.5))
 
-    hook = make_pre_tool_call(ledger, gate_factory, RISKY, lambda: SESSION_KEY)
+    hook = make_pre_tool_call(ledger, gate_factory, RISKY, session_key_fn=lambda: SESSION_KEY)
     dispatched = []
     box = SimpleNamespace(result='{"ok": true, "payment_id": "pay_1"}', raises=None)
 
