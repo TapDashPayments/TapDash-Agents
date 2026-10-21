@@ -97,6 +97,7 @@ not importable (CI) and run on the VM ([runbook](docs/runbook.md#check-durable-p
 | [backlog.md](docs/backlog.md) | See what is still open, and what must be done before real books |
 | [acceptance-2026-10-20.md](docs/acceptance-2026-10-20.md) | See what was tested for v1 (the record) |
 | [acceptance-2026-10-21-ask-every-call.md](docs/acceptance-2026-10-21-ask-every-call.md) | See what was tested for "ask every call" (the record) |
+| [acceptance-2026-10-21-hermes-0.22.3.md](docs/acceptance-2026-10-21-hermes-0.22.3.md) | See what was tested when Hermes v0.22.3 became the tested version (the record) |
 | [plans/](docs/plans/) | The original build plan (historical) |
 
 Changing code? Update the docs and diagrams it affects in the same change - see [CONTRIBUTING.md](../CONTRIBUTING.md).

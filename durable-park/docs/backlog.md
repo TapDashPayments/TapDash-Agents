@@ -31,6 +31,8 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 
 ## Done since v1
 
+- 2026-10-21: Hermes v0.22.3 is the tested version (`SUPPORTED_HERMES_VERSION`): live approve -> run-once re-test passed;
+  record in [acceptance-2026-10-21-hermes-0.22.3.md](acceptance-2026-10-21-hermes-0.22.3.md).
 - 2026-10-21: ask every call (PR #7): every tool call goes to withHuman for a decision, except the exempt tools
   (`parked_action_execute`, `clarify`); acceptance record in [acceptance-2026-10-21-ask-every-call.md](acceptance-2026-10-21-ask-every-call.md) (PR #12).
 - 2026-10-21: tool policy from one list, with a start check (PRs #8, #9).

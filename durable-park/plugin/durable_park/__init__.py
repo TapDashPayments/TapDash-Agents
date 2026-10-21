@@ -278,7 +278,7 @@ def register(ctx) -> None:
     on with no ``pre_tool_call`` hook at all (hermes_cli/plugins_loader.py:525-537), so every tool would run
     unchecked. Any error (a setting of the wrong type, a wiring failure) instead registers a hook that refuses
     every call except ``DEFAULT_EXEMPT_TOOLS`` and drops wakes."""
-    compat.check_hermes_version(log)  # warns (never refuses) on a Hermes other than v0.22.2
+    compat.check_hermes_version(log)  # warns (never refuses) on a Hermes other than v0.22.3
     own: set[int] = set()  # ids of the hook callbacks this register passed to ctx.register_hook
     registered: list[str] = []  # hook names passed to ctx.register_hook, in order, for the load proof
 

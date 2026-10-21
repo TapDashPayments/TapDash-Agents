@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # On proto-agents this script re-applies the current tool policy (v1 lockdown, re-applied 2026-10-21 03:16 UTC). It restarts the gateway: run it only when no ledger row is parked, approved or executing. See docs/specs/2026-10-21-all-tools-withhuman-design.md.
-# durable-park deploy for the proto VM (Hermes Agent v0.22.2). Idempotent: safe to re-run.
+# durable-park deploy for the proto VM (Hermes Agent v0.22.3). Idempotent: safe to re-run.
 #
 #   sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh
 #
@@ -14,7 +14,7 @@
 #   4. Hermes (as user hermes, through Hermes's own CLI): plugin symlink; `hermes plugins enable` (PM
 #      admission installs the plugin.yaml python_dependencies into Hermes's environment); plugin settings;
 #      plugins.hook_callback_timeout 60; the local webhook platform (127.0.0.1:8644, route durable-park-wake,
-#      deliver log, rate_limit 120) whose secret is ${env:DURABLE_PARK_WAKE_SECRET}, supplied at startup by
+#      deliver log, rate_limit 120) whose secret is ${DURABLE_PARK_WAKE_SECRET}, supplied at startup by
 #      the `command` secret source (the helper above reads wake_secret, and instance_token once it exists, for
 #      deploy/hermes_mcp.sh); no copy of a secret in config.yaml/.env
 #   4b. gateway bridge: root-owned copy of bridge/ + the whole plugin/durable_park package (incl. _vendor/, stale
@@ -32,7 +32,8 @@
 #      (deploy/tool_policy_check.sh); the plugin refuses every tool call when its report is missing/failed/stale.
 #      The same drop-in runs deploy/plugin_load_check.sh as ExecStartPost (a failure stops the gateway when the
 #      plugin did not load: no plugin_load.json for the gateway's pid) and limits restarts (StartLimitBurst=3 in 10 min).
-#   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (every 5m, --no-agent, telegram)
+#   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (`*/5 * * * *`, --no-agent, telegram;
+#      an existing job on another schedule is moved over with `hermes cron edit`)
 #   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events and /wh/bridge -> 127.0.0.1:8791/wh/bridge
 #   7. restart: the hermes user manager when the gateway does not carry the dpwake group yet, else the
 #      hermes-gateway user unit; then wait for the plugin's "durable-park loaded" log line
@@ -225,8 +226,12 @@ set_cfg platforms.webhook.enabled true
 set_cfg platforms.webhook.extra.host 127.0.0.1
 set_cfg platforms.webhook.extra.port 8644
 set_cfg platforms.webhook.extra.rate_limit 120
-# shellcheck disable=SC2016  # a literal Hermes ${env:...} reference, expanded by Hermes, not by bash
-set_cfg "platforms.webhook.extra.routes.$ROUTE.secret" '${env:DURABLE_PARK_WAKE_SECRET}'
+# A bare ${VAR} reference, not the env:-prefixed form: Hermes expands config at import time, before the
+# secrets.command helper has put the value in the environment, and warns "Config ref ... is not set" in every
+# process for the env: form only (hermes_cli/config.py _env_expand_match). Both forms resolve alike; the
+# cached config is re-expanded after the helper ran, so the real value is used. See docs/receiver-setup.md.
+# shellcheck disable=SC2016  # a literal Hermes ${...} reference, expanded by Hermes, not by bash
+set_cfg "platforms.webhook.extra.routes.$ROUTE.secret" '${DURABLE_PARK_WAKE_SECRET}'
 set_cfg "platforms.webhook.extra.routes.$ROUTE.events" '["wake"]'
 set_cfg "platforms.webhook.extra.routes.$ROUTE.deliver" log
 set_cfg "platforms.webhook.extra.routes.$ROUTE.prompt" \
@@ -321,8 +326,8 @@ as_hermes install -d -m 0700 "$HERMES_HOME/scripts"
 wrapper=$(mktemp)
 cat >"$wrapper" <<WRAPPER
 #!/bin/sh
-# durable-park sweep for Hermes cron (every 5m, --no-agent). Written by deploy/configure_hermes.sh; edits
-# are overwritten. A real file because cron refuses symlinks out of ~/.hermes/scripts and cannot pass
+# durable-park sweep for Hermes cron (every 5 minutes on the wall clock, --no-agent). Written by
+# deploy/configure_hermes.sh; edits are overwritten. A real file because cron refuses symlinks out of ~/.hermes/scripts and cannot pass
 # arguments. The sweep uses the standard library only.
 exec /usr/bin/python3 -I $REPO/scripts/durable_park_sweep.py --ledger $LEDGER --wake-secret-file $ETC/wake_secret --retention-days 30
 WRAPPER
@@ -331,8 +336,29 @@ rm -f "$wrapper"
 cron_jobs=$(hermes_cli cron list --all 2>/dev/null) || die "hermes cron list failed; not creating a job blindly"
 has "$cron_jobs" -E "Scheduled Jobs|No scheduled jobs" \
     || die "hermes cron list printed no job list; not creating a job blindly"
-if ! has "$cron_jobs" -E -- "^[[:space:]]*Name:[[:space:]]+${CRON_NAME}[[:space:]]*\$"; then
-    hermes_cli cron create "every 5m" --no-agent --script "$(basename "$SWEEP_WRAPPER")" \
+# A cron expression, not `every 5m`: Hermes re-arms an interval from the previous run's time, so with its 60 s
+# ticker phase `every 5m` ran every 6 minutes; a cron expression is anchored to the wall clock (cron/jobs.py
+# compute_next_run), so the sweep runs every 5 minutes (each run still starts up to 60 s after the boundary).
+CRON_SCHEDULE='*/5 * * * *'
+# `hermes cron list --all` prints one block per job: "  <id> [state]", then "Name:" and "Schedule:" lines.
+# Prints "<id><TAB><schedule>" of the job whose name is $name (nothing when there is none).
+# shellcheck disable=SC2016  # an awk program, not for bash to expand
+CRON_JOB_AWK='
+/^[[:space:]]*[0-9a-f]+[[:space:]]+\[/ { id = $1; named = 0 }
+$1 == "Name:" { named = ($2 == name) }
+named && $1 == "Schedule:" { sub(/^[[:space:]]*Schedule:[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print id "\t" $0; exit }
+'
+if has "$cron_jobs" -E -- "^[[:space:]]*Name:[[:space:]]+${CRON_NAME}[[:space:]]*\$"; then
+    cron_job=$(awk -v name="$CRON_NAME" "$CRON_JOB_AWK" <<<"$cron_jobs")
+    [[ -n "$cron_job" ]] || die "cron job $CRON_NAME is listed but its id and schedule could not be read; not editing it blindly"
+    job_id=${cron_job%%$'\t'*}
+    job_schedule=${cron_job#*$'\t'}
+    if [[ "$job_schedule" != "$CRON_SCHEDULE" ]]; then
+        hermes_cli cron edit "$job_id" --schedule "$CRON_SCHEDULE"
+        log "cron job $CRON_NAME ($job_id) moved from '$job_schedule' to '$CRON_SCHEDULE'"
+    fi
+else
+    hermes_cli cron create "$CRON_SCHEDULE" --no-agent --script "$(basename "$SWEEP_WRAPPER")" \
         --deliver telegram --name "$CRON_NAME"
     log "created cron job $CRON_NAME"
 fi

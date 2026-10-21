@@ -19,8 +19,8 @@ left behind and turns `executing` rows older than 10 min into `unknown` with one
 **Retries.** The SDK receiver answers withHuman `204` as soon as the signature checks out and only then,
 in the background, reads the request and posts the wake (agentapprovalprotocol 0.3.3 `receiver.py:158-166`).
 withHuman therefore counts the notification as delivered even if the wake later fails (Hermes down, wake
-refused, withHuman read failed) and never retries it. Recovery is the sweep: on its next run (every 5 minutes,
-about 6 in practice) it re-posts a wake for every `parked` row and every decided row the chat was not told
+refused, withHuman read failed) and never retries it. Recovery is the sweep: on its next run (every 5 minutes on
+the wall clock) it re-posts a wake for every `parked` row and every decided row the chat was not told
 about, so a lost wake costs at most one sweep interval. withHuman's own retries (up to 7 days) only cover the receiver being unreachable or
 answering non-2xx (e.g. 401 before provisioning).
 
@@ -41,16 +41,34 @@ answering non-2xx (e.g. 401 before provisioning).
 | `~hermes/.hermes/plugin-data/durable-park/formcheck_status.json`, `formcheck_alert_state.json` | hermes | the gateway's form self-check / the sweep | form checker health and the alert state |
 | `~hermes/.hermes/scripts/durable_park_sweep.sh` | hermes 0750 | configure_hermes.sh | cron wrapper: `exec /usr/bin/python3 -I <repo>/scripts/durable_park_sweep.py --ledger <ledger> --wake-secret-file /etc/durable-park/wake_secret --retention-days 30` |
 
-The webhook route's secret in `config.yaml` is the reference `${env:DURABLE_PARK_WAKE_SECRET}`. Hermes's
+The webhook route's secret in `config.yaml` is the reference `${DURABLE_PARK_WAKE_SECRET}`. Hermes's
 `command` secret source (`secrets.command.command: /opt/durable-park/libexec/hermes-secrets`, a root-owned
 helper written by configure_hermes.sh) supplies the value at every Hermes start, so the secret exists at rest
 only in `/etc/durable-park/wake_secret`. Once `instance_token` exists the same helper also prints
 `DURABLE_PARK_WH_TOKEN` for the `wh` MCP server (deploy/hermes_mcp.sh). These variables are in the gateway's
 environment and Hermes does not strip custom names from terminal-tool children; that exposes nothing new on
 this VM (if the agent ever got a terminal, `hermes` could read both files).
-Side effect: every `hermes` CLI command prints `Command helper: applied 1 secret` and a harmless
-`Config ref '${env:DURABLE_PARK_WAKE_SECRET}' ... is not set` line (the CLI reads config before the
-secret source runs; the gateway gets the real value, verified with a signed test wake).
+Side effect: every `hermes` CLI command prints `Command helper: applied N secrets`.
+
+**Why the references are bare `${VAR}`, not `${env:VAR}`.** Hermes expands config references when it first
+loads config at import, which is before the `command` secret source has put the values in the environment. For
+the `env:`-prefixed form `_env_expand_match` (`hermes_cli/config.py`) then logs a warning in every Hermes
+process (`Config ref '...' ... is not set ... keeping the literal placeholder`); for a bare `${VAR}` it stays
+silent. Both forms resolve identically: Hermes documents `${env:VAR}` as exactly `${VAR}` with the prefix
+stripped, the loader cache records the referenced variables and re-expands when they change, and the gateway's
+webhook route and the `mcp_servers` headers read the expanded values (checked in-process with fake values: the
+first load keeps the placeholder, the next load after the variable is set returns the real value, for both
+forms). An upstream issue for the ordering is to be filed with Hermes; until it is fixed, use the bare form.
+
+A secret that is missing is still noticed, by different checks per use:
+
+| Reference | If the variable is not set | Where it shows |
+|---|---|---|
+| `DURABLE_PARK_WH_TOKEN` (the `wh` MCP header) | Hermes refuses to connect the server (`_require_rendered_remote`, `tools/mcp_tool_config.py`): "...is not set in this profile's .env or secret source". It never sends the literal text. | `mcp__wh__*` tools are absent; `deploy/hermes_mcp.sh` waits for one and stops |
+| `DURABLE_PARK_WAKE_SECRET` (the webhook route) | The route's secret stays the literal placeholder, so the signed wakes the receiver and the sweep send (signed with `/etc/durable-park/wake_secret`) are rejected with a non-2xx status. Hermes itself does not refuse to start. | `journalctl -u durable-park-receiver` logs `Hermes refused the wake for <id> ...: HTTP <code>; the sweep will retry`; the sweep writes `wake <id> returned HTTP <code>` to stderr (cron delivers only stdout); the chat never hears the decision, see [The bot never got the decision](runbook.md#the-bot-never-got-the-decision) |
+
+Neither the plugin nor the receiver checks the references themselves. This is the same behaviour as with the
+`env:` form, which also kept the placeholder; only the warning is gone.
 
 ## Deploy (Step 5, admin or AI agent, re-runnable)
 
@@ -74,7 +92,7 @@ curl -s http://127.0.0.1:8644/health                               # {"status": 
 grep "durable-park loaded" ~/.hermes/logs/agent.log | tail -1        # plugin loaded, ledger path
 sudo tailscale funnel status                                       # /aap/events proxy http://127.0.0.1:8790/aap/events
 systemctl status durable-park-receiver                             # active (running)
-hermes cron list                                                   # durable-park-sweep, every 5m, telegram
+hermes cron list                                                   # durable-park-sweep, */5 * * * *, telegram
 ~/.hermes/scripts/durable_park_sweep.sh                            # prints nothing when all is well
 ```
 

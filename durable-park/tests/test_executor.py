@@ -410,10 +410,22 @@ def test_logs_never_contain_args(env, caplog):
 
 def test_schema():
     assert EXECUTE_SCHEMA["name"] == "parked_action_execute"
-    assert EXECUTE_SCHEMA["description"] == "Run a previously parked action after you were told it was approved."
+    description = EXECUTE_SCHEMA["description"]
+    assert description.startswith("Run a previously parked action")
+    assert "told in this chat" in description and "APPROVED" in description
     params = EXECUTE_SCHEMA["parameters"]
     assert params["type"] == "object" and params["required"] == ["park_id"]
     assert params["properties"]["park_id"]["type"] == "string"
+
+
+def test_schema_gives_no_example_park_id_and_says_not_to_guess():
+    """A concrete example id invites the model to call the tool with it (seen live 2026-10-21)."""
+    texts = [EXECUTE_SCHEMA["description"], EXECUTE_SCHEMA["parameters"]["properties"]["park_id"]["description"]]
+    for text in texts:
+        assert not re.search(r"P-[0-9A-F]{8}", text)
+    param = texts[1]
+    assert "[durable-park]" in param and "this chat" in param
+    assert "never guess or invent" in param.lower()
 
 
 def _hermes_flags_failure(result: str) -> bool:
