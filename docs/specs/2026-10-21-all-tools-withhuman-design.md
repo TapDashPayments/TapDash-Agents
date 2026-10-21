@@ -98,13 +98,13 @@ How admin work reaches hermes-owned files afterwards:
   `sudo bash ...` from `ubuntu`. No script change.
 
 Not in this phase: the tailnet ACL still allows Tailscale SSH as `hermes` (a `login -- hermes` session was seen).
-Restricting the `ssh` rule to `ubuntu` is done in the Tailscale admin console (open question Q4).
+Restricting the `ssh` rule to `ubuntu` is done in the Tailscale admin console (decided 2026-10-21, Q4: yes; Yaakov does it).
 
 ### 4.2 durable-park "ask every call"
 
 **Decision flow** for every `pre_tool_call` (one flow, no second code path):
 
-1. Tool in the exempt list → return `None` (runs). Default exempt: `parked_action_execute`, `clarify`.
+1. Tool in the exempt list → return `None` (runs). Default exempt (decided 2026-10-21, Q1: yes): `parked_action_execute`, `clarify`.
    - `parked_action_execute` carries only a park id; the executor consumes the approval itself and replays through
      `ctx.dispatch_tool` (no hooks). Asking withHuman about it would be a second ask for one action.
    - `clarify` is a question to the user, not an action; it must keep working when withHuman is unreachable so the
@@ -149,7 +149,7 @@ gets two automatic withHuman evaluations (hook request `park:quickbooks` → app
 and zero human asks. Rule 1 must therefore be narrowed to the money tool names (§4.3); today it sends every `park:`
 request to a human.
 
-**Ledger: rows for every call, not only parks.** Decided because (a) the `Pending` path needs the row before the
+**Ledger: rows for every call, not only parks.** Decided 2026-10-21 (Q3): yes, a row for every call with 30-day retention; the rows also feed the dashboard trace. Why: (a) the `Pending` path needs the row before the
 request so a request id never lives only in memory (crash safety; guarantee 3), (b) one flow is easier to test than
 two, (c) the dashboard's "live trace" (work list) gets a local source. Cost: two SQLite writes per tool call (about
 a millisecond each) and growth of a few thousand rows a day at most. The sweep deletes `allowed|refused|cancelled`
@@ -198,14 +198,13 @@ number is expected makes the block error and sends the request to a human, which
 | 6 | server `hermes` and tool starts with `browser_` and arguments have no `password`/credential fields | approve; `browser_*` with a form submit or login → human | reading the web is low risk; logging in is not |
 | 7 | server `hermes` and tool in `terminal`, `execute_code`, `process`, `write_file`, `patch`, `read_file`, `search_files`, `delegate_task`, `cronjob`, `skill_manage` | **deny** until Phase 2 (§4.5). After Phase 2: `terminal`/`execute_code` with `/request/arguments/command` matching `sudo|rm -rf|curl.*\| *(ba)?sh|/etc/durable-park|durable-park|\.hermes/` → deny; `write_file`/`patch` with `/request/arguments/path` under `/etc/`, `/opt/`, `~/.hermes/` → deny; everything else in this row → human | the local-machine tools; a regex is a guard, not a boundary (AAP research §3.4) |
 | 8 | server starts with `mcp:` | human | new MCP servers get a rule when they are added |
-| 9 | anything else from `proto-agents` | **human** (A3) | an unlisted tool asks a person |
+| 9 | anything else from `proto-agents` | **human** (A3, confirmed by Q1 on 2026-10-21) | an unlisted tool asks a person |
 | 10 | existing `hermes` Stripe block, then `approve-every-call` | unchanged | production agent |
 
 Tool names in rows 4–7 are checked against the live registry (`hermes tools list` on the VM) before a condition is
 written; a name that does not exist simply never matches, so a typo falls through to row 9 (human), never to approve.
 
-Argument thresholds: all 12 money types stay "human" regardless of amount for the sandbox. Candidate for later:
-`create_payment` with `/request/arguments/TotalAmt` ≤ 100 → approve (Q2). Each revision is checked with
+Argument thresholds: decided 2026-10-21 (Q2): keep all 12 money types on "human" for now, with no amount threshold, so no `TotalAmt` rule is written. Each revision is checked with
 `preview_pipeline` on a sample request for every row before activation; the previous revision stays available for
 rollback (`activate_pipeline_revision`).
 
@@ -245,7 +244,7 @@ The design is `receiver-setup.md` "v2: separate ledger owner"; this section list
   later Teams).
 - Migration when no row is `parked|approved|executing`: checkpoint, copy, re-own, change `ledger_path` and the bridge
   unit, restart in order receiver, service, bridge, gateway.
-- Still open on the withHuman side: the gateway's `wh` MCP bearer is the same instance token, so `hermes` can call
+- Still open on the withHuman side (Q5, open): the gateway's `wh` MCP bearer is the same instance token, so `hermes` can call
   the gateway directly. Needs a separate gateway-only credential or a service-side proxy (Q5).
 
 ## 5. Verification and acceptance (evidence for each; no claim without it)
@@ -297,14 +296,16 @@ Accepted:
 
 Open questions (who decides):
 
-- Q1 (Yaakov): confirm the exempt list `parked_action_execute`, `clarify` (A2), and the final default "human" (A3).
-- Q2 (Yaakov): any amount threshold for sandbox money tools, and which field (`TotalAmt`) it tests.
-- Q3 (Yaakov): keep rows for every call in the ledger (§4.2) with 30-day retention, or parks only.
-- Q4 (Yaakov, Tailscale admin console): restrict Tailscale SSH to `ubuntu` so no interactive login as `hermes` exists.
+- Q1 (Yaakov): confirm the exempt list `parked_action_execute`, `clarify` (A2), and the final default "human" (A3). **Decided 2026-10-21: yes.** Exempt: `parked_action_execute` and `clarify`; the final default for `proto-agents` is "ask a human", not approve.
+- Q2 (Yaakov): any amount threshold for sandbox money tools, and which field (`TotalAmt`) it tests. **Decided 2026-10-21:** keep all 12 QuickBooks money types on "human" for now; no amount threshold.
+- Q3 (Yaakov): keep rows for every call in the ledger (§4.2) with 30-day retention, or parks only. **Decided 2026-10-21: yes.** A ledger row for every call (allowed or refused), 30-day retention; the rows feed the dashboard trace.
+- Q4 (Yaakov, Tailscale admin console): restrict Tailscale SSH to `ubuntu` so no interactive login as `hermes` exists. **Decided 2026-10-21: yes.** Yaakov restricts Tailscale SSH to `ubuntu` in the admin console.
 - Q5 (withHuman): a gateway-only credential separate from the instance token, or a proxy, so the agent's user cannot
   call the gateway directly after Phase 2.
+  **Open** (pending Yaakov's answer). First check whether withHuman can issue a gateway-only credential; if not, a local relay owned by the durable-park service user holds the real key.
 - Q6 (Yaakov): whether the content agent (second agent) shares this pipeline with its own `/agent/slug` blocks or
   gets a delegated pipeline.
+  **Decided 2026-10-21: defer.** Decide when the second agent is built.
 
 ## 8. Work list (ordered; each line: what — why — depends on)
 
@@ -319,7 +320,7 @@ Open questions (who decides):
 5. durable-park "ask every call" (§4.2) with tests, docs, independent review (AGENTS.md rule 2) — the core of this
    spec — depends on 3, 4.
 6. withHuman entry pipeline revision (§4.3), `preview_pipeline` per row, record the revision number — the rules the
-   hook relies on; rule 1 must be narrowed before 5 goes live or every QuickBooks read parks — depends on Q1–Q2;
+   hook relies on; rule 1 must be narrowed before 5 goes live or every QuickBooks read parks — depends on Q1–Q2 (decided 2026-10-21);
    activate together with 5.
 7. `hermes_tool_policy.py --allow` and run `check` at every gateway start (backlog #6) — one place that says which
    toolsets are on — depends on 5.
@@ -331,7 +332,7 @@ Open questions (who decides):
 11. Open groups (e)–(g) of §4.4 (file, terminal, code, delegation, cron) with the Phase-2 argument rules — last, by
     decision — depends on 10.
 12. Dashboard pages: pending withHuman approvals; full withHuman view; live trace of tool calls (source: the ledger's
-    rows for every call plus withHuman's audit API) — the original ask — depends on 5 (rows) and Q3.
+    rows for every call plus withHuman's audit API) — the original ask — depends on 5 (rows) and Q3 (decided 2026-10-21: a row for every call).
 13. Backlog #1 rotate every secret — before real books — depends on 10 (rotate once, into the new owners).
 14. Backlog #2 retry a dropped decision message; #4 decide which other QuickBooks writes need approval (now a
     pipeline rule, §4.3 row 3); #5 tie the bridge's stored answers to the request id — before real books — depend
