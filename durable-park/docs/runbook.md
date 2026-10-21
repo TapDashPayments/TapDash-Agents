@@ -216,7 +216,7 @@ The park hook answers a blocked call with one of these (the model sees them and 
 | `durable-park: withHuman could not be reached` | withHuman did not answer (or the breaker is open); row `refused`, nothing ran. | See [withHuman could not be reached](#withhuman-could-not-be-reached); ask again later |
 | `durable-park: P-... is already waiting for approval in this chat` | Another call of this chat waits for a person or is running; this call's request was cancelled. | Decide the waiting one ([below](#a-chat-says-already-waiting-but-nothing-is-pending-in-withhuman)) |
 | `durable-park: P-... is already <status>; this call was not run again` | The model replayed a call id that was already decided (`allowed`, `refused`, `denied`, ...). | Nothing |
-| `durable-park: another plugin hook could change tool arguments after approval (<names>)` | Something other than durable-park registered a `pre_tool_call` callback: a plugin's hook, a `config.yaml` `hooks:` shell hook or an outbound webhook (or the hook registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-hook-observer_hooks)) |
+| `durable-park: another plugin hook could change tool arguments after approval (<names>)` | Something other than durable-park registered a `pre_tool_call` callback (a plugin's hook, a `config.yaml` `hooks:` shell hook or an outbound webhook) or `tool_request` / `tool_execution` middleware (or a registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-hook-observer_hooks)) |
 | `durable-park: no chat session; the tool call was refused` | The call came from outside a chat (e.g. `hermes chat -q`). | Use a chat |
 | `durable-park: no tool call id; the tool call was refused` | Hermes passed no session id or call id. | Check the Hermes version (`compat.py`) |
 | `durable-park: could not open an approval request` | An error in the hook (token file unreadable, arguments that are not strict JSON, ledger error; logged as `park hook failed for tool=...`), or durable-park could not load and refuses every call (a setting of the wrong type, logged as `durable-park setting <name> must be a list of strings`, or `durable-park failed to load`). | Read `~/.hermes/logs/agent.log` |
@@ -262,14 +262,17 @@ plugins:
 ### Allow another hook (`observer_hooks`)
 
 durable-park refuses every non-exempt call while anything else has a `pre_tool_call` callback in Hermes's hook
-registry, because such a callback can return a `modify` directive and change a call's arguments after withHuman
-approved them. Three things put one there, each with its own name format:
+registry, or `tool_request` / `tool_execution` middleware in its middleware registry, because such a callback can
+change a call's arguments after withHuman approved them (a hook by returning a `modify` directive, a
+`tool_execution` middleware by passing other arguments to `next_call`; it runs after `pre_tool_call`). Four things
+put one there, each with its own name format:
 
 | Source | Name in the refusal and the log |
 |---|---|
 | another Hermes plugin's `ctx.register_hook("pre_tool_call", ...)` | `<module>.<qualname>` of its function, e.g. `my_plugin.hooks.on_tool` |
 | a `config.yaml` `hooks:` shell hook for `pre_tool_call` (Hermes `agent/shell_hooks.py:376`) | `agent.shell_hooks.shell_hook[pre_tool_call:<command>]` |
 | a `config.yaml` outbound webhook subscribed to `pre_tool_call` (Hermes `agent/outbound_webhooks.py:236`) | `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name`, else its URL |
+| another Hermes plugin's `ctx.register_middleware("tool_request" or "tool_execution", ...)` (Hermes `hermes_cli/plugins.py:937`) | `<module>.<qualname>` of its function |
 
 Outbound webhooks only notify: the callback queues a POST and always returns `None`, so it can never change
 arguments and is safe to list. Shell hooks can return any directive their command prints (including `modify`), and
@@ -281,12 +284,13 @@ To allow one:
 2. **Read the callback's code**: for a plugin, its `register` and the function, including everything it calls;
    for a shell hook, the command and the script it runs.
 3. **Confirm it never returns `modify`** (or any directive other than `None`, or `block`), on any path, including
-   errors. If you cannot confirm it, do not list it: remove or disable it instead.
+   errors. For middleware: a `tool_request` one must never return `{"args": ...}`; a `tool_execution` one must
+   call `next_call()` with no argument or with the exact `args` it was given, on every path. If you cannot confirm it, do not list it: remove or disable it instead.
 4. Add its exact name to `observer_hooks`, restart the gateway, and check one call is asked about normally again.
 5. Re-do this review whenever that plugin, script or command changes.
 
-`<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook registry
-(e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
+`<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook or middleware
+registry (e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
 
 ## Add a form-checked tool
 

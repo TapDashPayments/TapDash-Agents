@@ -212,6 +212,8 @@ def test_parked_row_without_request_does_not_make_the_chat_busy(env):
 class FakeCtx:
     """A Hermes PluginContext stand-in. ``_manager.iter_hook_callbacks`` mirrors Hermes v0.22.2
     (hermes_cli/plugins_dispatch.py:523): a snapshot tuple of the callables registered for a hook.
+    ``_manager._middleware`` mirrors the middleware registry (hermes_cli/plugins.py:1183, a dict of lists
+    keyed by kind; ``register_middleware`` appends the callable itself, hermes_cli/plugins.py:937-952).
     It imitates Hermes's unwrapped callback storage (``register_hook`` appends the callable itself, so ``id()``
     identifies durable-park's own hooks); ``compat.DEPENDS_ON`` is the guard if Hermes ever changes that."""
 
@@ -224,7 +226,10 @@ class FakeCtx:
         self.asked = []
         if manager:
             self._manager = SimpleNamespace(
-                iter_hook_callbacks=lambda name: tuple(self.hook_lists.get(name, ())))
+                iter_hook_callbacks=lambda name: tuple(self.hook_lists.get(name, ())), _middleware={})
+
+    def register_middleware(self, kind, callback):
+        self._manager._middleware.setdefault(kind, []).append(callback)
 
     def get_config(self, key, default=None):
         self.asked.append(key)
@@ -423,12 +428,64 @@ def test_foreign_pre_tool_call_hooks_names_and_filters():
 
     obj = Callable_()
     ctx = SimpleNamespace(_manager=SimpleNamespace(
-        iter_hook_callbacks=lambda name: (mine, foreign_hook, obj) if name == "pre_tool_call" else ()))
+        iter_hook_callbacks=lambda name: (mine, foreign_hook, obj) if name == "pre_tool_call" else (),
+        _middleware={}))
     obj_name = f"{type(obj).__module__}.{type(obj).__qualname__}"
     assert foreign_pre_tool_call_hooks(ctx, {id(mine)}, set()) == [FOREIGN_NAME, obj_name]
     assert foreign_pre_tool_call_hooks(ctx, {id(mine)}, {FOREIGN_NAME}) == [obj_name]
     assert foreign_pre_tool_call_hooks(ctx, {id(mine), id(obj)}, {FOREIGN_NAME}) == []
     assert foreign_pre_tool_call_hooks(SimpleNamespace(), set(), set()) == ["<hook registry unavailable>"]
+
+
+def foreign_middleware(**kw):
+    """Another plugin's tool middleware: it could hand different args to ``next_call``."""
+    return kw["next_call"](kw["args"])
+
+
+FOREIGN_MW_NAME = f"{foreign_middleware.__module__}.{foreign_middleware.__qualname__}"
+
+
+@pytest.mark.parametrize("kind", ["tool_execution", "tool_request"])
+def test_foreign_tool_middleware_blocks_every_non_exempt_call(tmp_path, with_session, fake_withhuman, kind):
+    """Hermes v0.22.2 runs tool_execution middleware AFTER pre_tool_call (agent_runtime_helpers.py:2619-2624,
+    middleware.py _run_execution_chain); a middleware can pass other args to next_call than were approved."""
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token})
+    register(ctx)
+    ctx.register_middleware(kind, foreign_middleware)
+    hook = ctx.hooks["pre_tool_call"]
+    for i, tool in enumerate(("web_search", "mcp__wh__quickbooks__search_customers", "terminal")):
+        assert call(hook, tool, tool_call_id=f"c{i}") == {
+            "action": "block", "message": FOREIGN.format(names=FOREIGN_MW_NAME)}
+    assert len(fake_withhuman.provider.requests) == 0
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="cx") is None
+
+
+def test_foreign_tool_middleware_listed_in_observer_hooks_proceeds(tmp_path, with_session, fake_withhuman):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token, "observer_hooks": [FOREIGN_MW_NAME]})
+    register(ctx)
+    ctx.register_middleware("tool_execution", foreign_middleware)
+    assert call(ctx.hooks["pre_tool_call"], "web_search")["message"].startswith("PARKED P-")
+    assert len(fake_withhuman.provider.requests) == 1
+
+
+def test_other_middleware_kinds_are_not_foreign_tool_middleware(tmp_path, with_session, fake_withhuman):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token})
+    register(ctx)
+    ctx.register_middleware("llm_request", foreign_middleware)
+    assert call(ctx.hooks["pre_tool_call"], "web_search")["message"].startswith("PARKED P-")
+
+
+@pytest.mark.parametrize("registry", ["missing", "not_a_mapping"])
+def test_missing_middleware_registry_fails_closed(tmp_path, with_session, fake_withhuman, registry):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token})
+    if registry == "missing":
+        del ctx._manager._middleware
+    else:
+        ctx._manager._middleware = ["not", "a", "dict"]
+    register(ctx)
+    assert call(ctx.hooks["pre_tool_call"], "web_search") == {
+        "action": "block", "message": FOREIGN.format(names="<hook registry unavailable>")}
+    assert len(fake_withhuman.provider.requests) == 0
 
 
 def test_hook_and_executor_share_one_gate(tmp_path, monkeypatch):

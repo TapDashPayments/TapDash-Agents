@@ -52,7 +52,8 @@ The full picture - every component, arrow, state and failure path: **[docs/archi
 Settings (`exempt_tools`, `form_checked_tools`, `observer_hooks`, `aap_base_url`, `token_file`, `ledger_path`)
 live in `plugins.entries.durable-park.settings` in Hermes's `config.yaml`: [table](docs/architecture.md#plugin-settings),
 [how to change them](docs/runbook.md#plugin-settings). The old `risky_tools` setting is ignored with a warning. If
-anything else registers a `pre_tool_call` callback (another plugin, a `config.yaml` shell hook or outbound webhook),
+anything else registers a `pre_tool_call` callback (another plugin, a `config.yaml` shell hook or outbound webhook) or
+`tool_request` / `tool_execution` middleware,
 every tool call is refused until an admin reviews it and lists it in `observer_hooks`. A setting of the wrong type
 also refuses every call (never fails open).
 The open-source and third-party pieces it is built on (versions, licenses, links):

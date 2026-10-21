@@ -61,18 +61,33 @@ def _callback_name(cb: Any) -> str:
     return f"{module}.{qualname}"
 
 
+# Middleware kinds that see a tool call's arguments (Hermes v0.22.2 hermes_cli/middleware.py:19-20).
+# ``tool_execution`` runs AFTER ``pre_tool_call`` and may pass other args to ``next_call``
+# (agent/agent_runtime_helpers.py:2619-2624, hermes_cli/middleware.py ``_run_execution_chain``);
+# ``tool_request`` rewrites args before the hook and may run again on paths durable-park does not see.
+TOOL_MIDDLEWARE_KINDS = ("tool_request", "tool_execution")
+
+
 def foreign_pre_tool_call_hooks(ctx: Any, own: set[int], allowed: set[str]) -> list[str]:
-    """Names of the ``pre_tool_call`` callbacks in Hermes's hook registry that are neither this plugin's own
-    (``id`` in ``own``) nor listed in ``allowed`` (``observer_hooks``). Such a hook could return a ``modify``
-    directive and change a call's arguments after withHuman approved them.
+    """Names of the callbacks that could change a call's arguments after withHuman approved them and are
+    neither this plugin's own (``id`` in ``own``) nor listed in ``allowed`` (``observer_hooks``): other
+    ``pre_tool_call`` hooks (a ``modify`` directive) and ``tool_request`` / ``tool_execution`` middleware.
 
     Hermes v0.22.2: ``PluginContext._manager`` (hermes_cli/plugins.py:235) is the ``PluginManager``;
     ``PluginManager.iter_hook_callbacks(hook_name)`` (hermes_cli/plugins_dispatch.py:523) returns a snapshot
-    tuple of the callables ``register_hook`` stored (hermes_cli/plugins.py:933, stored unwrapped). When the
-    registry cannot be read the answer is ``["<hook registry unavailable>"]``: fail closed."""
+    tuple of the callables ``register_hook`` stored (hermes_cli/plugins.py:933, stored unwrapped).
+    ``PluginManager._middleware`` (hermes_cli/plugins.py:1183) is a dict of lists keyed by kind that
+    ``register_middleware`` appends the callable itself to (hermes_cli/plugins.py:937-952); there is no public
+    accessor, and ``_run_execution_chain`` reads the same dict. When either registry cannot be read the answer
+    is ``["<hook registry unavailable>"]``: fail closed."""
     try:
-        callbacks = tuple(ctx._manager.iter_hook_callbacks("pre_tool_call"))
-    except Exception:  # noqa: BLE001 - no manager, no method, or it raised: we cannot know, so refuse
+        callbacks = list(ctx._manager.iter_hook_callbacks("pre_tool_call"))
+        middleware = ctx._manager._middleware
+        if not isinstance(middleware, dict):
+            raise TypeError("middleware registry is not a mapping")
+        for kind in TOOL_MIDDLEWARE_KINDS:
+            callbacks.extend(tuple(middleware.get(kind, ())))
+    except Exception:  # noqa: BLE001 - no manager, no registry, or it raised: we cannot know, so refuse
         return [HOOK_REGISTRY_UNAVAILABLE]
     foreign: list[str] = []
     for cb in callbacks:

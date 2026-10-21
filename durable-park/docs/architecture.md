@@ -152,7 +152,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 |---|---|---|
 | `exempt_tools` | `["parked_action_execute", "clarify"]` | Tools that are never asked about (no row, nobody asked). The list replaces the default, so keep `parked_action_execute` in it (a warning is logged if it is missing: approved parks could not run). Also used by the fail-closed hook when the ledger cannot open. |
 | `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
-| `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL). Any unlisted one, or a hook registry that cannot be read, refuses every non-exempt call. |
+| `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
 | `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json` and `formcheck_status.json` are written next to it. |
@@ -166,8 +166,9 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
 (`hermes_cli/plugins_loader.py:525-537`).
 
 The foreign-hook guard reads Hermes's hook registry (`ctx._manager.iter_hook_callbacks("pre_tool_call")`,
-Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) on every call; durable-park's own callbacks are recognised by
-object identity. The dependency is listed in `compat.py`, so a Hermes upgrade warns to re-verify it.
+Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) and its middleware registry
+(`ctx._manager._middleware["tool_request"]` and `["tool_execution"]`, `hermes_cli/plugins.py:1183`; no public
+accessor exists) on every call; durable-park's own callbacks are recognised by object identity. The dependency is listed in `compat.py`, so a Hermes upgrade warns to re-verify it.
 
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
 configured in the withHuman app; as of October 2026, rev N (to be saved; see Task 13)). Every rule for agent
@@ -363,7 +364,7 @@ form-checked tool's rules work, and writes `formcheck_status.json`. The sweep al
 | Denied in withHuman | Row `denied`; the chat is told it did not run. | Nobody |
 | withHuman refuses at once (a pipeline deny rule) | Row `refused`; the call is blocked with "refused by withHuman policy" (and the reviewer's note, if any). | Nobody |
 | withHuman cannot be reached | Row `refused`; the call is blocked with "withHuman could not be reached". After 3 errors in a row the breaker refuses at once for 30 s, then tries again; the sweep alerts once on open and once on close. | Check withHuman ([runbook](runbook.md#withhuman-could-not-be-reached)) |
-| Another `pre_tool_call` callback (a plugin's hook, a `config.yaml` shell hook or outbound webhook) could change arguments after approval | Every tool call except the exempt ones is blocked. | An admin removes the hook or lists it in `observer_hooks` |
+| Another `pre_tool_call` callback (a plugin's hook, a `config.yaml` shell hook or outbound webhook) or another plugin's `tool_request` / `tool_execution` middleware could change arguments after approval | Every tool call except the exempt ones is blocked. | An admin removes the hook or lists it in `observer_hooks` |
 | No chat session (e.g. a one-shot `hermes chat -q`) | Every tool call except the exempt ones is blocked. | Use a chat |
 | No decision in 168 h | Row `expired`; the chat is told it can ask again. | Nobody |
 | Approval expired before running | Row `expired`; nothing ran. | Ask again if still wanted |
