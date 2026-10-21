@@ -1170,6 +1170,10 @@ def write_policy_report(path, *, ok=True, age_minutes=0, problems=()):
                                 "problems": list(problems), "allowed": []}))
 
 
+UNREADABLE_CHECKED_AT = "unreadable checked_at"
+FUTURE_CHECKED_AT = "checked_at in the future"
+
+
 def test_policy_problem(tmp_path):
     path = tmp_path / "status.json"
     now = datetime.now(timezone.utc)
@@ -1185,9 +1189,11 @@ def test_policy_problem(tmp_path):
     write_policy_report(path, ok=True, age_minutes=14)
     assert policy_problem(str(path), now) is None
     write_policy_report(path, ok=True, age_minutes=-30)  # a clock far in the future is not "fresh"
-    assert policy_problem(str(path), now) == "stale"
+    assert policy_problem(str(path), now) == FUTURE_CHECKED_AT
     path.write_text(json.dumps({"ok": True, "checked_at": "garbage"}))
-    assert policy_problem(str(path), now) == "stale"
+    assert policy_problem(str(path), now) == UNREADABLE_CHECKED_AT
+    path.write_text(json.dumps({"ok": True}))  # no checked_at at all
+    assert policy_problem(str(path), now) == UNREADABLE_CHECKED_AT
     path.write_text(json.dumps({"ok": "yes", "checked_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}))
     assert policy_problem(str(path), now) is not None  # only a real true passes
 
@@ -1204,8 +1210,8 @@ def test_policy_problem_is_judged_against_process_start_not_wall_clock(tmp_path)
     assert policy_problem(str(path), now, process_start=start) == "stale"
     write_policy_report(path, age_minutes=60)  # written after this process started is fine
     assert policy_problem(str(path), now, process_start=start) is None
-    write_policy_report(path, age_minutes=-30)  # future-dated beyond a minute is still stale
-    assert policy_problem(str(path), now, process_start=start) == "stale"
+    write_policy_report(path, age_minutes=-30)  # future-dated beyond a minute is its own verdict, not "stale"
+    assert policy_problem(str(path), now, process_start=start) == FUTURE_CHECKED_AT
 
 
 def test_policy_problem_defaults_to_this_process_start(tmp_path, monkeypatch):
@@ -1367,6 +1373,110 @@ def test_only_the_gateway_writes_the_load_verdict(tmp_path, monkeypatch, caplog,
     msgs = [r.getMessage() for r in caplog.records
             if r.getMessage() == "tool policy: load verdict not written (not the gateway process)"]
     assert len(msgs) == (0 if gateway else 1)  # once per process
+
+
+STALE_SIDE_PROCESS = ("durable-park: tool policy report predates this side process (expected for the cron sweep "
+                      "and CLI runs); refusing every tool call in this process")
+STALE_ERROR = "durable-park tool policy check failed (stale); refusing every tool call"
+
+
+def _durable_park_records(caplog):
+    return [(r.levelname, r.getMessage()) for r in caplog.records if r.name == "durable_park"]
+
+
+def _assert_refuses_everything(ctx):
+    hook = ctx.hooks["pre_tool_call"]
+    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": POLICY_MESSAGE}
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") is None
+    assert "pre_gateway_dispatch" in ctx.hooks
+    assert set(ctx.tools) == {"parked_action_execute"}
+    reply = json.loads(ctx.tools["parked_action_execute"].handler({"park_id": "P-1"}))
+    assert reply["status"] == "refused" and reply["message"] == POLICY_MESSAGE
+
+
+def test_stale_report_in_a_side_process_logs_info_not_error(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: False)
+    monkeypatch.setattr(durable_park, "_logged_not_gateway", False)
+    monkeypatch.setattr(durable_park, "_logged_stale_side_process", False)
+    # Without Hermes installed the version check warns; that is not what this test is about.
+    monkeypatch.setattr(durable_park.compat, "check_hermes_version", lambda log: None)
+    data = tmp_path / "data"
+    data.mkdir()
+    write_policy_report(data / "tool_policy_status.json", age_minutes=20)  # older than 15 min before this process
+    ctx = FakeCtx(data)
+    with caplog.at_level("DEBUG", logger="durable_park"):
+        register(ctx)
+        register(FakeCtx(data))  # once per process
+    records = _durable_park_records(caplog)
+    assert records.count(("INFO", STALE_SIDE_PROCESS)) == 1
+    assert not [r for r in records if r[0] in ("WARNING", "ERROR", "CRITICAL")]  # errors.log gets WARNING and up
+    assert not any("tool policy check failed" in m for _, m in records)
+    _assert_refuses_everything(ctx)  # behaviour is unchanged: still fails closed
+    assert not (data / "tool_policy_load.json").exists()  # the gateway's verdict (and the sweep alert) untouched
+
+
+def test_stale_report_in_the_gateway_still_logs_error(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: True)
+    monkeypatch.setattr(durable_park, "_logged_stale_side_process", False)
+    data = tmp_path / "data"
+    data.mkdir()
+    write_policy_report(data / "tool_policy_status.json", age_minutes=20)
+    ctx = FakeCtx(data)
+    with caplog.at_level("DEBUG", logger="durable_park"):
+        register(ctx)
+    records = _durable_park_records(caplog)
+    assert ("ERROR", STALE_ERROR) in records
+    assert not any(m == STALE_SIDE_PROCESS for _, m in records)
+    _assert_refuses_everything(ctx)
+    verdict = _load_verdict(data)  # the gateway still records the verdict the sweep alerts on
+    assert verdict["ok"] is False and verdict["problem"] == "stale"
+
+
+@pytest.mark.parametrize("report,problem", [(None, "no tool policy report"), ("failed", "x")])
+def test_other_policy_problems_in_a_side_process_still_log_error(tmp_path, monkeypatch, caplog, report, problem):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: False)
+    monkeypatch.setattr(durable_park, "_logged_not_gateway", False)
+    monkeypatch.setattr(durable_park, "_logged_stale_side_process", False)
+    data = tmp_path / "data"
+    data.mkdir()
+    if report == "failed":
+        write_policy_report(data / "tool_policy_status.json", ok=False, problems=["x"])
+    ctx = FakeCtx(data)
+    with caplog.at_level("DEBUG", logger="durable_park"):
+        register(ctx)
+    records = _durable_park_records(caplog)
+    assert ("ERROR", f"durable-park tool policy check failed ({problem}); refusing every tool call") in records
+    assert not any(m == STALE_SIDE_PROCESS for _, m in records)
+    _assert_refuses_everything(ctx)
+
+
+@pytest.mark.parametrize("anomaly,problem", [("garbage", UNREADABLE_CHECKED_AT), ("future", FUTURE_CHECKED_AT)])
+@pytest.mark.parametrize("gateway", [False, True])
+def test_a_report_anomaly_logs_error_in_every_process(tmp_path, monkeypatch, caplog, anomaly, problem, gateway):
+    """Only a report that is merely too old may be quiet in a side process: an unparsable or future-dated
+    ``checked_at`` (clock skew, tampering) is a real anomaly and stays an ERROR everywhere."""
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    monkeypatch.setattr(durable_park, "is_gateway_process", lambda: gateway)
+    monkeypatch.setattr(durable_park, "_logged_not_gateway", False)
+    monkeypatch.setattr(durable_park, "_logged_stale_side_process", False)
+    data = tmp_path / "data"
+    data.mkdir()
+    report = data / "tool_policy_status.json"
+    if anomaly == "future":
+        write_policy_report(report, age_minutes=-30)
+    else:
+        report.write_text(json.dumps({"ok": True, "checked_at": "garbage"}))
+    ctx = FakeCtx(data)
+    with caplog.at_level("DEBUG", logger="durable_park"):
+        register(ctx)
+    records = _durable_park_records(caplog)
+    assert ("ERROR", f"durable-park tool policy check failed ({problem}); refusing every tool call") in records
+    assert not any(m == STALE_SIDE_PROCESS for _, m in records)
+    _assert_refuses_everything(ctx)
 
 
 def test_a_non_gateway_process_does_not_overwrite_the_gateways_verdict(tmp_path, monkeypatch):
