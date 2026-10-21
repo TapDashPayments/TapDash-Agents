@@ -174,9 +174,9 @@ A second line `durable-park: the form checker is working again.` follows when it
 
 ### Tool policy check failed
 
-`durable-park ALERT: the tool policy check failed at gateway start - <problems>. Every tool call is refused until it passes.`
+`durable-park ALERT: the tool policy check failed at gateway start — <problems>. Every tool call is refused until it passes.`
 
-Only on a VM that runs the v1 tool lockdown. Before every `hermes-gateway` start, the user-unit drop-in
+Applies while the v1 tool lockdown is applied (it is on proto-agents). Before every `hermes-gateway` start, the user-unit drop-in
 `~hermes/.config/systemd/user/hermes-gateway.service.d/50-durable-park-policy.conf` runs
 `deploy/tool_policy_check.sh` (`ExecStartPre=-`, so a failure never stops the gateway). It runs `hermes_tool_policy.py
 check --status-file` and writes `plugin-data/durable-park/tool_policy_status.json` next to the ledger
@@ -190,7 +190,7 @@ again.`) when it passes.
 | Problem | Likely cause | Fix |
 |---|---|---|
 | `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
-| `hermes python not found` | No or several `~/.hermes/installs/*/facts.json` | `hermes pm repair`; keep exactly one install |
+| `hermes python not found` | Not exactly one `~/.hermes/installs/*/facts.json`, or its Python is missing | Check that directory; the same lookup is `hermes_python()` in `deploy/configure_hermes.sh` |
 | a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
 | `stale` | The gateway started without the drop-in (the report is older than 15 minutes) | Install the drop-in, restart the gateway |
 
@@ -359,7 +359,7 @@ The form check needs nothing: it reads each tool's rules from Hermes automatical
 
 ## Open a toolset
 
-Only on a VM that runs the v1 tool lockdown (not proto-agents today, where the agent has every tool). The
+The v1 tool lockdown is applied on proto-agents. The
 allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolsets`
 ([format](receiver-setup.md#agent-tool-policy-v1-fix-for-the-ledger-bypass-lifted-on-proto-agents)).
 

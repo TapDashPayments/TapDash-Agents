@@ -36,19 +36,17 @@ if len(facts) != 1:
 print(json.load(open(facts[0]))["packages"]["venv"]["environment"] + "/bin/python")' "$HERMES_HOME"
 }
 
-# what the status file is now: inode, mtime, size (empty when missing)
-fingerprint() { stat -c '%i %Y %s' -- "$STATUS" 2>/dev/null || true; }
-
 main() {
-    local py before after rc
+    local py rc
+    # No earlier report may survive this run: a stale pass must never be left behind when the directory turns
+    # out to be unwritable (the plugin then sees no report and refuses).
+    rm -f -- "$STATUS" 2>/dev/null || true
     py=$(hermes_python) && [[ -x "$py" ]] || { log "hermes python not found"; write_failing "hermes python not found"; return 0; }
-    before=$(fingerprint)
     rc=0
     timeout 60 "$py" -I "$REPO/deploy/hermes_tool_policy.py" check --status-file "$STATUS" || rc=$?
-    after=$(fingerprint)
-    if [[ -z "$after" || ( $rc -ne 0 && "$after" == "$before" ) ]]; then
-        # the check failed and left no new report (killed, crashed, or unable to write): record a failure ourselves
-        log "the check left no new report (exit $rc)"
+    if [[ ! -e "$STATUS" ]]; then
+        # the check was killed, crashed, or could not write: record a failure ourselves
+        log "the check left no report (exit $rc)"
         write_failing "the tool policy check did not write a report"
     elif [[ $rc -ne 0 ]]; then
         log "the tool policy check failed (exit $rc); the plugin will refuse tool calls"

@@ -1187,15 +1187,30 @@ def test_register_fails_closed_on_policy_problem(tmp_path, monkeypatch, report):
     assert not (data / "ledger.db").exists()  # nothing opened, nothing consumed
 
 
-def test_register_passes_with_a_fresh_passing_report(tmp_path, monkeypatch, with_session):
+def _normal_hook_reached(ctx, fake_withhuman):
+    result = ctx.hooks["pre_tool_call"](tool_name="web_search", args={"q": 1}, session_id="s", tool_call_id="c")
+    assert result["message"].startswith("PARKED P-")  # the normal hook asked withHuman and parked the call
+    assert len(fake_withhuman.provider.requests) == 1
+
+
+def test_register_passes_with_a_fresh_passing_report(tmp_path, monkeypatch, with_session, fake_withhuman):
     monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
     report = tmp_path / "elsewhere.json"
     write_policy_report(report)
-    ctx = FakeCtx(tmp_path / "data", {"tool_policy_status": str(report)})
+    ctx = FakeCtx(tmp_path / "data", {"tool_policy_status": str(report), "token_file": fake_withhuman.token})
     register(ctx)
-    result = ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c")
-    assert result["message"] != POLICY_MESSAGE  # went on to the normal hook
+    _normal_hook_reached(ctx, fake_withhuman)
     assert "tool_policy_status" in ctx.asked
+
+
+def test_register_uses_the_default_status_path(tmp_path, monkeypatch, with_session, fake_withhuman):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    write_policy_report(data / "tool_policy_status.json")  # next to the ledger, no setting given
+    ctx = FakeCtx(data, {"token_file": fake_withhuman.token})
+    register(ctx)
+    _normal_hook_reached(ctx, fake_withhuman)
 
 
 def test_register_bad_policy_setting_does_not_fail_open(tmp_path):

@@ -163,3 +163,60 @@ def test_policy_wrapper_failed_check_leaves_a_failing_report_and_exits_0(tmp_pat
     code, status = _run_wrapper(tmp_path, python_ok=True)
     assert code == 0
     assert json.loads(status.read_text())["ok"] is False
+
+
+def _run_wrapper_with_stub(tmp_path, stub_body, *, existing=None):
+    """The wrapper against a fake HERMES_HOME whose "python" is a shell stub; returns (code, status path)."""
+    home = tmp_path / "hermes"
+    install = home / "installs" / "x"
+    install.mkdir(parents=True)
+    env_dir = tmp_path / "venv"
+    (env_dir / "bin").mkdir(parents=True)
+    stub = env_dir / "bin" / "python"
+    stub.write_text("#!/bin/sh\n" + stub_body)
+    stub.chmod(0o755)
+    (install / "facts.json").write_text(json.dumps({"packages": {"venv": {"environment": str(env_dir)}}}))
+    status = tmp_path / "state" / "tool_policy_status.json"
+    if existing is not None:
+        status.parent.mkdir()
+        status.write_text(existing)
+    result = subprocess.run(["bash", str(POLICY_WRAPPER)], env={
+        "PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "HERMES_HOME": str(home),
+        "DURABLE_PARK_POLICY_STATUS": str(status)}, capture_output=True, text=True)
+    return result.returncode, status
+
+
+STUB_FAILS = "exit 1\n"
+STUB_PASSES = ('while [ $# -gt 0 ]; do [ "$1" = --status-file ] && f=$2; shift; done\n'
+               'printf \'{"ok": true, "checked_at": "2099-01-01T00:00:00Z", "problems": [], "allowed": []}\\n\' > "$f"\n')
+OLD_PASS = '{"ok": true, "checked_at": "2020-01-01T00:00:00Z", "problems": [], "allowed": []}'
+
+
+def test_policy_wrapper_stub_that_fails_without_writing(tmp_path):
+    code, status = _run_wrapper_with_stub(tmp_path, STUB_FAILS)
+    assert code == 0
+    report = json.loads(status.read_text())
+    assert report["ok"] is False and report["problems"] and report["allowed"] == []
+
+
+def test_policy_wrapper_never_leaves_an_old_passing_report(tmp_path):
+    code, status = _run_wrapper_with_stub(tmp_path, STUB_FAILS, existing=OLD_PASS)
+    assert code == 0
+    assert json.loads(status.read_text())["ok"] is False
+
+
+def test_policy_wrapper_keeps_the_report_a_passing_check_wrote(tmp_path):
+    code, status = _run_wrapper_with_stub(tmp_path, STUB_PASSES, existing=OLD_PASS)
+    assert code == 0
+    report = json.loads(status.read_text())
+    assert report["ok"] is True and report["checked_at"] == "2099-01-01T00:00:00Z"
+
+
+def test_drop_in_path_rewrite_uses_the_checkout():
+    line = next(l for l in SCRIPT.read_text().splitlines() if l.startswith("sed "))
+    expr = re.search(r'^sed "([^"]+)"', line).group(1).replace("$REPO", "/srv/some repo")
+    out = subprocess.run(["sed", expr], input=DROP_IN.read_text(), capture_output=True, text=True, check=True).stdout
+    assert "ExecStartPre=-/bin/bash /srv/some repo/deploy/tool_policy_check.sh" in out
+    assert "%h/durable-park" not in out
+    assert "Environment=DURABLE_PARK_POLICY_STATUS=%h/.hermes/" in out  # %h stays for systemd
+    assert 'trap \'rm -f "$dropin_tmp"\' EXIT' in SCRIPT.read_text()

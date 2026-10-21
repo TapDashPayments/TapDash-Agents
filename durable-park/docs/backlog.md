@@ -26,10 +26,10 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 
 ## Done since v1
 
-- Check the agent's tool policy at every gateway start (Important #6): the `hermes-gateway` drop-in runs
+- 2026-10-21: check the agent's tool policy at every gateway start (Important #6), built as spec §8 item 7 part 2: the `hermes-gateway` drop-in runs
   `deploy/tool_policy_check.sh` before each start; the plugin refuses every call when the report is missing, failed
-  or older than 15 minutes, and the sweep alerts on failure and on recovery. Only relevant while the v1 lockdown
-  (or an allow file) is applied.
+  or older than 15 minutes, and the sweep alerts on failure and on recovery. It checks the v1 lockdown that is
+  applied on proto-agents.
 - Bridge matches hyphenated tool names (Important #1).
 - `2.0` and `2` treated as the same amount (minor).
 - Form check before parking.

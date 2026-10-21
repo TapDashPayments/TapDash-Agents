@@ -245,6 +245,7 @@ log "agent tool policy ok before restart"
 DROPIN_DIR="$HERMES_HOMEDIR/.config/systemd/user/hermes-gateway.service.d"
 DROPIN="$DROPIN_DIR/50-durable-park-policy.conf"
 dropin_tmp=$(mktemp)
+trap 'rm -f "$dropin_tmp"' EXIT
 sed "s|%h/durable-park/deploy/|$REPO/deploy/|" "$REPO/deploy/hermes-gateway-policy.conf" >"$dropin_tmp"
 if ! as_hermes cmp -s - "$DROPIN" <"$dropin_tmp"; then
     as_hermes install -d -m 0755 "$DROPIN_DIR"
@@ -252,7 +253,6 @@ if ! as_hermes cmp -s - "$DROPIN" <"$dropin_tmp"; then
     as_hermes chmod 0644 "$DROPIN"
     log "installed $DROPIN"
 fi
-rm -f "$dropin_tmp"
 user_systemctl daemon-reload
 
 # --- 4b. gateway bridge ------------------------------------------------------------------------------------
