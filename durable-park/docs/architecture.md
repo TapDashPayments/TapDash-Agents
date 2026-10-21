@@ -173,12 +173,16 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
    script both ensure the gateway starts), writing a failing report itself when there is no Python or the check left
    no new report.
 2. Hermes loads the plugin. `register` validates the settings, then reads that report. A problem (missing, failed,
-   older than 15 minutes) registers the fail-closed hook (`POLICY_MESSAGE`, exempt tools still pass), the wake
+   older than 15 minutes) registers the fail-closed hook (`POLICY_MESSAGE`; only the default exempt tools pass, never the configured list), the wake
    dropper, and an executor that refuses without touching the ledger; nothing else is opened.
+   Either way the plugin writes its own verdict, `tool_policy_load.json` next to the ledger (`ok`, `problem`,
+   `checked_at`; atomic, never raises).
 3. Otherwise the ledger opens and the normal hook, wake handler and executor register.
 
 The sweep reads the same report and alerts once on a failure and once on recovery. The report is written only at
-start, so a long-running gateway does not make it stale for the sweep (the plugin judges age at load).
+start, so a long-running gateway does not make it stale for the sweep (the plugin judges age at load). The sweep
+also reads `tool_policy_load.json` and alerts once when the plugin's verdict is not ok (this catches a stale
+report) and once when a later load passes.
 
 The foreign-hook guard reads Hermes's hook registry (`ctx._manager.iter_hook_callbacks("pre_tool_call")`,
 Hermes v0.22.2 `hermes_cli/plugins_dispatch.py:523`) and its middleware registry

@@ -187,6 +187,14 @@ older than 15 minutes makes it refuse every tool call except `parked_action_exec
 The sweep alerts once when the report is missing or failed, and once (`durable-park: the tool policy check passes
 again.`) when it passes.
 
+The plugin also writes its own verdict at load, `tool_policy_load.json` next to the ledger (`ok`, `problem`,
+`checked_at`), because the sweep cannot judge a report's age. The sweep alerts once when `ok` is false:
+
+`durable-park ALERT: the tool policy check did not pass when the plugin loaded — <problem>. Every tool call is refused until an admin fixes it and restarts the gateway.`
+
+and once (`durable-park: the tool policy check passed when the plugin loaded.`) when a later load passes. Fix the
+`<problem>` with the table below, then restart the gateway.
+
 | Problem | Likely cause | Fix |
 |---|---|---|
 | `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
@@ -194,7 +202,10 @@ again.`) when it passes.
 | `the tool policy check did not write a report` | The check was killed (the 60 s timeout), crashed, or could not write its report; the wrapper then wrote this failing report itself | `journalctl --user -u hermes-gateway` for `tool_policy_check:` lines; run `deploy/hermes_tool_policy.py check --status-file /tmp/x.json` by hand as `hermes` in Hermes's Python and read the error |
 | `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
 | a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
-| `stale` | The gateway started without the drop-in (the report is older than 15 minutes) | Install the drop-in, restart the gateway |
+| `stale` | The gateway started without the drop-in (the report is older than 15 minutes), **or** Hermes re-ran the plugin's `register` more than 15 minutes after the start (`discover_plugins(force=True)`, for example a plugin reload), so the old report aged out: every call is refused although the report says ok | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). This case is only visible through the `tool_policy_load.json` alert above |
+
+Before go-live, time the check once on the VM (`time bash deploy/tool_policy_check.sh` as `hermes`): it must
+finish well under 60 s, because `ExecStartPre` counts toward `TimeoutStartSec`.
 
 Fix it, then `systemctl --user restart hermes-gateway` (only when nothing is waiting or running): the check runs
 again at the start. If the report directory is not writable the script cannot replace an old report: it logs
@@ -367,7 +378,18 @@ The v1 tool lockdown is applied on proto-agents. The
 allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolsets`
 ([format](receiver-setup.md#agent-tool-policy-v1-fix-for-the-ledger-bypass-lifted-on-proto-agents)).
 
-1. Check no ledger row is `parked`, `approved` or `executing` (a gateway restart would strand it).
+1. Check no ledger row is `parked`, `approved` or `executing` (a gateway restart would strand it), with the
+   ledger query from the [health check](#health-check) ("Waiting or stuck rows"); it must print nothing:
+
+   ```sh
+   python3 - <<'PY'
+   import sqlite3
+   c = sqlite3.connect("file:/home/hermes/.hermes/plugin-data/durable-park/ledger.db?mode=ro", uri=True)
+   for r in c.execute("select park_id, tool, status, created_at from parks "
+                      "where status in ('parked','approved','executing') order by created_at"):
+       print(r)
+   PY
+   ```
 2. As admin, add the toolset's name on its own line (for example `web`), save.
    `terminal`, `file`, `code_execution`, `delegation`, `cronjob`, `skills` and `computer_use` are refused until
    Clean Setup Phase 2; a typo is refused too (exit 2, message on stderr, nothing changed).
@@ -378,12 +400,15 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
    as well), and at gateway start the report says `invalid allow file: <reason>`; fix it with
    `chgrp hermes` and `chmod 640` on the file (or, if it is empty, re-create it with
    `install -m 640 -o root -g hermes /dev/null /etc/durable-park/allowed_toolsets`).
-3. Apply and check, as the `hermes` user in Hermes's own Python (or just re-run `deploy/hermes_mcp.sh`, which does both):
-   `<hermes env python> -I deploy/hermes_tool_policy.py apply`, then `... check`. `check` must end with
+3. Re-run `sudo bash deploy/hermes_mcp.sh`: it re-applies the `wh` server settings, runs `hermes_tool_policy.py
+   apply`, then `check` (before the restart; a failure stops it with nothing restarted), restarts `hermes-gateway`
+   and checks again. It needs the provisioned instance token. Without it, run `apply` then `check` by hand as the
+   `hermes` user in Hermes's own Python (`<hermes env python> -I deploy/hermes_tool_policy.py apply`, then
+   `... check`; the Python is the `venv.environment` path in `~/.hermes/installs/*/facts.json`). `check` must end with
    `tool policy: ok`.
 4. Restart `hermes-gateway`: its start runs `check` itself (the drop-in, see [Tool policy check
    failed](#tool-policy-check-failed)) and the plugin refuses every call if it fails. Run `check` once more by hand
-   (`--status-file PATH` to leave the result as JSON).
+   (`--status-file PATH` to leave the result as JSON; any path except the live report, `tool_policy_status.json`).
 
 To close it again, remove the line and repeat from step 3.
 

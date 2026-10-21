@@ -377,13 +377,13 @@ def test_register_fails_closed_when_ledger_cannot_open(tmp_path):
     assert ctx.tools == {}  # without a ledger there is nothing to execute
 
 
-def test_register_fails_closed_with_the_configured_exempt_tools(tmp_path):
+def test_register_fails_closed_with_the_default_exempt_tools_only(tmp_path):
     ctx = FakeCtx(tmp_path, {"ledger_path": str(tmp_path), "exempt_tools": ["web_search"]})
     register(ctx)
     hook = ctx.hooks["pre_tool_call"]
-    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") is None
-    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") == {
-        "action": "block", "message": COULD_NOT_OPEN}
+    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": COULD_NOT_OPEN}  # a configured extra is not exempt when failing closed
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") is None
 
 
 def test_foreign_hook_detected_through_manager(tmp_path, with_session, fake_withhuman):
@@ -1218,3 +1218,56 @@ def test_register_bad_policy_setting_does_not_fail_open(tmp_path):
     register(ctx)
     assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s",
                                       tool_call_id="c") is not None
+
+
+def test_policy_failure_hook_ignores_the_configured_exempt_tools(tmp_path, monkeypatch):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    write_policy_report(data / "tool_policy_status.json", ok=False, problems=["x"])
+    ctx = FakeCtx(data, {"exempt_tools": ["parked_action_execute", "clarify", "web_search"]})
+    register(ctx)
+    hook = ctx.hooks["pre_tool_call"]
+    assert hook(tool_name="web_search", args={}, session_id="s", tool_call_id="c") == {
+        "action": "block", "message": POLICY_MESSAGE}  # the message says every call is refused: it must be true
+    assert hook(tool_name="clarify", args={}, session_id="s", tool_call_id="c") is None
+
+
+def _load_verdict(directory):
+    return json.loads((directory / "tool_policy_load.json").read_text())
+
+
+@pytest.mark.parametrize("report,problem", [(None, "no tool policy report"), ("failed", "x"), ("stale", "stale")])
+def test_register_writes_its_load_verdict_when_the_policy_fails(tmp_path, monkeypatch, report, problem):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    if report == "failed":
+        write_policy_report(data / "tool_policy_status.json", ok=False, problems=["x"])
+    elif report == "stale":
+        write_policy_report(data / "tool_policy_status.json", age_minutes=20)
+    register(FakeCtx(data))
+    verdict = _load_verdict(data)
+    assert verdict["ok"] is False and verdict["problem"] == problem
+    assert verdict["checked_at"].endswith("Z") and len(verdict["checked_at"]) == 20
+    assert [p.name for p in data.iterdir() if p.name.startswith(".")] == []  # no temp file left
+
+
+def test_register_writes_an_ok_load_verdict_when_the_policy_passes(tmp_path, monkeypatch, with_session, fake_withhuman):
+    monkeypatch.setattr(durable_park, "policy_problem", REAL_POLICY_PROBLEM)
+    data = tmp_path / "data"
+    data.mkdir()
+    write_policy_report(data / "tool_policy_status.json")
+    register(FakeCtx(data, {"token_file": fake_withhuman.token}))
+    verdict = _load_verdict(data)
+    assert verdict["ok"] is True and verdict["problem"] is None
+
+
+def test_the_load_verdict_write_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(durable_park, "policy_problem", lambda path, now, max_age=None: "stale")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "tool_policy_load.json").mkdir()  # cannot be replaced by a file
+    ctx = FakeCtx(data)
+    register(ctx)  # must not raise, and must still fail closed
+    assert ctx.hooks["pre_tool_call"](tool_name="web_search", args={}, session_id="s", tool_call_id="c")["action"] == "block"

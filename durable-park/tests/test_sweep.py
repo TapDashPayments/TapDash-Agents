@@ -489,3 +489,32 @@ def test_policy_broken_state_file_does_not_stop_the_sweep(world, monkeypatch, ca
     world.row("approved")
     assert world.main(monkeypatch) == 0
     assert len(world.posted) == 1
+
+
+LOAD_ALERT = ("durable-park ALERT: the tool policy check did not pass when the plugin loaded \u2014 {problem}. "
+              "Every tool call is refused until an admin fixes it and restarts the gateway.")
+LOAD_OK = "durable-park: the tool policy check passed when the plugin loaded."
+
+
+def write_load(tmp_path, *, ok, problem=None):
+    (tmp_path / "tool_policy_load.json").write_text(json.dumps(
+        {"ok": ok, "problem": problem, "checked_at": "2026-10-21T10:00:00Z"}))
+
+
+def test_load_verdict_alert_once_and_recovery(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # no verdict file (old plugin / not loaded yet): silent
+    write_load(tmp_path, ok=True)
+    assert runs(world, monkeypatch, capsys, 1) == [""]
+    write_load(tmp_path, ok=False, problem="stale")  # the report itself still says ok: the blind spot
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.strip() == LOAD_ALERT.format(problem="stale") and second == ""
+    write_load(tmp_path, ok=True)
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.strip() == LOAD_OK and fourth == ""
+
+
+def test_load_verdict_unreadable_is_silent_and_keeps_the_sweep_going(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "tool_policy_load.json").write_text("{not json")
+    world.row("approved")
+    assert world.main(monkeypatch) == 0
+    assert capsys.readouterr().out == "" and len(world.posted) == 1

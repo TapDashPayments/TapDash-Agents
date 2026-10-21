@@ -48,6 +48,8 @@ BREAKER_STATUS = "breaker_status.json"
 BREAKER_STATE = "breaker_alert_state.json"
 POLICY_STATUS = "tool_policy_status.json"
 POLICY_STATE = "tool_policy_alert_state.json"
+POLICY_LOAD = "tool_policy_load.json"  # the plugin's own verdict at load (it judges the report's age)
+POLICY_LOAD_STATE = "tool_policy_load_alert_state.json"
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -285,6 +287,27 @@ def _policy_alert(ledger_path: str, now: datetime) -> None:
         alerted = True
     elif problem is None and alerted:
         print("durable-park: the tool policy check passes again.", flush=True)
+        alerted = False
+    _save_state(state_path, {"alerted": alerted})
+    _policy_load_alert(directory)
+
+
+def _policy_load_alert(directory: str) -> None:
+    """Alert once when the plugin reports at load that the tool policy check did not pass (it also catches a
+    stale report, which the check above cannot see), and once when a later load passes. A missing or unreadable
+    verdict file is silent (an older plugin, or one that has not loaded yet)."""
+    verdict = _load_state(os.path.join(directory, POLICY_LOAD))  # missing or unreadable -> {}
+    ok = verdict.get("ok")
+    state_path = os.path.join(directory, POLICY_LOAD_STATE)
+    alerted = _load_state(state_path).get("alerted") is True
+    if ok is False and not alerted:
+        problem = verdict.get("problem")
+        reason = _clean(problem, 200) if isinstance(problem, str) and problem else "the tool policy check failed"
+        print("durable-park ALERT: the tool policy check did not pass when the plugin loaded \u2014 "
+              f"{reason}. Every tool call is refused until an admin fixes it and restarts the gateway.", flush=True)
+        alerted = True
+    elif ok is True and alerted:
+        print("durable-park: the tool policy check passed when the plugin loaded.", flush=True)
         alerted = False
     _save_state(state_path, {"alerted": alerted})
 

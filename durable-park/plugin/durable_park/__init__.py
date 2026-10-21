@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ DEFAULT_TOKEN_FILE = "/etc/durable-park/instance_token"
 EXECUTOR_TOOL = EXECUTE_SCHEMA["name"]
 HOOK_REGISTRY_UNAVAILABLE = "<hook registry unavailable>"
 POLICY_STATUS_FILENAME = "tool_policy_status.json"
+POLICY_LOAD_FILENAME = "tool_policy_load.json"
 POLICY_MAX_AGE = timedelta(minutes=15)
 POLICY_MESSAGE = ("durable-park: the tool policy check did not pass at gateway start; tool calls are refused "
                   "until an admin fixes it.")
@@ -62,6 +65,33 @@ def policy_problem(path: str, now: datetime, max_age: timedelta = POLICY_MAX_AGE
     if age > max_age or age < -timedelta(minutes=1):
         return "stale"
     return None
+
+
+def write_policy_load(path: str, problem: str | None) -> None:
+    """Record this load's own verdict on the tool policy report (``ok``, ``problem``, ``checked_at``) for the
+    sweep, atomically. The sweep cannot judge a report's age itself, so a stale report (the plugin was reloaded
+    more than 15 minutes after the gateway start) would otherwise be invisible to it. Never raises."""
+    tmp = None
+    try:
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+        verdict = {"ok": problem is None, "problem": problem,
+                   "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".policy-load-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(verdict, handle)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001 - a failed verdict write must never change what the plugin does
+        log.warning("durable-park could not write %s (%s)", POLICY_LOAD_FILENAME, type(exc).__name__)
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _names(key: str, value: Any) -> list[str]:
@@ -191,9 +221,10 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
     if not isinstance(policy_path, str) or not policy_path:
         raise BadSetting(f"setting tool_policy_status must be a path, got {type(policy_path).__name__}")
     problem = policy_problem(str(Path(policy_path).expanduser()), datetime.now(timezone.utc))
+    write_policy_load(str(Path(ledger_path).expanduser().parent / POLICY_LOAD_FILENAME), problem)
     if problem is not None:
         log.error("durable-park tool policy check failed (%s); refusing every tool call", problem)
-        register_hook("pre_tool_call", fail_closed_hook(exempt, POLICY_MESSAGE))
+        register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS, POLICY_MESSAGE))
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         # The executor stays registered so the model's call gets a clean refusal (nothing consumed: an
         # approved park stays approved and can run after the admin fixes the policy and restarts the gateway).
@@ -206,7 +237,7 @@ def _register(ctx: Any, own: set[int], register_hook: Any) -> None:
         ledger = Ledger(str(Path(ledger_path).expanduser()))
     except Exception as exc:  # noqa: BLE001
         log.error("durable-park ledger unavailable (%s); refusing every tool call", type(exc).__name__)
-        register_hook("pre_tool_call", fail_closed_hook(exempt))
+        register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS))
         register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
         return
 
