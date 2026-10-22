@@ -263,7 +263,8 @@ rule is in [architecture](architecture.md#the-bridges-decision-rule)):
    `"default"`, whole-number floats such as `2.0` treated as `2`), exactly as at park time.
 3. The bridge asks withHuman (`GET /api/v1/requests?agent_slug=proto-agents&q=<name>&limit=...`, newest first)
    for the park requests of that Hermes name. It approves only if exactly one is `approved`, on server
-   `park:<slug>`, **consumed** (`consumption.consumed_at`) within the last 120 s and before its approval expired,
+   `park:<slug>`, **consumed** (`consumption.consumed_at`) within the last 120 s (withHuman refuses to consume
+   an expired approval, so the bridge does not read the approval's expiry),
    not truncated, with the same argument digest. It then lists the gateway requests of that tool: any other
    request for the same call created at or after the consumption means the approval is already used, so `human`.
    The answer is `{"outcome":"approve","reason":"Matches approved park request <id>"}`.

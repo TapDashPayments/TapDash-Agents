@@ -66,15 +66,26 @@ def iso(offset: float) -> str:
 
 
 def park_item(*, id="park_req_1", args=None, consumed=-10, tool=PARK_TOOL, server=PARK_SERVER,
-              slug="proto-agents", outcome=None):
-    """The park request withHuman holds after the model asked, a person approved and the executor consumed it."""
+              slug="proto-agents", outcome=None, expires=None):
+    """The park request withHuman lists after the model asked, a person approved and the executor consumed it.
+
+    The live shape: the listing's ``decision`` has no ``expires_at`` (the bridge never reads one) and ``consumption``
+    has no ``outcome`` key until the executor reports one. Pass ``expires`` (seconds from NOW, or a string) to add a
+    stray ``expires_at``, or ``outcome`` to add that key.
+    """
+    decision = {"id": "dec_1", "request_id": id, "organization_id": "org_1", "membership_id": "mem_1",
+                "status": "approved", "channel": "web", "reviewer_display_name": "Reviewer",
+                "reviewer_email": "reviewer@example.com", "authentication": {"method": "session"},
+                "idempotency_key": "idem_dec_1", "decided_at": iso(consumed - 60)}
+    consumption = {"consumed_at": iso(consumed)}
+    if expires is not None:
+        decision["expires_at"] = expires if isinstance(expires, str) else iso(expires)
+    if outcome is not None:
+        consumption["outcome"] = outcome
     return {
         "id": id, "agent_slug": slug, "tool": tool, "server": server,
         "arguments": ARGS if args is None else args, "context": {},
-        "status": "approved",
-        "decision": {"status": "approved", "decided_at": iso(consumed - 60), "expires_at": iso(86400),
-                     "note": None},
-        "consumption": {"consumed_at": iso(consumed), "outcome": outcome},
+        "status": "approved", "decision": decision, "consumption": consumption,
         "created_at": iso(consumed - 120), "deadline_at": iso(86400),
     }
 
@@ -84,7 +95,7 @@ def gateway_item(*, id, created, args=None, server=SERVER, tool=TOOL, status="pe
     return {
         "id": id, "agent_slug": slug, "tool": tool, "server": server,
         "arguments": ARGS if args is None else args, "context": {},
-        "status": status, "decision": None, "consumption": None,
+        "status": status,
         "created_at": iso(created), "deadline_at": iso(created + 600),
     }
 
@@ -169,6 +180,22 @@ def test_bridge_approves_when_an_approved_consumed_park_matches(client, lister):
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/json")
     assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
+
+
+def test_bridge_approves_a_park_in_the_live_listing_shape_with_no_expires_at(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    park = park_item()
+    assert "expires_at" not in park["decision"] and set(park["consumption"]) == {"consumed_at"}
+    arm(lister, park=park)
+    resp = deliver(client)
+    assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
+    assert "why=park-request=park_req_1" in bridge_lines(caplog)[-1]
+
+
+@pytest.mark.parametrize("stray", [-11, "soon", 86400])
+def test_bridge_ignores_a_stray_expires_at_on_the_park(client, lister, stray):
+    arm(lister, park=park_item(expires=stray))
+    approves(client)
 
 
 def test_bridge_asks_withhuman_for_parks_by_tool_name_then_for_all_recent_requests_of_the_agent(client, lister):

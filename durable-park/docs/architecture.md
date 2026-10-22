@@ -371,8 +371,8 @@ Hermes folds `-` into `_`, so a filter on the tool name could miss a second use 
    prefix that the park regex lacks: `quickbooks__create-bill` must never pair with a park for `create-bill`.
 2. A park request P **matches** only if all hold: same agent, tool = the Hermes tool name, server = `park:<slug>`,
    status and decision `approved`, `consumed_at` present and within the last **120 s** (5 s of clock skew allowed
-   against this host's clock),
-   consumed before the approval expired, no truncated arguments, and the digest of P's arguments equals G's.
+   against this host's clock; the approval's own expiry is not read, withHuman already refused to consume an
+   expired one), no truncated arguments, and the digest of P's arguments equals G's.
 3. No match: ask a person (`no-approved-park`). Two matches: ask a person (`ambiguous-park`).
 4. On the single match P: arguments the approver could not read go to a person (`redacted-args`: P's arguments hold
    the `[redacted]` placeholder anywhere, or G's arguments would be redacted or cut short by the park hook's own

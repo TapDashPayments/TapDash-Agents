@@ -102,9 +102,11 @@ def _is_match(park: dict, call: GatewayCall, park_tool: str, park_server: str, d
         return False
     if not isinstance(consumption, dict) or not isinstance(context, dict) or context.get("args_truncated"):
         return False
+    # The approval's own expiry is never read: the product listing carries no ``expires_at`` on a decision, and
+    # withHuman refuses to consume an expired approval before it records ``consumed_at`` (same transaction), so a
+    # parseable ``consumed_at`` is the proof. The window below is what retires an old consumed park.
     consumed = parse_time(consumption.get("consumed_at"))
-    expires = parse_time(decision.get("expires_at"))
-    if consumed is None or expires is None or consumed > expires:
+    if consumed is None:
         return False
     if consumed > now + timedelta(seconds=SKEW_SECONDS) or now - consumed > timedelta(seconds=WINDOW_SECONDS):
         return False
