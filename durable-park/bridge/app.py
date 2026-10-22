@@ -221,8 +221,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--secret-file",
                         default=os.environ.get("DURABLE_PARK_BRIDGE_SECRET_FILE", DEFAULT_SECRET_FILE),
                         help="file holding the withHuman whsec_ signing secret")
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--host", default=None, help=f"listen address (default {DEFAULT_HOST})")
+    parser.add_argument("--port", type=int, default=None, help=f"listen port (default {DEFAULT_PORT})")
+    parser.add_argument("--systemd-socket", action="store_true",
+                        default=os.environ.get("DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET") == "1",
+                        help="serve on the listening socket systemd passes as fd 3 (socket activation) instead of "
+                             "binding --host/--port (env DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET=1)")
     parser.add_argument("--expected-agent",
                         default=os.environ.get("DURABLE_PARK_EXPECTED_AGENT", DEFAULT_EXPECTED_AGENT),
                         help="agent slug a delivery must carry to be approvable")
@@ -231,20 +235,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--key-file", default=os.environ.get("DURABLE_PARK_WH_KEY_FILE", DEFAULT_KEY_FILE),
                         help="file holding the withHuman organization key, read on every call "
                              "(env DURABLE_PARK_WH_KEY_FILE)")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.systemd_socket:
+        if args.host is not None or args.port is not None:
+            parser.error("--systemd-socket cannot be combined with --host or --port")
+    else:
+        args.host = DEFAULT_HOST if args.host is None else args.host
+        args.port = DEFAULT_PORT if args.port is None else args.port
+    return args
+
+
+def systemd_listen_fd(environ: Any, pid: int) -> int:
+    """The fd of the one socket systemd handed us (always 3), or exit: serve nothing without it.
+
+    systemd sets ``LISTEN_PID`` to the pid it started and ``LISTEN_FDS`` to the number of sockets, passed from
+    fd 3. A stale or inherited environment (another pid, another count) must never make us serve.
+    """
+    if environ.get("LISTEN_PID") != str(pid) or environ.get("LISTEN_FDS") != "1":
+        raise SystemExit("--systemd-socket: no socket from systemd (LISTEN_PID/LISTEN_FDS)")
+    return 3
 
 
 def main(argv: list[str] | None = None) -> None:
     import uvicorn
 
     args = parse_args(argv)
+    fd = systemd_listen_fd(os.environ, os.getpid()) if args.systemd_socket else None
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
         lister = RequestLister(args.api_base, args.key_file)
     except ListError:  # never echo the URL (it could carry credentials) or read the key
         raise SystemExit("bridge: --api-base (env DURABLE_PARK_WH_API_BASE) must be an https:// URL") from None
     app = create_app(secret=load_secret(args.secret_file), lister=lister, expected_agent=args.expected_agent)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)
+    if fd is None:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)
+        return
+    for name in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):  # not for children of ours to inherit
+        os.environ.pop(name, None)
+    uvicorn.run(app, fd=fd, log_level="info", access_log=False)
 
 
 if __name__ == "__main__":
