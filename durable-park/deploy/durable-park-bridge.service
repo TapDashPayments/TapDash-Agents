@@ -3,8 +3,14 @@
 # durable-park-bridge.socket (which holds the port) and the system user dpbridge.
 #
 # OWN USER: the bridge runs as dpbridge, not as the bot's user hermes. dpbridge has no login, no home and no group
-# but its own, so nothing the bot runs can signal this process, read its memory or /proc entry (ProtectProc=invisible),
-# or bind its port (the socket unit holds it, also while this service restarts).
+# but its own, so nothing the bot runs can signal this process or read its memory, and nothing it runs can bind
+# the port (the socket unit holds it, also while this service restarts). The separate uid is what protects the
+# bridge. ProtectProc=invisible does the reverse: it hides other users' processes from the bridge.
+#
+# NO START LIMIT: with Accept=no, systemd puts the socket unit into the failed state (service-start-limit-hit) and
+# closes its listening socket when this service trips its start limit, and that frees 127.0.0.1:8791 for anyone.
+# The default (5 starts in 10 s) trips after about 6 s of a persistent start failure with RestartSec=1, so
+# StartLimitIntervalSec=0 below keeps systemd retrying every second instead (systemd.unit(5)).
 #
 # STATELESS: the bridge keeps no state and does not open the ledger (the ledger is a file the bot's user can
 # write, so a row in it proves nothing). For every gateway call it asks withHuman itself (GET /api/v1/requests)
@@ -25,6 +31,7 @@ Description=durable-park gateway bridge (withHuman approval webhook block)
 Requires=durable-park-bridge.socket
 After=durable-park-bridge.socket network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

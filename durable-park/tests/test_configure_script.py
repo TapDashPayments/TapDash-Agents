@@ -96,7 +96,8 @@ def test_bridge_socket_unit_lets_systemd_hold_the_port():
     """A socket unit owns 127.0.0.1:8791 at all times, so nothing the bot runs can bind it while the bridge restarts."""
     sections = _unit_sections(BRIDGE_SOCKET)
     assert set(sections) == {"Unit", "Socket", "Install"}
-    assert sorted(sections["Socket"]) == ["Accept=no", "ListenStream=127.0.0.1:8791", "NoDelay=true"]
+    assert {"Accept=no", "ListenStream=127.0.0.1:8791", "NoDelay=true"} <= set(sections["Socket"])
+    assert [line for line in sections["Socket"] if line.startswith("ListenStream=")] == ["ListenStream=127.0.0.1:8791"]
     assert sections["Install"] == ["WantedBy=sockets.target"]
 
 
@@ -116,6 +117,22 @@ def test_bridge_unit_is_bound_to_its_socket_and_always_restarts():
     assert "Wants=network-online.target" in sections["Unit"]  # without it the After= ordering has no effect
     assert "Restart=always" in sections["Service"] and "RestartSec=1" in sections["Service"]
     assert not any(line.startswith("Restart=on-failure") for line in sections["Service"])
+
+
+def test_bridge_service_never_trips_systemds_start_limit():
+    """With Accept=no systemd fails the socket unit (service-start-limit-hit) and closes the listening fd when the
+    service trips its start limit, which frees 127.0.0.1:8791 for anyone. The default limit (5 starts in 10 s) trips
+    in about 6 s of a persistent start failure with RestartSec=1, so the service must have no start limit at all
+    (systemd.unit: StartLimitIntervalSec=0 disables the rate limiting)."""
+    assert "StartLimitIntervalSec=0" in _unit_sections(BRIDGE_SERVICE)["Unit"]
+    assert not any(line.startswith("StartLimitBurst") for lines in _unit_sections(BRIDGE_SERVICE).values() for line in lines)
+
+
+def test_bridge_socket_has_no_trigger_limit_that_could_fail_it():
+    """systemd.socket: when TriggerLimitIntervalSec/TriggerLimitBurst (default 20 activations per 2 s for Accept=no)
+    is hit, the socket unit is put into a failure mode and closes its listening fd, so a burst of connections while
+    the bridge restarts would free the port. 0 disables the limit; PollLimit* still slows a flood down temporarily."""
+    assert "TriggerLimitIntervalSec=0" in _unit_sections(BRIDGE_SOCKET)["Socket"]
 
 
 def test_bridge_unit_takes_the_socket_from_systemd_and_reads_secrets_as_credentials():

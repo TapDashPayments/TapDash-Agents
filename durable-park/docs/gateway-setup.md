@@ -287,7 +287,11 @@ answer "approve" to every gateway call. So, since 2026-10-22:
   from the bridge, not the other way round; the separate user is what protects it.)
 - `durable-park-bridge.socket` holds `127.0.0.1:8791` permanently and passes it to the service as fd 3
   (`--systemd-socket`). While the bridge restarts (`Restart=always`, `RestartSec=1`) connections wait in the socket's
-  backlog and nobody else can bind the port. Started without a socket from systemd, the bridge exits at once.
+  backlog and nobody else can bind the port, for as long as the socket unit is neither stopped nor failed. systemd
+  fails a socket unit (and frees the port) when the service it activates trips its start limit, or when the socket
+  trips its trigger limit, so the service has `StartLimitIntervalSec=0` (it keeps being retried every second even if
+  every start fails) and the socket has `TriggerLimitIntervalSec=0`. Started without a socket from systemd, the
+  bridge exits at once.
 - `bridge_secret` is `root:root 0600` and `audit_key` stays `root:hermes 0640`. systemd reads both as root when the
   service starts (`LoadCredential`) and gives the bridge private copies, so the bot can no longer read the signing
   secret. Rotating either key needs `sudo systemctl restart durable-park-bridge`.
