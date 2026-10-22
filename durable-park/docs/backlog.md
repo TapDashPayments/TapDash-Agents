@@ -16,6 +16,7 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 | 8 | Langfuse retention: the Hobby plan gives 30 days of data access and the retention cannot be changed, against the 365-day retention policy (TapDash Agents security decisions, 2026-10-15). Decide a paid plan or self-hosting ([Tracing](runbook.md#tracing-langfuse)) | After 30 days the traces can no longer be read. Fine for the test VM; not for real books. |
 | 9 | Langfuse is another outside company that holds full conversations (capture mode `full`: chat text, model inputs and outputs, tool arguments and results). Decide whether that is acceptable for production, and which capture mode to use | With real books those would include real customer and money data. |
 | 10 | **Critical (found 2026-10-22, not caused by tracing):** the Telegram bot token is written in plain text to the `hermes-gateway` journal (the `httpx` INFO request lines). Rotate the token in BotFather and update `TELEGRAM_BOT_TOKEN` in `~/.hermes/.env` (typed in with `read -rs`, never in chat), then set the `httpx` logger to WARNING for the gateway so it is not logged again | Anyone who can read the journal can control the bot. Until it is rotated, treat the old token as exposed. |
+| 11 | **Important (found 2026-10-22 by the strong review of PR #32; durable-park follow-up):** make durable-park fail closed across a live plugin reload, or block live reloads. Needs its own plan, tests and independent review before any deploy (AGENTS.md Rule 2: it touches the park hook). Until then the runbook rule is: stop `hermes-gateway` before any `hermes plugins enable` / `disable` and never use the dashboard's plugin toggle while the gateway runs ([warning](runbook.md#never-change-plugins-while-the-gateway-runs)) | `hermes plugins enable|disable` of ANY plugin makes the running gateway reload every plugin (`discover_plugins(force=True)`). Evidence, 2026-10-22 04:37:28 UTC ([record](acceptance-2026-10-22-langfuse.md)): `gateway.run_plugin_rewire` re-wired the adapters and durable-park logged `tool policy check failed (stale); refusing every tool call` until the restart (about 18 s). Two defects: (a) after a reload durable-park judges the start-time policy report stale and refuses every call until a restart (an outage, not a loss of safety); (b) for about 0.1 s while plugins are unloaded and loaded, the `pre_tool_call` hook list is empty, so a call that starts then is not checked by durable-park (withHuman's gateway and the bridge still hold QuickBooks calls; no call was recorded in the 2026-10-22 window). |
 
 ## Langfuse tracing gaps (from the 2026-10-22 audit)
 
@@ -27,14 +28,14 @@ only after the deploy ([runbook](runbook.md#switch-to-the-patched-plugin-deploy)
 No durable-park code changes.
 
 1. **No `userId` on any trace.** The Nous plugin never sets one. **Fixed in `tracing/tapdash_langfuse`, live after the
-   deploy:** `userId` is the chat sender id (and `user_name` goes in the trace metadata). A turn with no sender (cron,
-   some CLI turns) has no `userId`; a value that is not US-ASCII or is over 200 characters is left out, never altered.
+   deploy:** `userId` is the chat sender id (and `user_name`, the sender's display name, goes in the root observation's metadata). A turn with no sender (cron,
+   some CLI turns) has no `userId`; a sender id that is not US-ASCII or is over 200 characters is left out, never altered (the display name is kept as it is, cut to 200 characters).
 2. **Every trace is named `Hermes turn` and every model call `LLM call N`.** **Fixed in `tracing/tapdash_langfuse`, live
    after the deploy:** traces are named `telegram-turn`, `teams-turn`, `cli-turn`, `cron-run` or `hermes-turn` (platform
    unknown). The model calls are still named `LLM call N`; that part was not changed.
 3. **Park, approval and resume are separate traces,** joined only by the park id in the text; the inner `create_payment`
    is not a child of `parked_action_execute`. **Fixed for finding them, in `tracing/tapdash_langfuse`, live after the
-   deploy:** the new setting `HERMES_LANGFUSE_TAG_PATTERNS` (live value `park=\bP-[0-9A-F]{8}\b`) tags each trace that
+   deploy:** the new setting `HERMES_LANGFUSE_TAG_PATTERNS` (value to set: `park=\bP-[0-9A-F]{8}\b`) tags each trace that
    mentions a park id with `park:P-XXXXXXXX`, so one tag filter returns the parking turn, the approval turn and the run
    ([how](runbook.md#find-everything-about-one-approval)). It needed no durable-park change. **Still open:** the traces
    are not linked as parent and child, the withHuman request id is not tagged, and there is no event for the approval

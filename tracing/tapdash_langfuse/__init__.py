@@ -786,7 +786,7 @@ def _add_trace_tags(state: TraceState, tags: list[str]) -> None:
 
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
-                      turn_id: str = "", api_request_id: str = "") -> TraceState:
+                      turn_id: str = "", api_request_id: str = "", user_message: Any = None) -> TraceState:
     # Session IDs deliberately group Langfuse traces, but cannot also identify
     # a trace: gateway and hosted-room turns retain one session across many
     # replies.  Prefer the unique turn ID (then request ID for hook callers
@@ -826,7 +826,14 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     root_span = None
     pattern_tags: list[str] = []
     with _failsafe("pattern tags"):
-        pattern_tags = _pattern_tags([last_user.get("content")] if last_user is not None else [])
+        # The turn's ORIGINAL user message, not the API copy: that copy carries injected context (memory recall,
+        # plugin context, gateway notes), which would tag a turn with an id it never mentioned. The request's
+        # last user message is the fallback only when Hermes passed no original.
+        if user_message is not None:
+            scanned = [user_message]
+        else:
+            scanned = [last_user.get("content")] if last_user is not None else []
+        pattern_tags = _pattern_tags(scanned)
     propagated = {"session_id": session_id or task_key, "trace_name": trace_name,
                   "tags": [*_trace_tags(platform), *pattern_tags]}
     if user_id:
@@ -997,7 +1004,8 @@ def _get_or_start_state_locked(task_key: str, **root_kwargs: Any) -> TraceState:
 
 def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = "", model: str = "",
                     provider: str = "", api_mode: str = "", messages: Any = None,
-                    turn_id: str = "", api_request_id: str = "", sender_id: str = "", **_: Any) -> None:
+                    turn_id: str = "", api_request_id: str = "", sender_id: str = "", user_message: Any = None,
+                    **_: Any) -> None:
     # TapDash: remember who sent this turn (before the early return below: the turn-scoped call is the only
     # one that carries sender_id) so _start_root_trace can set the trace userId.
     with _failsafe("remember sender"):
@@ -1015,7 +1023,8 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
         return
     with _STATE_LOCK:
         _get_or_start_state_locked(task_key, task_id=task_id, session_id=session_id, platform=platform, provider=provider, model=model,
-                                   api_mode=api_mode, messages=messages, client=client, turn_id=turn_id, api_request_id=api_request_id)
+                                   api_mode=api_mode, messages=messages, client=client, turn_id=turn_id, api_request_id=api_request_id,
+                                   user_message=user_message)
 
 
 def _emit_moa_reference_generations(state: TraceState, *, client: Langfuse, references: Any) -> None:
@@ -1081,7 +1090,8 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
     with _STATE_LOCK:
         state = _get_or_start_state_locked(
             task_key, task_id=task_id, session_id=session_id, platform=platform, provider=provider, model=model,
-            api_mode=api_mode, messages=input_messages, client=client, turn_id=turn_id, api_request_id=api_request_id)
+            api_mode=api_mode, messages=input_messages, client=client, turn_id=turn_id, api_request_id=api_request_id,
+            user_message=user_message)
         previous = state.generations.pop(req_key, None)
         if previous is not None:
             _end_observation(previous, level="WARNING",

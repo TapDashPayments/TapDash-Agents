@@ -1,3 +1,12 @@
+> **TapDash patched copy.** This is not the catalog plugin. It is a copy of Nous Research's `langfuse` plugin
+> (v2.0.0 @ `c2a9596`) with TapDash's changes, listed in [`PATCHES.md`](PATCHES.md). On the test VM it is installed as
+> a symlink, `~/.hermes/plugins/tapdash-langfuse`, under the plugin name `tapdash-langfuse`. The rest of this file is
+> upstream's text with TapDash notes; **do not follow its install, update or remove steps** (`hermes plugins install
+> langfuse`, `hermes update`, `hermes plugins remove langfuse`). Deploy, turn on, turn off and change it only with
+> the [runbook](../../durable-park/docs/runbook.md#tracing-langfuse). **Never enable, disable or reload any plugin
+> while the gateway is running**: Hermes reloads every plugin live, and durable-park refuses every tool call until
+> the gateway is restarted. Stop the gateway first, as the runbook says.
+
 <p align="center"><img src="../assets/langfuse.jpg" alt="Langfuse: official Hermes Agent plugin" width="100%"></p>
 
 # Langfuse for Hermes Agent
@@ -13,14 +22,14 @@ the same breakdown (input / output / cache read / cache write / reasoning tokens
 The plugin fails open: no SDK, no credentials or a transient Langfuse error all turn into a no-op in
 the hook (a missing SDK or missing/placeholder keys log one warning). The agent loop is never affected.
 
-**If you already used Langfuse with Hermes, you don't need to do anything.** `hermes update` (or the
-first start after updating) installs and enables this plugin for every profile that had
-`observability/langfuse` enabled. Your keys and every `HERMES_LANGFUSE_*` setting stay exactly as they
-were.
+**TapDash:** upstream's text here says that `hermes update` migrates existing Langfuse users to the catalog
+plugin and that they need to do nothing. That is about the catalog plugin and does not apply to this copy. Nothing
+installs, enables or updates `tapdash-langfuse` for you; its code changes only through the repository and the
+runbook, and its keys and `HERMES_LANGFUSE_*` settings live in `~/.hermes/.env` on the VM.
 
 ## Install
 
-From the Hermes plugin catalog:
+From the Hermes plugin catalog (upstream; **not how TapDash installs it**, see the banner at the top):
 
 ```bash
 hermes plugins install langfuse
@@ -47,7 +56,7 @@ Restart Hermes and the next turn ships a trace. Plugins are installed per profil
 ## Verify
 
 ```bash
-hermes plugins list                 # langfuse should show "enabled"
+hermes plugins list                 # langfuse should show "enabled" (TapDash: "tapdash-langfuse")
 hermes chat -q "hello"              # then check Langfuse for a "hermes-turn" trace (TapDash: "<platform>-turn")
 ```
 
@@ -113,7 +122,9 @@ content.
 ### Tag traces by pattern (TapDash patch)
 
 `HERMES_LANGFUSE_TAG_PATTERNS` is not in upstream. Its format is `label=regex;label=regex`. Whenever a regex
-matches the turn's user message, a tool call's arguments or a tool's result, the trace gets the tag
+matches the turn's original user message (as the person sent it, without the memory, plugin context and
+gateway notes that Hermes adds to the model's copy; the model's copy is used only when Hermes passes no original),
+a tool call's arguments or a tool's result, the trace gets the tag
 `label:value`. The value is capture group 1 if the regex has a group, else the whole match. For example
 `inv=invoice (\d+)` on "pay invoice 1016" adds `inv:1016`.
 
@@ -123,12 +134,16 @@ matches the turn's user message, a tool call's arguments or a tool's result, the
 - At most 10 pattern tags per trace. A tag over 200 characters or not US-ASCII is skipped.
 - Only the first 200 000 characters of each scanned text are scanned.
 - With `HERMES_LANGFUSE_CAPTURE=metadata` no pattern tags are added (a tag would carry content). The trace
-  `userId` (chat sender id) and the root metadata `user_name` are still sent in that mode.
+  `userId` (chat sender id) and the root observation's metadata `user_name` are still sent in that mode.
 - Pattern tags are taken from the raw text and are **not** passed through secret redaction, even in `sanitized`
   mode (a tag carries the raw match). Only use patterns that match non-secret ids.
 - A pattern runs on up to 200 000 characters of each text, so it must avoid catastrophic backtracking (Python's
   `re` has no timeout, and the user message is scanned while the plugin holds its state lock).
 - A tag found in a tool result is added to the trace while the turn is still running.
+- Arguments and results that are not plain strings (dicts, lists) are scanned as JSON text. A JSON escape written
+  right before a match hides it from `\b`: in `{"a": "x\nP-0A9C15CE"}` the text is `x\nP-0A9C15CE` with a backslash and
+  an `n`, so `\bP-...` finds no word boundary and no tag is added. A match after a space, a quote or other punctuation
+  is found. A plain string (such as the user message) is scanned as it is, so a real newline is fine there.
 
 ## Capture modes
 
@@ -147,6 +162,10 @@ defense in depth, not a DLP guarantee. For personal sessions or shared Langfuse 
 `metadata`.
 
 ## Disable or remove
+
+**TapDash:** use the runbook's [Turn it off](../../durable-park/docs/runbook.md#turn-it-off) (stop the gateway
+first). Never run `hermes plugins remove langfuse` on the VM: it would delete the catalog copy that is kept
+installed as the rollback target. Upstream's text:
 
 ```bash
 hermes plugins disable langfuse     # keep it installed, stop tracing

@@ -19,13 +19,18 @@ setting of Nous's `langfuse` plugin (v2.0.0 @ `c2a9596`) can fix:
   pattern as durable-park), and disable the catalog `langfuse` plugin (kept installed for rollback). No pull request
   to Nous (Yaakov, 2026-10-22). `PATCHES.md` lists every change against upstream.
 - **D2 — user id.** Trace `userId` = the chat sender id Hermes passes to the turn-scoped `pre_llm_call` hook
-  (`sender_id`). The sender's display name (`HERMES_SESSION_USER_NAME` via `gateway.session_context.get_session_env`)
-  goes into trace metadata as `user_name`. Langfuse requires US-ASCII and at most 200 characters: a value that is
-  not is left out (never altered). No sender (cron, some CLI turns) → no `userId`.
+  (`sender_id`). Langfuse requires US-ASCII and at most 200 characters for a user id: a sender id that is not is left
+  out (never altered). The sender's display name (`HERMES_SESSION_USER_NAME` via
+  `gateway.session_context.get_session_env`) goes into the **root observation's** metadata as `user_name` (exported
+  as `langfuse.observation.metadata.user_name`, not as trace metadata); it may be non-ASCII and is cut to 200
+  characters. No sender (cron, some CLI turns) → no `userId` and no `user_name`. *Amended after strong review
+  (2026-10-22): this first said "trace metadata" and that a name that is not US-ASCII or is too long is left out.*
 - **D3 — trace names.** `<platform>-turn` (lower case, only `a-z 0-9 _ -`), `cron-run` for cron, `hermes-turn`
   when the platform is unknown. The root observation gets the same name. Generation names ("LLM call N") unchanged.
 - **D4 — pattern tags (gap 3).** New optional setting `HERMES_LANGFUSE_TAG_PATTERNS`: `label=regex` pairs separated
-  by `;`. Every match in the turn's user message, a tool call's arguments or a tool's result adds the trace tag
+  by `;`. Every match in the turn's original user message (the `user_message` Hermes passes, not the API copy that
+  carries injected context; the API copy only when no original is passed; *amended after strong review*), a tool
+  call's arguments or a tool's result adds the trace tag
   `label:value` (value = group 1 if the regex has a group, else the whole match). On proto-agents:
   `HERMES_LANGFUSE_TAG_PATTERNS=park=\bP-[0-9A-F]{8}\b`, so the parking turn, the approval turn
   (`[durable-park] P-… was APPROVED …`) and the run (`{"status": "executed", "park_id": "P-…"}`) all carry

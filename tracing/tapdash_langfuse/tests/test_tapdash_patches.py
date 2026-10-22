@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import os
 import sys
 
 import pytest
@@ -286,3 +287,140 @@ def test_no_patterns_changes_nothing(plugin, monkeypatch):
     _tool(plugin, {}, "P-0A9C15CE")
     assert plugin.propagate_calls[0]["tags"] == plugin._trace_tags("telegram")
     assert plugin.otel_calls == []
+
+
+# ---- the root scan reads the turn's ORIGINAL user message (strong review m3) ----
+
+TAG_ENV = "HERMES_LANGFUSE_TAG_PATTERNS"
+
+
+def _open_with_original(mod, *, original, request_text, call=1):
+    """Like Hermes's pre_api_request: ``user_message`` is the original, ``request_messages`` the API copy that
+    carries injected context (memory recall, plugin context, gateway notes)."""
+    mod.on_pre_llm_request(turn_id="t1", task_id="k", session_id="s", platform="telegram", api_call_count=call,
+                           user_message=original,
+                           request_messages=[{"role": "user", "content": request_text}])
+
+
+def test_injected_park_id_in_request_copy_does_not_tag(plugin, monkeypatch):
+    monkeypatch.setenv(TAG_ENV, PARK)
+    _open_with_original(plugin, original="pay the invoice",
+                        request_text="pay the invoice\n\n[memory] earlier park P-0A9C15CE was approved")
+    assert _tag_values(plugin) == []
+    assert plugin._TRACE_STATE[plugin._trace_key("k", "s", turn_id="t1")].pattern_tags == []
+
+
+def test_park_id_in_original_user_message_tags(plugin, monkeypatch):
+    monkeypatch.setenv(TAG_ENV, PARK)
+    _open_with_original(plugin, original="[durable-park] P-420E1D2C was APPROVED in withHuman.",
+                        request_text="[durable-park] P-420E1D2C was APPROVED in withHuman.\n\n[memory] P-0A9C15CE")
+    assert _tag_values(plugin) == ["park:P-420E1D2C"]  # the injected id is not tagged
+
+
+def test_request_copy_is_scanned_only_when_original_is_absent(plugin, monkeypatch):
+    monkeypatch.setenv(TAG_ENV, PARK)
+    _open_with_original(plugin, original=None, request_text="[durable-park] P-420E1D2C was APPROVED")
+    assert _tag_values(plugin) == ["park:P-420E1D2C"]
+
+
+def test_legacy_pre_llm_call_scans_original_too(plugin, monkeypatch):
+    monkeypatch.setenv(TAG_ENV, PARK)
+    plugin.on_pre_llm_call(turn_id="t1", task_id="k", session_id="s", platform="telegram", user_message="hello",
+                           messages=[{"role": "user", "content": "hello\n\n[memory] P-0A9C15CE"}])
+    assert _tag_values(plugin) == []
+
+
+# ---- structured values are scanned as JSON: a JSON escape glued to an id hides it (strong review m4) ----
+
+def test_json_escape_before_an_id_hides_it_documented_limit(plugin, monkeypatch):
+    monkeypatch.setenv(TAG_ENV, PARK)
+    # "\n" is written as backslash + n in the JSON text, so the \b in the pattern sees "nP-..." and finds no boundary.
+    assert plugin._pattern_tags([{"a": "x\nP-0A9C15CE"}]) == []
+    # An id after a space, a quote or other punctuation is found. Live ids sit in text like this.
+    assert plugin._pattern_tags([{"a": "x P-0A9C15CE"}]) == ["park:P-0A9C15CE"]
+    assert plugin._pattern_tags([{"park_id": "P-0A9C15CE"}]) == ["park:P-0A9C15CE"]
+    assert plugin._pattern_tags(["x\nP-0A9C15CE"]) == ["park:P-0A9C15CE"]  # a plain string has a real newline
+
+
+# ---- the real Langfuse SDK, in memory (strong review m7) ----
+#
+# Every test above replaces ``propagate_attributes`` and the client with fakes. This one runs the real SDK
+# (pinned in plugin.yaml) with an in-memory span exporter and no network, so an SDK upgrade that changes how
+# ``user.id`` or trace tags reach the exported spans, or that renames the private ``_otel_span`` the late-tag
+# patch writes through (spec D5), fails here and not silently in production.
+
+def _real_sdk_turn(monkeypatch, *, user_name="Yaäkov ✡"):
+    import threading
+
+    from langfuse import Langfuse
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    for name in list(os.environ):
+        if name.startswith(("LANGFUSE_", "HERMES_LANGFUSE_")):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", PARK)
+    monkeypatch.setattr("gateway.session_context.get_session_env",
+                        lambda name, default="": user_name if name == "HERMES_SESSION_USER_NAME" else default)
+    sys.modules.pop("langfuse_plugin", None)
+    mod = importlib.import_module("langfuse_plugin")
+    exporter = InMemorySpanExporter()
+    # Obvious fake keys and a base URL nothing listens on; ``span_exporter`` replaces the OTLP exporter, so
+    # nothing here can leave the machine.
+    client = Langfuse(public_key="pk-lf-fake-in-memory-test", secret_key="sk-lf-fake-in-memory-test",
+                      base_url="http://127.0.0.1:9", span_exporter=exporter, tracing_enabled=True)
+    monkeypatch.setattr(mod, "_get_langfuse", lambda: client)
+
+    turn = dict(turn_id="t-real", task_id="k", session_id="s-real", platform="telegram")
+    mod.on_pre_llm_call(sender_id="8675309", **turn)
+    mod.on_pre_llm_request(api_call_count=1, user_message="pay the invoice", request_messages=[
+        {"role": "user", "content": "pay the invoice"}], **turn)
+    mod.on_post_llm_call(api_call_count=1, assistant_message=None, assistant_tool_call_count=1,
+                         assistant_content_chars=0, **turn)
+    tool = dict(tool_name="mcp__wh__quickbooks__create_payment", args={"amount": 5}, tool_call_id="c1", **turn)
+
+    def run_tool():  # Hermes runs tools on worker threads
+        mod.on_pre_tool_call(**tool)
+        mod.on_post_tool_call(result='PARKED P-0A9C15CE: "create_payment" needs human approval and has NOT run.',
+                              **tool)
+
+    worker = threading.Thread(target=run_tool)
+    worker.start()
+    worker.join()
+    mod.on_pre_llm_request(api_call_count=2, user_message="pay the invoice", request_messages=[
+        {"role": "user", "content": "pay the invoice"}], **turn)
+    mod.on_post_llm_call(api_call_count=2, assistant_response="It needs approval.", assistant_tool_call_count=0,
+                         assistant_content_chars=18, **turn)
+    client.flush()
+    return mod, exporter, client
+
+
+def test_real_sdk_user_id_name_and_late_tag_reach_exported_spans(monkeypatch):
+    mod, exporter, client = _real_sdk_turn(monkeypatch)
+    try:
+        # Safety: the only span processor exports to the in-memory exporter (no network exporter in this test).
+        # The SDK wraps a given exporter in its own transforming exporter; unwrap it before comparing.
+        processors = client._resources.tracer_provider._active_span_processor._span_processors
+        wrapped = [getattr(p, "span_exporter", None) for p in processors]
+        assert wrapped and all(getattr(e, "_exporter", e) is exporter for e in wrapped)
+
+        spans = {s.name: s for s in exporter.get_finished_spans()}
+        assert set(spans) == {"telegram-turn", "LLM call 1", "LLM call 2", "Tool: mcp__wh__quickbooks__create_payment"}
+        for span in spans.values():
+            attrs = dict(span.attributes)
+            assert attrs["user.id"] == "8675309", span.name
+            assert attrs["langfuse.trace.name"] == "telegram-turn", span.name
+        root = dict(spans["telegram-turn"].attributes)
+        late = "park:P-0A9C15CE"
+        # The tag was found in a tool result after the root opened: only the root and later children carry it.
+        assert late in root["langfuse.trace.tags"]
+        assert list(root["langfuse.trace.tags"])[:2] == ["hermes", "langfuse"]
+        assert late in spans["LLM call 2"].attributes["langfuse.trace.tags"]
+        for name in ("LLM call 1", "Tool: mcp__wh__quickbooks__create_payment"):
+            assert late not in spans[name].attributes["langfuse.trace.tags"], name
+        # user_name is ROOT OBSERVATION metadata (not trace metadata), non-ASCII intact.
+        assert root["langfuse.observation.metadata.user_name"] == "Yaäkov ✡"
+        assert not any(k.startswith("langfuse.trace.metadata") and k.endswith("user_name") for k in root)
+        assert mod._TURN_SENDERS == {}
+        assert mod._TRACE_STATE == {}
+    finally:
+        client.shutdown()
