@@ -17,7 +17,7 @@ from . import compat
 from . import formcheck
 from .breaker import STATUS_FILENAME as BREAKER_STATUS_FILENAME, Breaker
 from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor, make_refusing_executor
-from .gatecall import GateHolder
+from .gatecall import LIFT_STATUS_FILENAME, GateHolder, LiftStatus
 from .ledger import Ledger
 from .park_hook import (BRIDGE_CALL_TOOL, DEFAULT_EXEMPT_TOOLS, DEFAULT_FORM_CHECKED_TOOLS, fail_closed_hook,
                         make_pre_tool_call)
@@ -401,6 +401,7 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
     holder = GateHolder(base_url, token_file)
     breaker = Breaker(str(state_dir / BREAKER_STATUS_FILENAME))
     checker = formcheck.FormChecker()
+    lift_status = LiftStatus(str(state_dir / LIFT_STATUS_FILENAME))
 
     def foreign_hooks() -> list[str]:
         # Checked on every call: a plugin that registers a hook later is still caught.
@@ -408,10 +409,11 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
 
     register_hook("pre_tool_call", make_pre_tool_call(
         ledger, holder.get, form_checked, exempt=exempt, breaker=breaker, foreign_hooks_fn=foreign_hooks,
-        form_checker=checker))
+        form_checker=checker, lift_status=lift_status))
     # Background self-check (Hermes processes only): proves the form check can read and use every form-checked
     # tool's rules and writes the result next to the ledger, where the sweep raises an alert.
-    formcheck.start_selfcheck(checker, form_checked, str(state_dir / formcheck.STATUS_FILENAME))
+    formcheck.start_selfcheck(checker, form_checked, str(state_dir / formcheck.STATUS_FILENAME),
+                              on_tick=lift_status.flush)
     # ctx.dispatch_tool -> registry.dispatch does not run pre_tool_call hooks, so the executor's own
     # dispatch cannot be blocked by the park hook.
     ctx.register_tool(

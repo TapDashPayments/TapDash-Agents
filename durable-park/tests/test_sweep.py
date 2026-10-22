@@ -657,3 +657,358 @@ def test_gateway_mainpid_sets_xdg_runtime_dir_when_unset(monkeypatch):
 def test_gateway_mainpid_keeps_an_existing_xdg_runtime_dir(monkeypatch):
     seen = _run_mainpid(monkeypatch, {"XDG_RUNTIME_DIR": "/run/user/77"})
     assert seen.get("env") is None  # inherit as is
+
+
+# ---- lift problems (lift_status.json) -----------------------------------------------------------------
+
+LIFT_TOOL = "mcp__wh__quickbooks__get_customer"
+LIFT_TEXTS = {
+    "declared": ("durable-park ALERT: {tool} has its own withhuman_context field inside {key}; the agent's note is "
+                 "left there and goes to the server, not to the approver."),
+    "schema_unavailable": ("durable-park ALERT: could not read {tool}'s tool rules, so the agent's note was not moved; "
+                           "it may reach the server."),
+    "args_unreadable": ("durable-park ALERT: could not read {tool}'s arguments, so the agent's note was not moved; "
+                        "it may reach the server."),
+    "lift_error": "durable-park ALERT: moving the agent's note failed for {tool}; it may reach the server.",
+    "note_left_inside": ("durable-park ALERT: the agent's note is still inside {key} for {tool} after the move; it may "
+                         "reach the server."),
+}
+
+
+def write_lift(tmp_path, *entries, count=1):
+    rows = []
+    for entry in entries:
+        t, k, key, *rest = entry
+        rows.append({"tool": t, "kind": k, "key": key, "detail": rest[0] if rest else "",
+                     "first_seen": "2026-10-22T10:00:00Z", "last_seen": "2026-10-22T10:00:00Z", "count": count})
+    (tmp_path / "lift_status.json").write_text(json.dumps({"entries": rows, "updated_at": "2026-10-22T10:00:00Z"}))
+
+
+def test_lift_status_missing_is_silent(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 2) == ["", ""]
+
+
+@pytest.mark.parametrize("kind", sorted(LIFT_TEXTS))
+def test_each_lift_problem_has_its_exact_alert_text_and_alerts_once(world, monkeypatch, capsys, tmp_path, kind):
+    write_lift(tmp_path, (LIFT_TOOL, kind, "params"))
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [LIFT_TEXTS[kind].format(tool=LIFT_TOOL, key="params")]
+    assert second == ""
+
+
+def test_a_new_problem_alerts_once_and_the_old_ones_stay_quiet(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"))
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), (LIFT_TOOL, "lift_error", ""),
+               ("mcp__wh__quickbooks__get_bill", "declared", "params"))
+    out, again = runs(world, monkeypatch, capsys, 2)
+    assert out.splitlines() == [LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key=""),
+                                LIFT_TEXTS["declared"].format(tool="mcp__wh__quickbooks__get_bill", key="params")]
+    assert again == ""
+
+
+def test_a_new_kind_for_the_same_tool_alerts(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"))
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), (LIFT_TOOL, "schema_unavailable", ""))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["schema_unavailable"].format(tool=LIFT_TOOL, key="")]
+
+
+def test_a_problem_that_goes_away_and_comes_back_alerts_again(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path)  # the gateway restarted and wrote an empty list
+    assert runs(world, monkeypatch, capsys, 1) == [""]
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="")]
+
+
+def test_a_corrupt_lift_status_alerts_once_then_recovers_quietly(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "lift_status.json").write_text("{not json")
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.startswith("durable-park ALERT: could not read lift_status.json (") and first.rstrip().endswith(").")
+    assert len(first.splitlines()) == 1 and second == ""
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="")]
+    (tmp_path / "lift_status.json").write_text("[1, 2]")  # readable JSON of the wrong shape: a problem again
+    again, quiet = runs(world, monkeypatch, capsys, 2)
+    assert again.startswith("durable-park ALERT: could not read lift_status.json (") and quiet == ""
+
+
+def test_lift_alert_state_and_garbage_entries_do_not_stop_the_sweep(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "lift_alert_state.json").write_text("[1")
+    (tmp_path / "lift_status.json").write_text(json.dumps({"entries": [5, {"tool": 1}, {"tool": LIFT_TOOL,
+                                                                                         "kind": "lift_error"}]}))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.count("durable-park ALERT:") >= 1
+
+
+LIFT_TEXTS["note_dropped"] = ("durable-park ALERT: the agent's note inside {key} for {tool} was removed but not shown "
+                              "to the approver ({reason}).")
+LIFT_TEXTS["check_incomplete"] = ("durable-park ALERT: could not finish checking {tool}'s arguments for the agent's note "
+                                  "(they are too large or nested too deep); it may reach the server.")
+
+
+@pytest.mark.parametrize("reason", ["not text", "empty", "another note was already at the top", "more than one note"])
+def test_note_dropped_alert_names_the_reason_and_alerts_once_per_reason(world, monkeypatch, capsys, tmp_path, reason):
+    write_lift(tmp_path, (LIFT_TOOL, "note_dropped", "params", reason))
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [LIFT_TEXTS["note_dropped"].format(tool=LIFT_TOOL, key="params", reason=reason)]
+    assert second == ""
+
+
+def test_check_incomplete_alert_text(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "check_incomplete", ""))
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [LIFT_TEXTS["check_incomplete"].format(tool=LIFT_TOOL)] and second == ""
+
+
+def test_a_second_reason_for_the_same_key_alerts_separately(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "note_dropped", "params", "empty"))
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, (LIFT_TOOL, "note_dropped", "params", "empty"), (LIFT_TOOL, "note_dropped", "params", "not text"))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["note_dropped"].format(tool=LIFT_TOOL, key="params", reason="not text")]
+
+
+def set_alerted_at(tmp_path, hours_ago):
+    state = json.loads((tmp_path / "lift_alert_state.json").read_text())
+    at = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for item in state["alerted"]:
+        item["at"] = at
+    (tmp_path / "lift_alert_state.json").write_text(json.dumps(state))
+
+
+def test_a_problem_that_keeps_growing_alerts_again_after_24_hours(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "note_left_inside", "params"), count=3)
+    first, = runs(world, monkeypatch, capsys, 1)
+    assert first.splitlines() == [LIFT_TEXTS["note_left_inside"].format(tool=LIFT_TOOL, key="params")]
+    write_lift(tmp_path, (LIFT_TOOL, "note_left_inside", "params"), count=40)
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # growing, but said less than 24 h ago
+    set_alerted_at(tmp_path, 25)
+    again, quiet = runs(world, monkeypatch, capsys, 2)
+    assert again.splitlines() == [LIFT_TEXTS["note_left_inside"].format(tool=LIFT_TOOL, key="params").replace(
+        "durable-park ALERT:", "durable-park ALERT (still happening, 40 times):", 1)]
+    assert quiet == ""
+    set_alerted_at(tmp_path, 25)
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # 25 h passed but the count did not grow: silent
+    write_lift(tmp_path, (LIFT_TOOL, "note_left_inside", "params"), count=41)
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "(still happening, 41 times)" in out
+
+
+def test_a_count_that_restarted_lowers_the_base_so_later_growth_is_seen(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""), count=50)
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""), count=2)  # the report was recreated
+    assert runs(world, monkeypatch, capsys, 1) == [""]
+    set_alerted_at(tmp_path, 25)
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""), count=3)
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "(still happening, 3 times)" in out
+
+
+def test_a_deeply_nested_report_is_an_unreadable_report_not_a_silent_failure(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "lift_status.json").write_text("[" * 200_000 + "]" * 200_000)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == ["durable-park ALERT: could not read lift_status.json (unexpected format)."]
+    assert second == ""
+
+
+def test_a_failing_lift_check_alerts_once_on_stdout_then_says_it_recovered(world, monkeypatch, capsys, tmp_path):
+    def boom(ledger_path, now):
+        raise RuntimeError("bug")
+
+    real = sweep._lift_alert
+    monkeypatch.setattr(sweep, "_lift_alert", boom)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == ["durable-park ALERT: could not check for lift problems (RuntimeError)."]
+    assert second == ""
+    monkeypatch.setattr(sweep, "_lift_alert", real)
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.splitlines() == ["durable-park: lift problems can be checked again."] and fourth == ""
+
+
+def test_a_new_error_type_in_the_lift_check_alerts_again(world, monkeypatch, capsys, tmp_path):
+    errors = iter([RuntimeError("a"), RuntimeError("a"), KeyError("b")])
+
+    def boom(ledger_path, now):
+        raise next(errors)
+
+    monkeypatch.setattr(sweep, "_lift_alert", boom)
+    outs = runs(world, monkeypatch, capsys, 3)
+    assert outs[0].count("RuntimeError") == 1 and outs[1] == "" and "KeyError" in outs[2]
+
+
+def test_a_lift_state_file_that_cannot_be_written_alerts_instead_of_staying_silent(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    monkeypatch.setattr(sweep, "_save_state", lambda path, state: (_ for _ in ()).throw(PermissionError("read-only")))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="") in out
+    assert "could not check for lift problems (PermissionError)" in out
+
+
+# ---- final fix wave -----------------------------------------------------------------------------------------
+
+LIFT_TEXTS["report_reset"] = ("durable-park ALERT: {tool} was unreadable and was replaced; the earlier lift problems "
+                              "are kept in {tool}.corrupt.")
+
+
+def test_a_declared_field_is_said_once_and_never_again_however_much_it_grows(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), count=3)
+    first, = runs(world, monkeypatch, capsys, 1)
+    assert first.splitlines() == [LIFT_TEXTS["declared"].format(tool=LIFT_TOOL, key="params")]
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), count=400)
+    set_alerted_at(tmp_path, 100)
+    assert runs(world, monkeypatch, capsys, 2) == ["", ""]  # intentional: no daily repeat, however long it lasts
+
+
+def test_many_places_of_one_problem_are_one_line_with_at_most_three_examples(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, *[(LIFT_TOOL, "note_left_inside", f"params.line{i}.withhuman_context") for i in range(1, 7)])
+    first, second = runs(world, monkeypatch, capsys, 2)
+    lines = first.splitlines()
+    assert lines == [LIFT_TEXTS["note_left_inside"].format(tool=LIFT_TOOL, key="params.line1.withhuman_context")
+                     + " (+5 more places, e.g. params.line2.withhuman_context, params.line3.withhuman_context, "
+                       "params.line4.withhuman_context)"]
+    assert second == ""
+
+
+def test_a_new_place_still_counts_as_new_next_to_places_already_said(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, *[(LIFT_TOOL, "note_left_inside", f"a{i}") for i in range(1, 4)])
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, *[(LIFT_TOOL, "note_left_inside", f"a{i}") for i in range(1, 5)])
+    out, again = runs(world, monkeypatch, capsys, 2)
+    assert out.splitlines() == [LIFT_TEXTS["note_left_inside"].format(tool=LIFT_TOOL, key="a4")]  # no "+N more"
+    assert again == ""
+    write_lift(tmp_path, *[(LIFT_TOOL, "note_left_inside", f"a{i}") for i in range(1, 7)])
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["note_left_inside"].format(tool=LIFT_TOOL, key="a5")
+                                + " (+1 more places, e.g. a6)"]
+
+
+def test_places_of_different_tools_and_kinds_stay_separate_lines(world, monkeypatch, capsys, tmp_path):
+    other = "mcp__wh__quickbooks__get_bill"
+    write_lift(tmp_path, (LIFT_TOOL, "note_left_inside", "a"), (LIFT_TOOL, "note_left_inside", "b"),
+               (other, "note_left_inside", "a"), (LIFT_TOOL, "note_dropped", "a", "empty"),
+               (LIFT_TOOL, "note_dropped", "b", "not text"))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [
+        LIFT_TEXTS["note_left_inside"].format(tool=LIFT_TOOL, key="a") + " (+1 more places, e.g. b)",
+        LIFT_TEXTS["note_left_inside"].format(tool=other, key="a"),
+        LIFT_TEXTS["note_dropped"].format(tool=LIFT_TOOL, key="a", reason="empty") + " (+1 more places, e.g. b)"]
+
+
+def test_a_repeat_of_many_places_is_one_line_too(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", "a"), (LIFT_TOOL, "lift_error", "b"), count=2)
+    runs(world, monkeypatch, capsys, 1)
+    set_alerted_at(tmp_path, 25)
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", "a"), (LIFT_TOOL, "lift_error", "b"), count=9)
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="a").replace(
+        "durable-park ALERT:", "durable-park ALERT (still happening, 9 times):", 1) + " (+1 more places, e.g. b)"]
+
+
+UNWRITABLE = ("durable-park ALERT: lift problems could not be saved ({error}); the agent's note may be reaching "
+              "servers unreported. Check the permissions of lift_status.json and its lock next to the ledger.")
+
+
+def mark_unwritable(tmp_path, text="2026-10-22T10:00:00Z PermissionError\n", owner="4242"):
+    (tmp_path / f"lift_status.unwritable.{owner}").write_text(text)
+
+
+def test_an_unwritable_report_alerts_once_with_the_error_and_says_when_it_recovers(world, monkeypatch, capsys, tmp_path):
+    mark_unwritable(tmp_path)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [UNWRITABLE.format(error="PermissionError")] and second == ""
+    (tmp_path / "lift_status.unwritable.4242").unlink()
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.splitlines() == ["durable-park: lift problems can be saved again."] and fourth == ""
+    mark_unwritable(tmp_path, "2026-10-22T11:00:00Z OSError\n")  # a new outage alerts again
+    again, = runs(world, monkeypatch, capsys, 1)
+    assert again.splitlines() == [UNWRITABLE.format(error="OSError")]
+
+
+@pytest.mark.parametrize("text", ["", "garbage", "2026-10-22T10:00:00Z", "x y z \x1b[31mred"])
+def test_a_marker_without_a_readable_error_still_alerts(world, monkeypatch, capsys, tmp_path, text):
+    mark_unwritable(tmp_path, text)
+    first, = runs(world, monkeypatch, capsys, 1)
+    assert first.startswith("durable-park ALERT: lift problems could not be saved (") and "\x1b" not in first
+    assert len(first.splitlines()) == 1
+
+
+def test_the_marker_alert_does_not_depend_on_the_report_being_readable(world, monkeypatch, capsys, tmp_path):
+    mark_unwritable(tmp_path)
+    (tmp_path / "lift_status.json").write_text("{not json")
+    out, = runs(world, monkeypatch, capsys, 1)
+    lines = out.splitlines()
+    assert UNWRITABLE.format(error="PermissionError") in lines and len(lines) == 2
+
+
+def test_no_marker_and_no_state_is_silent(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 2) == ["", ""]
+
+
+def test_every_writers_marker_alerts_and_the_recovery_line_waits_for_the_last_one(world, monkeypatch, capsys, tmp_path):
+    mark_unwritable(tmp_path, "2026-10-22T10:00:00Z PermissionError\n", owner="1")
+    mark_unwritable(tmp_path, "2026-10-22T10:00:00Z OSError\n", owner="2")
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert sorted(first.splitlines()) == sorted([UNWRITABLE.format(error="PermissionError"),
+                                                 UNWRITABLE.format(error="OSError")]) and second == ""
+    (tmp_path / "lift_status.unwritable.1").unlink()  # one writer recovers, the other still cannot write
+    third, = runs(world, monkeypatch, capsys, 1)
+    assert third == ""
+    (tmp_path / "lift_status.unwritable.2").unlink()
+    last, = runs(world, monkeypatch, capsys, 1)
+    assert last.splitlines() == ["durable-park: lift problems can be saved again."]
+
+
+def test_a_marker_that_appears_while_another_is_already_alerted_alerts_too(world, monkeypatch, capsys, tmp_path):
+    mark_unwritable(tmp_path, owner="1")
+    runs(world, monkeypatch, capsys, 1)
+    mark_unwritable(tmp_path, "2026-10-22T11:00:00Z OSError\n", owner="2")
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [UNWRITABLE.format(error="OSError")]
+
+
+def test_a_failing_unwritable_check_does_not_hide_the_lift_alerts(world, monkeypatch, capsys, tmp_path):
+    def boom(*args, **kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(sweep, "_lift_unwritable_alert", boom)
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="") in out.splitlines()
+    assert "durable-park ALERT: could not check for lift problems (RuntimeError)." in out.splitlines()
+
+
+def test_a_failing_lift_check_does_not_hide_the_unwritable_alert(world, monkeypatch, capsys, tmp_path):
+    def boom(*args, **kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(sweep, "_lift_alert", boom)
+    mark_unwritable(tmp_path)
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert UNWRITABLE.format(error="PermissionError") in out.splitlines()
+    assert "durable-park ALERT: could not check for lift problems (RuntimeError)." in out.splitlines()
+
+
+def test_a_schema_too_complex_problem_has_its_own_alert_text(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "schema_too_complex", "params"))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "complex" in out and LIFT_TOOL in out and "a note problem (" not in out
+
+
+def test_a_fifo_planted_as_a_marker_does_not_hang_the_sweep_and_is_alerted(world, monkeypatch, capsys, tmp_path):
+    import threading
+    os.mkfifo(tmp_path / "lift_status.unwritable.7")
+    outcome = []
+    thread = threading.Thread(target=lambda: outcome.append(world.main(monkeypatch)), daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive() and outcome == [0]
+    out = capsys.readouterr().out
+    assert out.startswith("durable-park ALERT: lift problems could not be saved (not a regular file)")
+    assert len(out.splitlines()) == 1

@@ -8,6 +8,8 @@ instant ``Allow`` lets the tool run (row ``allowed``), an instant ``Deny`` refus
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import re
 from typing import Any, Callable, Iterable
@@ -17,7 +19,9 @@ from agentapprovalprotocol import Allow, Deny, Pending
 from .breaker import Breaker
 from . import formcheck
 from .formcheck import FormChecker, FormCheckUnavailable
-from .gatecall import build_call, lift_gateway_context, server_label
+from .gatecall import (
+    CONTEXT_FIELD, LiftStatus, build_call, declares_context, find_leftover_notes, gateway_slug, is_note_key,
+    lift_gateway_context, server_label, text_form_note_keys)
 from .ledger import Ledger, args_digest, call_key
 from .wake import one_line
 
@@ -80,6 +84,10 @@ ALREADY_WAITING_MESSAGE = (
 ID_REUSED_MESSAGE = (
     "durable-park: this tool call id was already used for a different call; the call was not run"
 )
+RULES_CHANGED_MESSAGE = (
+    'durable-park: the rules for "{tool}" changed since this call was first checked, so it no longer matches the '
+    "call that was parked; the call was not run."
+)
 NOT_PARKED_MESSAGE = "durable-park: {park_id} is already {status}; this call was not run again"
 INVALID_ARGS_MESSAGE = (
     'durable-park: "{tool}" was NOT run and no approval was requested: its arguments break the tool\'s '
@@ -91,8 +99,41 @@ CHECK_UNAVAILABLE_MESSAGE = (
 )
 
 
+
 def _block(message: str) -> dict[str, str]:
     return {"action": "block", "message": message}
+
+
+def _split_notes(value: Any, notes: list[str], depth: int = 0) -> Any:
+    """``value`` without any ``withhuman_context`` key (any spelling, any depth); the removed values go to ``notes``."""
+    if depth > 100:
+        raise ValueError("too deep")
+    if isinstance(value, dict):
+        kept = {}
+        for key, child in value.items():
+            if is_note_key(key):
+                notes.append(repr(child))
+            else:
+                kept[key] = _split_notes(child, notes, depth + 1)
+        return kept
+    if isinstance(value, list):
+        return [_split_notes(child, notes, depth + 1) for child in value]
+    return value
+
+
+def _same_call_apart_from_the_note(row: Any, original_args: Any) -> bool:
+    """Is the stored row the same call as ``original_args`` except for where the note sits? That is what a replay
+    looks like when the tool's rules were readable on one attempt and not on the other. Never raises."""
+    try:
+        if row.args_digest == args_digest(original_args):
+            return True
+        stored_notes: list[str] = []
+        current_notes: list[str] = []
+        stored = _split_notes(json.loads(row.args_json), stored_notes)
+        current = _split_notes(original_args, current_notes)
+        return stored == current and sorted(stored_notes) == sorted(current_notes)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def default_session_key() -> str:
@@ -133,7 +174,10 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                        foreign_hooks_fn: Callable[[], list[str]] | None = None,
                        session_key_fn: Callable[[], str] | None = None,
                        form_checker: FormChecker | None = None,
-                       schema_fn: Callable[[str], dict | None] | None = None) -> Callable[..., dict | None]:
+                       schema_fn: Callable[[str], dict | None] | None = None,
+                       coerce_fn: Callable[[str, dict], dict] | None = None,
+                       lift_status: LiftStatus | None = None,
+                       lift_status_path: str | None = None) -> Callable[..., dict | None]:
     """Build the hook. ``gate_factory`` is called per call (e.g. ``GateHolder.get``). ``form_checker``
     validates a form-checked call's arguments against the tool's rules before anything is recorded or asked
     (default: the rules Hermes registered for the tool). ``breaker`` (optional) stops asking withHuman while
@@ -141,18 +185,89 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
     change arguments after approval; while it names any, every non-exempt call is refused. ``schema_fn`` looks up
     a tool's registered input rules (default: ``formcheck.registry_schema``, looked up when called);
     it decides whether a nested ``withhuman_context``
-    note is lifted to the top level (see ``lift_gateway_context``), and a lookup error means no lift."""
+    note is lifted to the top level (see ``lift_gateway_context``). ``coerce_fn`` is Hermes's own type fixing
+    (default: ``formcheck.hermes_coerce``, looked up when called), run first on a copy only when a string argument
+    holds a JSON object with the note. Every case where the note was not moved, was dropped, or the check could not
+    run is reported to ``lift_status`` (a ``LiftStatus``, or one built for ``lift_status_path``:
+    ``lift_status.json``; the sweep alerts on it) once the call has passed its form check (a refused call never
+    reaches a server), and the call goes on: with the lifted arguments, or the original ones when the lift could not
+    run."""
     checker = form_checker if form_checker is not None else FormChecker()
     exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
 
-    def lift_nested_context(tool_name: str, args: Any) -> Any:
-        """``lift_gateway_context`` with the tool's registered rules; any error means the original arguments."""
+    status = lift_status if lift_status is not None else LiftStatus(lift_status_path)
+
+    def report_leftovers(args: Any, declared: set[str], note: Callable[..., None]) -> None:
+        """Note every place a note is still inside ``args`` (key names only) and an incomplete walk."""
+        hits, incomplete = find_leftover_notes(args, declared)
+        for path in hits:
+            note("note_left_inside", path)
+        if incomplete:
+            note("check_incomplete")
+
+    def lift_nested_context(tool_name: str, args: Any, problems: list[tuple[str, str, str]]) -> Any:
+        """The call's arguments with a nested ``withhuman_context`` lifted to the top level. Every way the note is
+        not moved, is dropped, or the check cannot run is appended to ``problems`` (the caller records them for the
+        sweep's chat alert once the call has passed its form check); the original arguments are used when the lift
+        cannot run, so approval is unaffected. Never raises."""
+
+        def note(kind: str, key: str = "", detail: str = "") -> None:
+            problems.append((kind, key, detail))
+
         if not isinstance(args, dict):
             return args
         try:
-            return lift_gateway_context(args, (schema_fn or formcheck.registry_schema)(tool_name))
-        except Exception as exc:  # noqa: BLE001 - the lift is a cleanup, never a gate
+            try:
+                schema = (schema_fn or formcheck.registry_schema)(tool_name)
+            except Exception as exc:  # noqa: BLE001 - the lift is a cleanup, never a gate
+                log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)
+                schema = None
+            if not declares_context(schema):
+                # Not a gateway tool: nothing to do. A gateway tool whose rules are missing or do not show the field
+                # is reported, and its arguments are still searched for a note.
+                if gateway_slug(tool_name):
+                    if schema is None:
+                        note("schema_unavailable")
+                    report_leftovers(args, set(), note)
+                return args
+            work = dict(args)
+            text_keys = text_form_note_keys(args)
+            if text_keys:
+                # pre_tool_call fires before Hermes's type coercion: do what dispatch will do, on a copy, and take
+                # from it ONLY the values of the keys whose original value is JSON text holding a note.
+                try:
+                    coerced = (coerce_fn or formcheck.hermes_coerce)(tool_name, copy.deepcopy(args))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("could not read arguments to lift withhuman_context for tool=%s (%s)",
+                                tool_name, type(exc).__name__)
+                    coerced = None
+                for key in text_keys:
+                    value = coerced.get(key) if isinstance(coerced, dict) else None
+                    if isinstance(value, dict):
+                        work[key] = value
+                    else:
+                        note("args_unreadable", key)
+            declared: set[str] = set()
+
+            def on_problem(kind: str, key: str, detail: str = "") -> None:
+                if kind == "declared":
+                    declared.add(f"{key}.{CONTEXT_FIELD}")
+                note(kind, key, detail)
+
+            mark = len(problems)
+            lifted = lift_gateway_context(work, schema, on_problem=on_problem)
+            if {**args, **lifted} != lifted or not set(lifted) <= set(args) | {CONTEXT_FIELD}:
+                # Hermes merges a modify into the original arguments and can neither delete nor rename a key:
+                # unless that merge is exactly the lifted call (and the lift added no key but the note), the lift
+                # is not safe to use.
+                del problems[mark:]  # what the abandoned lift found (dropped, declared) did not happen
+                note("lift_error")
+                return args
+            report_leftovers(lifted, declared, note)
+            return lifted
+        except Exception as exc:  # noqa: BLE001
             log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)
+            note("lift_error")
             return args
 
     def is_form_checked(tool_name: str) -> bool:
@@ -195,7 +310,8 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
             # From here on the lifted arguments are THE arguments: what the form check sees, what the ledger digests
             # and stores, what withHuman is asked about, and (via ``modify`` below) what Hermes dispatches.
             original_args = args
-            args = lift_nested_context(tool, args)
+            lift_problems: list[tuple[str, str, str]] = []
+            args = lift_nested_context(tool, args, lift_problems)
 
             # Step 4: never ask about a call the server would reject: check the form first (form-checked
             # tools only). A replay of a call that is already recorded passed this check then and is not
@@ -209,6 +325,9 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 if problem is not None:
                     log.info("refused tool=%s: arguments break its rules", tool)
                     return _block(INVALID_ARGS_MESSAGE.format(tool=tool, problem=problem))
+            # The call passed its form check: whatever the lift could not do is now real (a refused call never
+            # reaches a server), so report it for the sweep's chat alert.
+            status.record_many(tool, lift_problems)  # one write attempt for the whole call
 
             # Step 5: one row per (session_id, tool_call_id); a replay gets the existing row.
             row = ledger.park(
@@ -217,8 +336,13 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
             park_id = row.park_id
             if row.tool != tool or row.args_digest != args_digest(args):
                 # Providers may reuse a tool_call_id; never answer for a different call with the old row.
-                log.warning("tool call id reused for a different call: %s tool=%s", row.park_id, tool)
                 park_id = None  # the existing row belongs to the earlier call; leave it alone
+                if row.tool == tool and _same_call_apart_from_the_note(row, original_args):
+                    # The same call, but the lift came out differently than the first time (the tool's rules could
+                    # be read on one attempt and not on the other): fail closed, and say what happened.
+                    log.warning("lift result changed on replay: %s tool=%s", row.park_id, tool)
+                    return _block(RULES_CHANGED_MESSAGE.format(tool=tool))
+                log.warning("tool call id reused for a different call: %s tool=%s", row.park_id, tool)
                 return _block(ID_REUSED_MESSAGE)
             if row.status != "parked":
                 # Decided already (including an instant allowed/refused): never run or ask again.

@@ -285,11 +285,13 @@ def write_status(path: str, status: dict) -> None:
 def selfcheck_loop(checker: FormChecker, names_fn: Callable[[], Iterable[str]], form_checked: list[re.Pattern],
                    status_path: str, *, interval: float = 1800.0, wait_timeout: float = 600.0,
                    poll: float = 10.0, sleep: Callable[[float], None] = time.sleep,
-                   clock: Callable[[], float] = time.monotonic, iterations: int | None = None) -> None:
+                   clock: Callable[[], float] = time.monotonic, iterations: int | None = None,
+                   on_tick: Callable[[], None] | None = None) -> None:
     """Wait until form-checked tools are registered (MCP discovery is asynchronous), then check and write the
     status every ``interval`` seconds. A process that never sees a form-checked tool (a short-lived Hermes helper
     without the gateway's MCP servers) writes nothing: it cannot speak for the gateway, and a missing or
-    stale report is itself alerted on by the sweep. Never raises."""
+    stale report is itself alerted on by the sweep. ``on_tick`` (optional) runs after each check (the park hook's
+    ``LiftStatus.flush``: retries a lift report that could not be written). Never raises."""
     deadline = clock() + wait_timeout
     seen = False
     while not seen and clock() < deadline:
@@ -313,6 +315,11 @@ def selfcheck_loop(checker: FormChecker, names_fn: Callable[[], Iterable[str]], 
                 log.error("durable-park form check FAILED: %s", "; ".join(status["problems"]))
         except Exception as exc:  # noqa: BLE001
             log.error("durable-park form self-check could not run: %s", type(exc).__name__)
+        if on_tick is not None:
+            try:
+                on_tick()
+            except Exception as exc:  # noqa: BLE001
+                log.error("durable-park self-check tick failed: %s", type(exc).__name__)
         done += 1
         if iterations is not None and done >= iterations:
             return
@@ -328,7 +335,8 @@ def _selfcheck_thread_alive() -> bool:
     return any(t.name == THREAD_NAME and t.is_alive() for t in threading.enumerate())
 
 
-def start_selfcheck(checker: FormChecker, form_checked: list[re.Pattern], status_path: str) -> bool:
+def start_selfcheck(checker: FormChecker, form_checked: list[re.Pattern], status_path: str,
+                    on_tick: Callable[[], None] | None = None) -> bool:
     """Start the background self-check once per Hermes process. Returns False outside Hermes."""
     global _started
     try:
@@ -340,5 +348,5 @@ def start_selfcheck(checker: FormChecker, form_checked: list[re.Pattern], status
             return False
         _started = True
         threading.Thread(target=selfcheck_loop, args=(checker, registry_tool_names, form_checked, status_path),
-                         name=THREAD_NAME, daemon=True).start()
+                         kwargs={"on_tick": on_tick}, name=THREAD_NAME, daemon=True).start()
     return True

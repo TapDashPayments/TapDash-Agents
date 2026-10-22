@@ -62,6 +62,8 @@ Also found on the way:
   and note the limit in `gateway-setup.md`). (2) Deploy only with no ledger row `parked`, `approved` or `executing`:
   this change alters the AAP request body for rows with a note, so a row parked by the old code would not match its
   approved request when the executor replays it.
+  **When adding tools from a new provider,** lift problems arrive as chat alerts (`durable-park ALERT: ... the agent's
+  note ...`, [runbook](runbook.md#the-agents-note-could-not-be-moved)); nothing needs to be checked in the journal.
 - `hermes plugins enable langfuse` created a new Hermes environment directory; the old ones remain. Clean up the old
   environments later, when disk space matters.
 

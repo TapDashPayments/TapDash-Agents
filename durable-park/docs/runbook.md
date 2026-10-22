@@ -435,6 +435,37 @@ restart while it is open keeps it open but lets the first call through at once, 
 `durable-park: withHuman answers again (since <time>); tool calls are decided normally.` follows when it closes. If
 the outage was shorter than 5 minutes, both lines may arrive together.
 
+### The agent's note could not be moved
+
+The model puts a short reason in `withhuman_context`. The withHuman gateway expects it at the top level and shows it
+to the approver; the park hook moves it there when the model nests it inside `params`. When it cannot (or a note is
+dropped, or the hook could not even look), the call still goes on exactly as before (the original arguments, approval
+is unaffected) and the sweep sends one chat alert line per tool and kind (state per key and detail in `lift_alert_state.json`; several new places of one problem are one line that names the first place and ends `(+N more places, e.g. ...)`).
+The report is `lift_status.json` next to the ledger (names, times and counts, never a value; the hook writes it under
+a lock, so the gateway and any other Hermes process, even one running as another user, share it; a tool call records all its
+problems at once and waits at most 0.2 s in total; what could not be written is retried on the next problem, at process exit
+and, in the gateway, every 30 minutes, and every process holding unsaved problems leaves its own marker
+`lift_status.unwritable.<pid>` for the sweep to alert on). The same problem is said again once per 24 hours while it keeps happening
+(`durable-park ALERT (still happening, <n> times): ...`). The text tells you the kind:
+
+| Alert | Meaning | What to do |
+|---|---|---|
+| `<tool> has its own withhuman_context field inside <key>` | The tool's own rules declare a `withhuman_context` inside that key, so the note is left there: it goes to the server and never reaches the approver | Fine if the server really has such a field (the approver then does not see the agent's reason for this tool). If not, look at the tool's rules in the withHuman tool catalog |
+| `the agent's note inside <key> for <tool> was removed but not shown to the approver (<reason>)` | A nested note was removed but could not be shown: `not text` (the model sent an object or number), `empty`, `another note was already at the top` (the top-level note, even an empty one, wins), `more than one note` | Usually a model slip; the approver saw the call without that reason. Repeats mean the model's instructions or the tool description need work |
+| `could not read <tool>'s tool rules` | A gateway tool's rules were not found (the registry lookup failed, or the tool is not registered): its arguments were still searched for a note | Same as a form-check problem: [Form checker not working](#form-checker-not-working); `hermes mcp test wh`; read `compat.py` after a Hermes upgrade |
+| `could not read <tool>'s arguments` | The arguments came as JSON text and Hermes's type fixing could not turn them into an object under the same key | Check Hermes's `tools/arg_coercion.py` after an upgrade (`formcheck.hermes_coerce`) |
+| `moving the agent's note failed for <tool>` | An unexpected error in the lift step, or the lifted call did not pass the merge check | `journalctl --user -u hermes-gateway` for `could not lift withhuman_context for tool=<tool> (<ErrorType>)`; fix and redeploy |
+| `the agent's note is still inside <key> for <tool> after the move` | A note is still inside the final arguments at that path (deeper than one level, inside a list, in JSON text, or another spelling of the name). A gateway tool whose rules do not list the top-level field is searched too | The note reaches the server (QuickBooks says "IGNORED"). Look at the tool's rules and at how the model nests it |
+| `could not finish checking <tool>'s arguments for the agent's note` | The arguments are too large or too deep for the bounded search | Look at what the model sent; the note may reach the server |
+| `could not read lift_status.json (<reason>)` | The report is unreadable or not the expected shape | Look at the file next to the ledger; the hook keeps an unparseable one as `lift_status.json.corrupt` before writing a new one |
+| `lift problems could not be saved (<ErrorType>)` | The hook cannot write `lift_status.json` (a marker `lift_status.unwritable.<pid>` is next to it, one per process that cannot write, a lock timeout included), so that process's note problems are not being reported | Fix the permissions or space of the ledger directory, `lift_status.json` and `lift_status.json.lock`; each process removes its own marker after its next successful write, and `durable-park: lift problems can be saved again.` follows once the last marker is gone. The marker of a process that has died stays: delete it by hand once writing works. `NotARegularFile` means a FIFO, device or directory sits at `lift_status.json.lock`; `not a regular file` means one sits at a marker's path: neither is ever used or followed, remove it |
+| `the rules of <tool> are too complex to read for the agent's note (inside <key>)` | Judging the tool's rules took more than 2 000 schema nodes (many `anyOf`/`allOf`/`$ref` branches that fan out), so they count as "cannot tell": the note was moved as if the rules declared no such field | Look at the tool's rules in the withHuman tool catalog; if the tool really declares its own `withhuman_context` there, the note went to the approver instead of the server |
+| `<file> was unreadable and was replaced` | The report was corrupt; the hook replaced it and kept the old one as `lift_status.json.corrupt` | Look at the `.corrupt` file for earlier problems |
+| `could not check for lift problems (<ErrorType>)` | The sweep's own check failed (for example its state file cannot be written) | Read the sweep's stderr (`~/.hermes/logs`), fix, and a line `durable-park: lift problems can be checked again.` follows |
+
+A problem that goes away and comes back alerts again. When adding tools from a new provider, expect these alerts
+if its rules differ from the QuickBooks ones.
+
 ## Troubleshooting
 
 ### An approver was asked twice for one action

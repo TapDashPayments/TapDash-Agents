@@ -1,5 +1,15 @@
 import copy
 import hashlib
+import json
+import logging
+import fcntl
+import os
+import re
+import stat
+import subprocess
+import sys
+import threading
+import time
 
 import pytest
 
@@ -8,7 +18,8 @@ from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
 from agentapprovalprotocol._gate import submission
 from durable_park.gatecall import (
-    GateHolder, build_call, lift_gateway_context, make_gate, platform_of, redact_arguments, server_label)
+    GateHolder, LiftStatus, MAX_LIFT_ENTRIES, build_call, find_leftover_notes, is_note_key, lift_gateway_context,
+    make_gate, platform_of, redact_arguments, server_label, text_form_note_keys)
 from durable_park.ledger import Ledger
 
 
@@ -274,6 +285,29 @@ def test_build_call_cuts_reasoning_at_2000_characters(tmp_path):
     assert build_call(row).reasoning == "n" * 2000
 
 
+def utf16_units(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def test_build_call_cuts_reasoning_at_2000_utf16_units_not_characters(tmp_path):
+    """A character outside the BMP (an emoji) is two UTF-16 units: 1500 emoji are 3000 units and are cut to 1000."""
+    reasoning = build_call(park_with_args(tmp_path, {"withhuman_context": "\U0001F600" * 1500})).reasoning
+    assert reasoning == "\U0001F600" * 1000 and utf16_units(reasoning) == 2000
+
+
+def test_the_utf16_cut_never_splits_a_surrogate_pair(tmp_path):
+    reasoning = build_call(park_with_args(tmp_path, {"withhuman_context": "a" + "\U0001F600" * 1500})).reasoning
+    assert reasoning == "a" + "\U0001F600" * 999 and utf16_units(reasoning) == 1999  # the next pair would be 2001
+    reasoning.encode("utf-8")  # still well-formed text
+    exact = "\U0001F600" * 1000
+    (tmp_path / "x").mkdir()
+    assert build_call(park_with_args(tmp_path / "x", {"withhuman_context": exact})).reasoning == exact
+
+
+def test_a_short_non_bmp_note_is_not_cut(tmp_path):
+    assert build_call(park_with_args(tmp_path, {"withhuman_context": "pay \U0001F600 now"})).reasoning == "pay \U0001F600 now"
+
+
 @pytest.mark.parametrize("args", [
     {"params": {"criteria": "x"}},
     {"withhuman_context": ""},
@@ -292,17 +326,116 @@ def test_build_call_with_a_note_is_still_a_pure_function_of_the_row(tmp_path):
     assert bodies[0]["agent_reasoning"] == "Find customer 58"
 
 
-@pytest.mark.parametrize("nested_rules", [
-    {"$ref": "#/$defs/params"},
-    {"allOf": [{"properties": {"withhuman_context": {"type": "string"}}}]},
-    {"anyOf": [{"type": "object"}]},
-    {"oneOf": [{"type": "object"}]},
-    {"patternProperties": {"^withhuman_": {"type": "string"}}},
-])
-def test_lift_skips_a_key_whose_rules_might_declare_the_field(nested_rules):
-    schema = {"properties": {"params": nested_rules, "withhuman_context": {"type": "string"}}}
-    args = {"params": {"criteria": "x", "withhuman_context": "maybe the server's"}}
-    assert lift_gateway_context(args, schema) == args
+def ctx_schema(nested, **extra):
+    """A gateway schema whose ``params`` rules are ``nested``; ``extra`` goes next to ``properties`` at the root."""
+    return {"properties": {"params": nested, "withhuman_context": {"type": "string"}}, **extra}
+
+
+NOTE_ARGS = {"params": {"criteria": "x", "withhuman_context": "the note"}}
+LIFTED_ARGS = {"params": {"criteria": "x"}, "withhuman_context": "the note"}
+DECLARING = {"type": "object", "properties": {"withhuman_context": {"type": "string"}}}
+PLAIN = {"type": "object", "properties": {"criteria": {"type": "string"}}}
+
+
+def lift_report(args, schema):
+    problems = []
+    return lift_gateway_context(args, schema, on_problem=lambda kind, key, detail: problems.append((kind, key, detail))), problems
+
+
+@pytest.mark.parametrize("schema", [
+    ctx_schema({"$ref": "#/$defs/P"}, **{"$defs": {"P": DECLARING}}),
+    ctx_schema({"$ref": "#/definitions/P"}, definitions={"P": DECLARING}),
+    ctx_schema({"$ref": "#/$defs/a~1b"}, **{"$defs": {"a/b": DECLARING}}),
+    ctx_schema({"$ref": "#/$defs/a~0b"}, **{"$defs": {"a~b": DECLARING}}),
+    ctx_schema({"$ref": "#/$defs/Outer"}, **{"$defs": {"Outer": {"$ref": "#/$defs/P"}, "P": DECLARING}}),
+    ctx_schema({"allOf": [PLAIN, DECLARING]}),
+    ctx_schema({"allOf": [{"$ref": "#/$defs/P"}]}, **{"$defs": {"P": DECLARING}}),
+    ctx_schema({"anyOf": [PLAIN, DECLARING]}),
+    ctx_schema({"oneOf": [DECLARING, {"$ref": "https://example.com/x.json"}]}),  # True beats unknown
+    ctx_schema({"patternProperties": {"^withhuman_": {"type": "string"}}}),
+    ctx_schema({"type": "object", "properties": {"criteria": {}}, "allOf": [DECLARING]}),  # siblings combine
+], ids=["defs", "definitions", "tilde1", "tilde0", "ref-chain", "allOf", "allOf-ref", "anyOf", "oneOf-true-wins",
+        "pattern", "siblings"])
+def test_lift_skips_a_key_whose_rules_declare_the_field(schema):
+    result, problems = lift_report(NOTE_ARGS, schema)
+    assert result == NOTE_ARGS and problems == [("declared", "params", "")]
+
+
+@pytest.mark.parametrize("schema", [
+    ctx_schema({"$ref": "#/$defs/P"}, **{"$defs": {"P": PLAIN}}),
+    ctx_schema({"$ref": "#/definitions/P"}, definitions={"P": PLAIN}),
+    ctx_schema({"$ref": "#/$defs/a~1b"}, **{"$defs": {"a/b": PLAIN}}),
+    ctx_schema({"allOf": [PLAIN, {"type": "object"}]}),
+    ctx_schema({"anyOf": [PLAIN, {"type": "object"}]}),
+    ctx_schema({"oneOf": [{"type": "object"}, True, False]}),
+    ctx_schema({"patternProperties": {"^x_": {"type": "string"}}}),
+    ctx_schema({"type": "object", "properties": {"criteria": {}}, "allOf": [PLAIN]}),
+], ids=["defs", "definitions", "tilde1", "allOf", "anyOf", "oneOf-bools", "pattern", "siblings"])
+def test_lift_lifts_when_the_rules_clearly_do_not_declare_the_field(schema):
+    result, problems = lift_report(NOTE_ARGS, schema)
+    assert result == LIFTED_ARGS and problems == []
+
+
+def _cycle():
+    return ctx_schema({"$ref": "#/$defs/A"}, **{"$defs": {"A": {"$ref": "#/$defs/B"}, "B": {"$ref": "#/$defs/A"}}})
+
+
+def _deep():
+    defs = {f"D{i}": {"$ref": f"#/$defs/D{i + 1}"} for i in range(30)}
+    defs["D30"] = PLAIN
+    return ctx_schema({"$ref": "#/$defs/D0"}, **{"$defs": defs})
+
+
+@pytest.mark.parametrize("schema", [
+    ctx_schema({"$ref": "https://example.com/x.json"}),
+    ctx_schema({"$ref": "other.json#/P"}),
+    ctx_schema({"$ref": "#/$defs/missing"}, **{"$defs": {}}),
+    ctx_schema({"$ref": "#/$defs/P/properties/x"}, **{"$defs": {"P": PLAIN}}),
+    ctx_schema({"$ref": 5}),
+    ctx_schema({"oneOf": [PLAIN, {"$ref": "https://example.com/x.json"}]}),  # no True, one unknown
+    ctx_schema({"anyOf": "not a list"}),
+    ctx_schema({"patternProperties": {"([": {"type": "string"}}}),  # invalid regex
+    ctx_schema({"$ref": "#/$defs/A"}, **{"$defs": {"A": {"$ref": "#/$defs/A"}}}),  # self reference
+    _cycle(),
+    _deep(),  # past the depth limit
+], ids=["remote", "relative-file", "missing", "pointer-into-nothing", "non-string-ref", "oneOf-unknown",
+        "bad-anyOf", "bad-regex", "self-ref", "cycle", "too-deep"])
+def test_lift_lifts_a_key_it_cannot_judge_and_reports_nothing(schema):
+    """Only a positive declaration skips a key: rules that cannot be judged are treated as not declaring it."""
+    result, problems = lift_report(NOTE_ARGS, schema)
+    assert result == LIFTED_ARGS and problems == []
+
+
+def test_lift_reports_declared_only_for_keys_that_carry_a_note_and_never_values():
+    schema = ctx_schema(DECLARING)
+    quiet, problems = lift_report({"params": {"criteria": "x"}}, schema)
+    assert quiet == {"params": {"criteria": "x"}} and problems == []
+    schema["properties"]["zz"] = DECLARING
+    args = {"params": {"withhuman_context": "private note"}, "zz": {"withhuman_context": "other"}}
+    result, problems = lift_report(args, schema)
+    assert result == args and problems == [("declared", "params", ""), ("declared", "zz", "")]
+
+
+def test_lift_survives_a_failing_on_problem_callback():
+    def boom(kind, key, detail):
+        raise RuntimeError("callback bug")
+
+    assert lift_gateway_context(NOTE_ARGS, ctx_schema(DECLARING), on_problem=boom) == NOTE_ARGS
+
+
+def test_lift_treats_an_unexpected_error_while_judging_as_not_declared(monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr("durable_park.gatecall._declares_context_in", boom)
+    result, problems = lift_report(NOTE_ARGS, ctx_schema(PLAIN))
+    assert result == LIFTED_ARGS and problems == []
+
+
+def test_lift_ignores_a_non_dict_or_boolean_nested_schema():
+    for nested in (True, False, None, "object", []):
+        result, problems = lift_report(NOTE_ARGS, ctx_schema(nested))
+        assert result == LIFTED_ARGS and problems == [], nested
 
 
 def test_lift_still_lifts_when_the_nested_rules_are_plain():
@@ -310,3 +443,711 @@ def test_lift_still_lifts_when_the_nested_rules_are_plain():
                              "withhuman_context": {"type": "string"}}}
     assert lift_gateway_context({"params": {"withhuman_context": "n"}}, schema) == {
         "params": {}, "withhuman_context": "n"}
+
+
+# ---- dropped notes, leftovers, the sanitized-key case ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("args,reason,key", [
+    ({"params": {"withhuman_context": {"why": "x"}}}, "not text", "params"),
+    ({"params": {"withhuman_context": 7}}, "not text", "params"),
+    ({"params": {"withhuman_context": None}}, "not text", "params"),
+    ({"params": {"withhuman_context": ""}}, "empty", "params"),
+    ({"params": {"withhuman_context": "nested"}, "withhuman_context": "top"}, "another note was already at the top", "params"),
+    ({"params": {"withhuman_context": "nested"}, "withhuman_context": ""}, "another note was already at the top", "params"),
+    ({"a": {"withhuman_context": "first"}, "b": {"withhuman_context": "second"}}, "more than one note", "b"),
+])
+def test_lift_reports_a_note_that_is_removed_but_not_moved(args, reason, key):
+    result, problems = lift_report(args, GW_SCHEMA_FOR_DROPS)
+    assert ("note_dropped", key, reason) in problems
+    assert all(kind == "note_dropped" for kind, _, _ in problems)
+    assert not any(isinstance(v, dict) and "withhuman_context" in v for v in result.values())
+
+
+GW_SCHEMA_FOR_DROPS = {"properties": {"params": {"type": "object"}, "withhuman_context": {"type": "string"}}}
+
+
+def test_lift_does_not_report_a_note_that_is_the_one_shown_or_an_exact_copy_of_it():
+    assert lift_report({"params": {"withhuman_context": "same"}, "withhuman_context": "same"},
+                       GW_SCHEMA_FOR_DROPS) == ({"params": {}, "withhuman_context": "same"}, [])
+    assert lift_report({"a": {"withhuman_context": "same"}, "b": {"withhuman_context": "same"}},
+                       GW_SCHEMA_FOR_DROPS) == ({"a": {}, "b": {}, "withhuman_context": "same"}, [])
+    result, problems = lift_report({"a": {"withhuman_context": "same"}, "b": {"withhuman_context": "other"}},
+                                   GW_SCHEMA_FOR_DROPS)
+    assert problems == [("note_dropped", "b", "more than one note")] and result["withhuman_context"] == "same"
+
+
+def test_lift_judges_a_key_the_rules_do_not_list_by_the_other_properties():
+    """Hermes may show the model a sanitized spelling of a property name: a key the rules do not list is skipped when
+    another property declares the field (when in doubt, leave it alone and say so)."""
+    schema = {"properties": {"wire_name": DECLARING, "withhuman_context": {"type": "string"}}}
+    args = {"sanitized_name": {"withhuman_context": "x"}}
+    assert lift_report(args, schema) == (args, [("declared", "sanitized_name", "")])
+    plain = {"properties": {"wire_name": PLAIN, "withhuman_context": {"type": "string"}}}
+    assert lift_report(args, plain) == ({"sanitized_name": {}, "withhuman_context": "x"}, [])
+
+
+@pytest.mark.parametrize("name", ["withhuman_context", "WithHuman_Context", "_withhuman_context", "withhuman_context__",
+                                  "WITHHUMAN_CONTEXT", "withHumanContext", "with-human-context", "_withhuman_context_",
+                                  "With Human Context", "withhuman.context"])
+def test_note_key_spellings(name):
+    assert is_note_key(name)
+
+
+@pytest.mark.parametrize("name", ["withhuman_scope", "withhuman_context_x", "withhuman_contexts", "context", "", 5, None])
+def test_other_keys_are_not_the_note(name):
+    assert not is_note_key(name)
+
+
+@pytest.mark.parametrize("args,paths", [
+    ({"params": {"criteria": {"withhuman_context": "x"}}}, ["params.criteria.withhuman_context"]),
+    ({"params": [{"a": 1, "withhuman_context": "x"}]}, ["params[*].withhuman_context"]),
+    ({"params": {"items": [{"a": 1}, {"b": {"withhuman_context": "x"}}]}}, ["params.items[*].b.withhuman_context"]),
+    ({"params": "{'a':1,'withhuman_context':'x'}"}, ["params"]),  # not strict JSON, still contains the name
+    ({"params": '{"a":1,"withhuman_context":"x"'}, ["params"]),  # truncated
+    ({"params": '{"a":1,"withhuman_context":"x"}'}, ["params.withhuman_context"]),
+    ({"params": '{"a":1,"_withhuman_context_":"x"}'}, ["params._withhuman_context_"]),
+    ({"params": '[{"withhuman_context":"x"}]'}, ["params[*].withhuman_context"]),
+    ({"params": {"lines": [{"withhuman_context": str(i)} for i in range(30)]}}, ["params.lines[*].withhuman_context"]),
+    ({"params": {"withHumanContext": "x"}}, ["params.withHumanContext"]),
+    ({"params": {"with-human-context": "x"}}, ["params.with-human-context"]),
+    ({"params": {"_withhuman_context_": "x"}}, ["params._withhuman_context_"]),
+    ({"withHumanContext": "x"}, ["withHumanContext"]),  # a top-level misspelling is not the gateway's field
+    ({"params": "see the withHumanContext field"}, ["params"]),  # prose that names it also counts
+    ({"params": "keep with-human-context handy"}, ["params"]),
+    ({"params": '"{\\"withhuman_context\\": \\"x\\"}"'}, ["params.withhuman_context"]),  # double encoded
+    ({"params": '{"\\u0077ithhuman_context": "x"}'}, ["params.withhuman_context"]),  # escaped spelling
+    ({"params": {"WithHuman_Context": "x"}}, ["params.WithHuman_Context"]),
+    ({"_withhuman_context": "x"}, ["_withhuman_context"]),  # a top-level misspelling is not the gateway's field
+    ({"params": {"a": 1}, "withhuman_context": "the real top-level note"}, []),
+    ({"params": {"a": "plain text"}}, []),
+    ({"params": "7", "q": "[1, 2]", "r": "null"}, []),
+])
+def test_find_leftover_notes_finds_every_shape_with_a_path_and_no_values(args, paths):
+    hits, incomplete = find_leftover_notes(args)
+    assert hits == paths and incomplete is False
+
+
+def test_find_leftover_notes_paths_never_hold_values():
+    args = {"params": {"criteria": {"withhuman_context": "SECRET-NOTE"}, "memo": "SECRET-DATA"}}
+    hits, _ = find_leftover_notes(args)
+    assert hits == ["params.criteria.withhuman_context"] and "SECRET" not in repr(hits)
+
+
+def test_find_leftover_notes_skips_only_the_declared_locations():
+    args = {"params": {"withhuman_context": "owned"}, "other": {"withhuman_context": "stray"}}
+    assert find_leftover_notes(args, {"params.withhuman_context"}) == (["other.withhuman_context"], False)
+
+
+def test_find_leftover_notes_does_not_look_inside_a_note_or_flag_the_top_level_text():
+    args = {"withhuman_context": "talks about withhuman_context in prose", "params": {"a": 1}}
+    assert find_leftover_notes(args) == ([], False)
+
+
+def test_find_leftover_notes_is_bounded_in_depth_nodes_and_hits():
+    deep = current = {}
+    for _ in range(60):
+        current["x"] = {}
+        current = current["x"]
+    current["withhuman_context"] = "n"
+    assert find_leftover_notes({"params": deep}) == ([], True)  # too deep: reported as incomplete, not silently fine
+    wide = {"params": [{"i": i} for i in range(11_000)]}
+    assert find_leftover_notes(wide)[1] is True
+    many = {f"p{i}": {"withhuman_context": "x"} for i in range(50)}
+    hits, incomplete = find_leftover_notes(many)
+    assert len(hits) == 20 and incomplete is True
+    same_place = {"params": [{"withhuman_context": "x"} for _ in range(50)]}  # one place, however many list items
+    assert find_leftover_notes(same_place) == (["params[*].withhuman_context"], False)
+
+
+def test_find_leftover_notes_survives_absurd_json_nesting():
+    text = "[" * 100_000 + "withhuman_context" + "]" * 100_000
+    assert find_leftover_notes({"params": text}) == (["params"], False)
+
+
+def test_text_form_note_keys_lists_only_json_objects_holding_the_note():
+    args = {"b": '{"withhuman_context": "n"}', "a": '{"withhuman_context": "n"}', "c": '{"x": 1}',
+            "d": "withhuman_context", "e": {"withhuman_context": "n"}, "f": '[{"withhuman_context": "n"}]'}
+    assert text_form_note_keys(args) == ["a", "b"]
+    assert text_form_note_keys("nope") == []
+
+
+# ---- the lift problem recorder (lift_status.json) ---------------------------------------------------------
+
+
+def read_entries(path):
+    return json.loads(path.read_text())["entries"]
+
+
+FIELDS = {"tool", "kind", "key", "detail", "first_seen", "last_seen", "count"}
+
+
+def test_lift_status_dedupes_per_tool_kind_key_detail_and_counts(tmp_path):
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path))
+    for _ in range(3):
+        status.record("tool_a", "declared", "params")
+    status.record("tool_a", "declared", "other")
+    status.record("tool_a", "schema_unavailable")
+    status.record("tool_b", "declared", "params")
+    status.record("tool_a", "note_dropped", "params", "empty")
+    status.record("tool_a", "note_dropped", "params", "not text")
+    status.flush()
+    entries = read_entries(path)
+    assert len(entries) == 6
+    first = next(e for e in entries if (e["tool"], e["kind"], e["key"]) == ("tool_a", "declared", "params"))
+    assert first["count"] == 3 and first["first_seen"] <= first["last_seen"]
+    assert set(first) == FIELDS
+    assert next(e for e in entries if e["kind"] == "schema_unavailable")["key"] == ""
+    assert sorted(e["detail"] for e in entries if e["kind"] == "note_dropped") == ["empty", "not text"]
+
+
+def test_lift_status_keeps_at_most_200_entries_and_the_newest_always_gets_in(tmp_path):
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path))
+    for i in range(MAX_LIFT_ENTRIES + 25):
+        status.record(f"tool_{i}", "declared", "params")
+    entries = read_entries(path)
+    assert MAX_LIFT_ENTRIES == 200 and len(entries) == 200
+    assert f"tool_{MAX_LIFT_ENTRIES + 24}" in {e["tool"] for e in entries}  # the newest is kept
+    assert "tool_0" not in {e["tool"] for e in entries}  # the oldest made room
+
+
+def test_lift_status_file_holds_names_and_times_only_never_values(tmp_path):
+    path = tmp_path / "lift_status.json"
+    LiftStatus(str(path)).record("mcp__wh__quickbooks__create_payment", "declared", "params")
+    data = json.loads(path.read_text())
+    assert set(data) == {"entries", "updated_at"}
+    assert set(data["entries"][0]) == FIELDS
+
+
+def test_lift_status_is_reloaded_after_a_restart(tmp_path):
+    path = tmp_path / "lift_status.json"
+    first = LiftStatus(str(path))
+    first.record("t", "declared", "params")
+    again = LiftStatus(str(path))
+    again.record("t", "declared", "params")
+    again.flush()
+    (entry,) = read_entries(path)
+    assert entry["count"] == 2
+
+
+def test_lift_status_keeps_a_corrupt_old_file_aside_instead_of_losing_it(tmp_path):
+    path = tmp_path / "lift_status.json"
+    path.write_text("{not json")
+    LiftStatus(str(path)).record("t", "lift_error")
+    assert sorted(e["kind"] for e in read_entries(path)) == ["lift_error", "report_reset"]  # the reset is reported
+    assert (tmp_path / "lift_status.json.corrupt").read_text() == "{not json"
+
+
+def test_lift_status_merges_with_what_another_process_wrote(tmp_path):
+    path = tmp_path / "lift_status.json"
+    gateway, cli = LiftStatus(str(path)), LiftStatus(str(path))
+    gateway.record("t", "declared", "params")
+    cli.record("u", "lift_error")  # written after the gateway's: must not drop it
+    gateway.record("t", "declared", "params")
+    gateway.flush()
+    cli.record("t", "declared", "params")
+    cli.flush()
+    by_tool = {(e["tool"], e["kind"]): e["count"] for e in read_entries(path)}
+    assert by_tool == {("t", "declared"): 3, ("u", "lift_error"): 1}
+
+
+def test_lift_status_write_failure_keeps_the_entries_and_retries_later(tmp_path, caplog):
+    caplog.set_level(logging.ERROR, logger="durable_park")
+    directory = tmp_path / "later"
+    path = directory / "lift_status.json"
+    status = LiftStatus(str(path))
+    status.record("t", "declared", "params")
+    status.record("t", "declared", "params")
+    status.record("u", "lift_error")
+    errors = [r.getMessage() for r in caplog.records if "lift_status" in r.getMessage()]
+    assert errors == ["could not write lift_status.json (FileNotFoundError)"]  # one error per outage
+    directory.mkdir()
+    status.flush()  # the self-check thread's retry
+    assert {(e["tool"], e["kind"]): e["count"] for e in read_entries(path)} == {("t", "declared"): 2, ("u", "lift_error"): 1}
+
+
+def test_lift_status_retries_on_the_next_record_after_a_failure(tmp_path):
+    directory = tmp_path / "later"
+    path = directory / "lift_status.json"
+    status = LiftStatus(str(path))
+    status.record("t", "declared", "params")
+    directory.mkdir()
+    status.record("u", "lift_error")
+    assert {e["tool"] for e in read_entries(path)} == {"t", "u"}
+
+
+def test_lift_status_holds_back_the_write_for_a_repeat_until_the_interval_passes(tmp_path):
+    now = [100.0]
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path), clock=lambda: now[0])
+    status.record("t", "declared", "params")
+    status.record("t", "declared", "params")
+    assert read_entries(path)[0]["count"] == 1  # a repeat of a known problem does not rewrite the file
+    now[0] += 61
+    status.record("t", "declared", "params")
+    assert read_entries(path)[0]["count"] == 3
+    status.record("u", "lift_error")  # a new problem always writes at once
+    assert {e["tool"] for e in read_entries(path)} == {"t", "u"}
+
+
+def test_lift_status_without_a_path_only_remembers(tmp_path):
+    status = LiftStatus(None)
+    status.record("t", "declared", "params")  # no file, no error
+    status.flush()
+
+
+def test_lift_status_is_thread_safe(tmp_path):
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path))
+    threads = [threading.Thread(target=lambda: [status.record("t", "declared", "params") for _ in range(25)])
+               for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    status.flush()
+    (entry,) = read_entries(path)
+    assert entry["count"] == 200
+
+
+# ---- final fix wave: blank notes, the unwritable marker, the lock, overflow --------------------------------
+
+
+def test_lift_treats_a_blank_nested_note_as_empty_not_as_the_approvers_reason():
+    args = {"params": {"a": 1, "withhuman_context": "   \n "}}
+    out, reports = lift_report(args, GW_SCHEMA)
+    assert out == {"params": {"a": 1}} and reports == [("note_dropped", "params", "empty")]
+
+
+MARKER = "lift_status.unwritable"
+
+
+def markers(tmp_path):
+    """The per-process unwritable markers next to the report: ``lift_status.unwritable.<owner>``."""
+    return sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(MARKER))
+
+
+def block_lock(tmp_path):
+    """Make ``lift_status.json.lock`` impossible to open (a directory of that name)."""
+    (tmp_path / "lift_status.json.lock").mkdir()
+
+
+def unblock_lock(tmp_path):
+    (tmp_path / "lift_status.json.lock").rmdir()
+
+
+def test_a_report_that_cannot_be_written_leaves_a_marker_with_time_and_error_type_only(tmp_path):
+    block_lock(tmp_path)
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    status.record("t", "declared", "params")
+    (marker,) = markers(tmp_path)
+    text = (tmp_path / marker).read_text()
+    stamp, error = text.split()
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp) and error == "IsADirectoryError"
+    assert "declared" not in text and "params" not in text
+
+
+def test_the_marker_is_removed_by_the_next_successful_write(tmp_path):
+    block_lock(tmp_path)
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    status.record("t", "declared", "params")
+    assert markers(tmp_path) and not (tmp_path / "lift_status.json").exists()
+    unblock_lock(tmp_path)
+    status.flush()
+    assert markers(tmp_path) == []
+    assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+
+
+def test_no_marker_while_the_report_is_written_fine(tmp_path):
+    LiftStatus(str(tmp_path / "lift_status.json")).record("t", "declared", "params")
+    assert markers(tmp_path) == []
+
+
+def test_a_report_in_a_missing_directory_makes_no_marker_and_no_error(tmp_path, caplog):
+    status = LiftStatus(str(tmp_path / "nope" / "lift_status.json"))
+    status.record("t", "declared", "params")  # the directory itself is unwritable: the form-check alert covers it
+    assert not (tmp_path / "nope").exists()
+
+
+def test_unwritten_entries_are_never_evicted_and_overflow_is_counted(tmp_path):
+    block_lock(tmp_path)
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    for i in range(MAX_LIFT_ENTRIES + 5):
+        status.record(f"tool_{i}", "declared", "params")
+    assert markers(tmp_path)
+    unblock_lock(tmp_path)
+    status.flush()
+    entries = read_entries(tmp_path / "lift_status.json")
+    assert sum(e["count"] for e in entries) == MAX_LIFT_ENTRIES + 5  # nothing was lost, all occurrences counted
+    assert {"tool_0", "tool_1"} <= {e["tool"] for e in entries}  # the oldest unwritten entries were kept
+    assert any(e["tool"] == "*" and e["kind"] == "declared" and e["count"] == 5 for e in entries)
+    assert markers(tmp_path) == []
+
+
+def test_a_written_entry_may_make_room_but_never_an_entry_of_the_same_write(tmp_path):
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path))
+    for i in range(MAX_LIFT_ENTRIES):
+        status.record(f"old_{i}", "declared", "params")
+    status.record("fresh", "lift_error")
+    tools = {e["tool"] for e in read_entries(path)}
+    assert "fresh" in tools and "old_0" not in tools and len(tools) == MAX_LIFT_ENTRIES
+
+
+def hold_lock(tmp_path):
+    """Another process holding the report's lock: an flock on a separate open file."""
+    handle = open(tmp_path / "lift_status.json.lock", "a")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
+
+
+def test_a_held_lock_never_blocks_the_caller_for_more_than_a_moment(tmp_path):
+    holder = hold_lock(tmp_path)
+    try:
+        status = LiftStatus(str(tmp_path / "lift_status.json"))
+        started = time.monotonic()
+        status.record("t", "declared", "params")
+        assert time.monotonic() - started < 1.0  # about 200 ms of retries, never an unbounded wait
+        assert not (tmp_path / "lift_status.json").exists()
+        assert markers(tmp_path) == [f"{MARKER}.{os.getpid()}"]  # unsaved problems are never silent
+    finally:
+        holder.close()
+    status.flush()  # the next flush writes what was kept pending and clears the marker
+    assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+    assert markers(tmp_path) == []
+
+
+def test_a_lock_that_stays_held_past_the_next_flush_leaves_the_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr("durable_park.gatecall.LIFT_LOCK_WAIT_SECONDS", 0.02)
+    holder = hold_lock(tmp_path)
+    try:
+        status = LiftStatus(str(tmp_path / "lift_status.json"))
+        status.record("t", "declared", "params")
+        status.flush()
+        (marker,) = markers(tmp_path)
+        assert (tmp_path / marker).read_text().split()[1] == "LockTimeout"
+    finally:
+        holder.close()
+    status.flush()
+    assert markers(tmp_path) == []
+    assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+
+
+def test_a_report_that_was_unreadable_is_flagged_so_the_sweep_hears_of_the_reset(tmp_path):
+    path = tmp_path / "lift_status.json"
+    path.write_text("{not json")
+    LiftStatus(str(path)).record("t", "lift_error")
+    kinds = {(e["tool"], e["kind"]) for e in read_entries(path)}
+    assert kinds == {("t", "lift_error"), ("lift_status.json", "report_reset")}
+    assert (tmp_path / "lift_status.json.corrupt").read_text() == "{not json"
+
+
+def test_a_marker_left_by_an_earlier_run_is_cleared_by_the_first_flush_once_writing_works(tmp_path):
+    (tmp_path / f"{MARKER}.me").write_text("2026-10-22T10:00:00Z PermissionError\n")
+    LiftStatus(str(tmp_path / "lift_status.json"), owner="me").flush()  # restarted; nothing to record yet
+    assert markers(tmp_path) == [] and (tmp_path / "lift_status.json").exists()
+
+
+def test_a_marker_of_another_owner_is_never_cleared_by_a_flush(tmp_path):
+    (tmp_path / f"{MARKER}.gone").write_text("2026-10-22T10:00:00Z PermissionError\n")  # a process that is gone
+    LiftStatus(str(tmp_path / "lift_status.json"), owner="me").flush()
+    assert markers(tmp_path) == [f"{MARKER}.gone"]
+
+
+def test_a_marker_stays_while_the_report_still_cannot_be_written(tmp_path):
+    (tmp_path / f"{MARKER}.me").write_text("2026-10-22T10:00:00Z PermissionError\n")
+    block_lock(tmp_path)
+    LiftStatus(str(tmp_path / "lift_status.json"), owner="me").flush()
+    assert markers(tmp_path) == [f"{MARKER}.me"]
+
+
+# ---- review fixes: one lock bound per call, a marker per process, nothing lost at exit, bounded schema work --------
+
+
+def test_a_whole_calls_problems_wait_for_the_report_lock_once_not_once_per_problem(tmp_path):
+    holder = hold_lock(tmp_path)
+    try:
+        status = LiftStatus(str(tmp_path / "lift_status.json"))
+        problems = [("note_dropped", f"k{i}", "empty") for i in range(10)]
+        started = time.monotonic()
+        status.record_many("t", problems)
+        assert time.monotonic() - started < 0.6  # one ~0.2 s bound, not ten
+    finally:
+        holder.close()
+    status.flush()
+    assert sum(e["count"] for e in read_entries(tmp_path / "lift_status.json")) == 10  # nothing lost
+
+
+def test_threads_with_several_problems_each_never_wait_longer_than_one_bound_while_another_process_holds_the_lock(tmp_path):
+    holder = hold_lock(tmp_path)
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    waits = []
+
+    def one_call(n):
+        started = time.monotonic()
+        status.record_many("t", [("note_dropped", f"k{n}-{i}", "empty") for i in range(5)])
+        waits.append(time.monotonic() - started)
+
+    threads = [threading.Thread(target=one_call, args=(n,)) for n in range(8)]
+    began = time.monotonic()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    wall = time.monotonic() - began
+    try:
+        assert len(waits) == 8 and max(waits) < 0.6 and wall < 0.9  # about 0.2 s each, all at once
+    finally:
+        holder.close()
+    status.flush()
+    assert sum(e["count"] for e in read_entries(tmp_path / "lift_status.json")) == 40  # no problem lost
+
+
+def test_record_many_with_no_problems_does_nothing(tmp_path):
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    status.record_many("t", [])
+    assert not (tmp_path / "lift_status.json").exists() and markers(tmp_path) == []
+
+
+def test_the_default_marker_name_carries_the_process_id(tmp_path):
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    assert status.marker_path == str(tmp_path / f"{MARKER}.{os.getpid()}")
+
+
+def test_one_writers_marker_survives_another_writers_success_and_is_cleared_only_by_its_owner(tmp_path, monkeypatch):
+    path = str(tmp_path / "lift_status.json")
+    a, b = LiftStatus(path, owner="a"), LiftStatus(path, owner="b")
+
+    def cannot_read(*args, **kwargs):
+        raise PermissionError("not mine")
+
+    monkeypatch.setattr(a, "_read_disk", cannot_read)
+    a.record("t", "declared", "params")
+    assert markers(tmp_path) == [f"{MARKER}.a"]
+    b.record("t", "lift_error")  # B writes fine
+    b.flush()
+    assert markers(tmp_path) == [f"{MARKER}.a"]  # B's success did not clear A's marker
+    monkeypatch.undo()
+    a.flush()
+    assert markers(tmp_path) == []
+    assert {e["kind"] for e in read_entries(tmp_path / "lift_status.json")} == {"declared", "lift_error"}
+
+
+def test_the_report_the_lock_and_the_marker_are_readable_by_other_users(tmp_path, monkeypatch):
+    previous = os.umask(0o077)
+    try:
+        path = str(tmp_path / "lift_status.json")
+        LiftStatus(path).record("t", "declared", "params")
+        failing = LiftStatus(path, owner="x")
+        monkeypatch.setattr(failing, "_read_disk", lambda *a, **k: (_ for _ in ()).throw(OSError("no")))
+        failing.record("t", "lift_error")
+    finally:
+        os.umask(previous)
+    mode = lambda name: (tmp_path / name).stat().st_mode & 0o777
+    assert mode("lift_status.json") == 0o644  # the sweep may run as another user
+    assert mode("lift_status.json.lock") == 0o666  # another user's gateway must be able to take the lock
+    assert mode(f"{MARKER}.x") == 0o644
+
+
+def test_pending_entries_are_flushed_when_the_process_exits(tmp_path):
+    import durable_park
+    path = tmp_path / "lift_status.json"
+    holder = hold_lock(tmp_path)
+    code = (
+        "import sys\n"
+        "from durable_park.gatecall import LiftStatus\n"
+        "status = LiftStatus(sys.argv[1])\n"
+        "status.record('t', 'lift_error')\n"
+        "print('pending', flush=True)\n"
+        "sys.stdin.readline()\n")
+    plugin_dir = os.path.dirname(os.path.dirname(durable_park.__file__))
+    proc = subprocess.Popen([sys.executable, "-c", code, str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            text=True, env={**os.environ, "PYTHONPATH": plugin_dir})
+    try:
+        assert proc.stdout.readline().strip() == "pending"  # its write timed out: the entry is only in memory
+        assert not path.exists()
+        holder.close()
+        proc.stdin.write("\n")
+        proc.stdin.close()
+        proc.wait(timeout=20)
+    finally:
+        proc.kill()
+        proc.stdout.close()
+    assert [e["kind"] for e in read_entries(path)] == ["lift_error"]
+    assert markers(tmp_path) == []
+
+
+def fan_out_schema(width=20, levels=10):
+    """Every definition offers ``width`` branches that each lead to the next definition: ``width ** levels`` paths."""
+    defs = {}
+    for level in range(levels):
+        leaf = {"type": "object"} if level == levels - 1 else {"$ref": f"#/$defs/D{level + 1}"}
+        defs[f"D{level}"] = {"anyOf": [leaf] * width}
+    return {"type": "object", "$defs": defs,
+            "properties": {"params": {"$ref": "#/$defs/D0"}, "withhuman_context": {"type": "string"}}}
+
+
+def test_a_schema_with_exponential_fan_out_is_judged_within_a_small_budget_and_says_so():
+    args = {"params": {"a": 1, "withhuman_context": "why"}}
+    started = time.monotonic()
+    out, reports = lift_report(args, fan_out_schema())
+    assert time.monotonic() - started < 0.5
+    assert out == {"params": {"a": 1}, "withhuman_context": "why"}  # cannot tell: lift, as before
+    assert reports == [("schema_too_complex", "params", "")]  # and not silently
+
+
+def test_a_schema_inside_the_budget_is_judged_exactly_as_before():
+    schema = fan_out_schema(width=3, levels=3)
+    schema["$defs"]["D2"] = {"properties": {"withhuman_context": {"type": "string"}}}
+    out, reports = lift_report({"params": {"withhuman_context": "x"}}, schema)
+    assert out == {"params": {"withhuman_context": "x"}} and reports == [("declared", "params", "")]
+
+
+# ---- second review: races around the marker, a budget per key, unlisted keys, planted symlinks ----------------------
+
+
+def test_a_failure_while_another_thread_is_clearing_the_marker_still_leaves_a_marker(tmp_path):
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    real_clear = status._clear_marker
+    in_clear = threading.Event()
+
+    def slow_clear():
+        in_clear.set()
+        time.sleep(0.5)  # the writer is between "my write worked" and "remove the marker"
+        real_clear()
+
+    status._clear_marker = slow_clear
+    writer = threading.Thread(target=lambda: status.record("t", "declared", "a"))
+    writer.start()
+    assert in_clear.wait(10)
+    status.record("t", "lift_error", "b")  # cannot get the writer's turn in 0.2 s: its entry stays pending
+    writer.join(10)
+    assert markers(tmp_path) == [f"{MARKER}.me"]  # the outage is not silenced
+    status._clear_marker = real_clear
+    status.flush()
+    assert markers(tmp_path) == []
+    assert {e["kind"] for e in read_entries(tmp_path / "lift_status.json")} == {"declared", "lift_error"}
+
+
+def test_a_marker_stays_while_another_thread_still_has_entries_it_could_not_write(tmp_path):
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    real_write = status._write
+    written = threading.Event()
+
+    def slow_write(batch, deadline):
+        kept = real_write(batch, deadline)
+        written.set()
+        time.sleep(0.5)  # the write worked; the writer has not yet run its success path
+        return kept
+
+    status._write = slow_write
+    writer = threading.Thread(target=lambda: status.record("t", "declared", "a"))
+    writer.start()
+    assert written.wait(10)
+    status.record("t", "lift_error", "b")  # times out: marker, entry pending
+    writer.join(10)
+    assert markers(tmp_path) == [f"{MARKER}.me"]  # the writer's success must not remove it
+    status._write = real_write
+    status.flush()
+    assert markers(tmp_path) == []
+    assert {e["kind"] for e in read_entries(tmp_path / "lift_status.json")} == {"declared", "lift_error"}
+
+
+def test_a_complex_key_does_not_use_up_the_budget_of_its_sibling():
+    schema = fan_out_schema()
+    schema["properties"]["a"] = schema["properties"]["params"]  # a listed key whose rules fan out
+    schema["properties"]["b"] = {"type": "object", "properties": {"withhuman_context": {"type": "string"}}}
+    args = {"a": {"withhuman_context": "x"}, "b": {"withhuman_context": "y"}}
+    out, reports = lift_report(args, schema)
+    assert ("declared", "b", "") in reports and ("schema_too_complex", "b", "") not in reports
+    assert ("schema_too_complex", "a", "") in reports
+    assert out["b"] == {"withhuman_context": "y"}  # b is left alone, exactly as when it is alone
+    alone, alone_reports = lift_report({"b": {"withhuman_context": "y"}}, schema)
+    assert alone["b"] == {"withhuman_context": "y"} and alone_reports == [("declared", "b", "")]
+
+
+def test_a_complex_schema_is_reported_for_a_key_the_rules_do_not_list():
+    args = {"zz": {"withhuman_context": "x"}}  # judged by every listed property: they run out of budget
+    out, reports = lift_report(args, fan_out_schema())
+    assert out == {"zz": {}, "withhuman_context": "x"}
+    assert reports == [("schema_too_complex", "zz", "")]
+
+
+def plant_symlink(tmp_path, name):
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    victim.chmod(0o600)
+    (tmp_path / name).symlink_to(victim)
+    return victim
+
+
+def test_a_symlink_planted_at_the_lock_is_never_followed_or_changed(tmp_path):
+    victim = plant_symlink(tmp_path, "lift_status.json.lock")
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    status.record("t", "declared", "params")
+    assert victim.read_text() == "keep" and victim.stat().st_mode & 0o777 == 0o600
+    assert not (tmp_path / "lift_status.json").exists()
+    (marker,) = markers(tmp_path)  # loud: the report cannot be written
+    assert (tmp_path / marker).read_text().split()[1] == "OSError"
+
+
+def test_a_symlink_planted_at_the_marker_is_never_followed_or_changed(tmp_path):
+    victim = plant_symlink(tmp_path, f"{MARKER}.me")
+    block_lock(tmp_path)  # the write fails, so the marker is attempted
+    LiftStatus(str(tmp_path / "lift_status.json"), owner="me").record("t", "declared", "params")
+    assert victim.read_text() == "keep" and victim.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_lock_owned_by_someone_else_is_used_but_its_mode_is_left_alone(tmp_path, monkeypatch):
+    lock = tmp_path / "lift_status.json.lock"
+    lock.write_text("")
+    lock.chmod(0o640)
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(lock).st_uid + 1)  # as if another user created it
+    LiftStatus(str(tmp_path / "lift_status.json")).record("t", "declared", "params")
+    assert lock.stat().st_mode & 0o777 == 0o640 and (tmp_path / "lift_status.json").exists()
+
+
+# ---- third review: a planted FIFO must never hang a tool call or the sweep; unlisted keys judged order-free -------
+
+
+def returns_within(seconds, fn, *args):
+    """Run ``fn`` in a thread; True when it returned within ``seconds`` (a hang leaves the thread behind, daemon)."""
+    thread = threading.Thread(target=fn, args=args, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    return not thread.is_alive()
+
+
+def test_a_fifo_planted_at_the_marker_never_hangs_a_tool_call(tmp_path, caplog):
+    os.mkfifo(tmp_path / f"{MARKER}.me")  # nobody reads it: a plain open would block forever
+    block_lock(tmp_path)  # the report cannot be written, so the marker is attempted
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    with caplog.at_level(logging.WARNING, logger="durable_park"):
+        assert returns_within(0.5, status.record, "t", "declared", "a")
+        assert returns_within(0.5, status.record, "t", "lift_error", "b")
+    assert "could not write the lift unwritable marker" in caplog.text  # surfaced, not swallowed
+    assert stat.S_ISFIFO((tmp_path / f"{MARKER}.me").stat().st_mode)  # and never replaced or followed
+
+
+def test_a_fifo_planted_at_the_lock_never_hangs_a_tool_call_and_is_reported(tmp_path, caplog):
+    os.mkfifo(tmp_path / "lift_status.json.lock")
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    with caplog.at_level(logging.ERROR, logger="durable_park"):
+        assert returns_within(0.5, status.record, "t", "declared", "a")
+        assert returns_within(0.5, status.record, "t", "lift_error", "b")
+    assert not (tmp_path / "lift_status.json").exists()
+    (marker,) = markers(tmp_path)
+    assert (tmp_path / marker).read_text().split()[1] == "NotARegularFile"
+    assert "could not write lift_status.json (NotARegularFile)" in caplog.text
+
+
+def test_an_unlisted_key_is_judged_the_same_whatever_the_order_of_the_listed_ones():
+    complex_rules = fan_out_schema()["properties"]["params"]
+    plain_rules = {"type": "object", "properties": {"withhuman_context": {"type": "string"}}}
+    defs = fan_out_schema()["$defs"]
+    first = {"type": "object", "$defs": defs, "properties": {
+        "a": complex_rules, "b": plain_rules, "withhuman_context": {"type": "string"}}}
+    second = {"type": "object", "$defs": defs, "properties": {
+        "b": plain_rules, "a": complex_rules, "withhuman_context": {"type": "string"}}}
+    args = {"zz": {"withhuman_context": "x"}}
+    assert lift_report(args, first) == lift_report(args, second) == (args, [("declared", "zz", "")])
