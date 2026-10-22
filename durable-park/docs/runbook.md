@@ -92,7 +92,7 @@ or `~/.hermes/.env`: they hold secrets).
 | Secret references (`platforms.webhook.extra.routes.durable-park-wake.secret`, `mcp_servers.wh.headers.Authorization`) | bare `${VAR}` form | PR #28; no `${env:...}` is left in `config.yaml`. See [Config ref is not set](#every-hermes-command-prints-config-ref--is-not-set). |
 | Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *` | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). |
 | `hermes-dashboard` unit | `RestartPreventExitStatus=78` in the main unit file | See [Dashboard over HTTPS](#dashboard-over-https). |
-| Langfuse tracing: plugin `langfuse` enabled, `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | on since 2026-10-22 04:37 UTC; settings last changed 13:42 UTC | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
+| Langfuse tracing: plugin `langfuse` (Nous Research's unpatched catalog plugin) enabled, `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | on since 2026-10-22 04:37 UTC; settings last changed 13:42 UTC. The patched `tapdash-langfuse` is built and tested but **not deployed**: this row changes when it is ([deploy](#switch-to-the-patched-plugin-deploy)) | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
 
 If `hermes-gateway` reports `DEGRADED` after a Hermes update, read `~/.hermes/logs/gateway.log` for the platform
 that failed to start before changing anything. To use `api_server` later, an admin sets `API_SERVER_KEY` in the
@@ -179,6 +179,7 @@ PY
    | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger`, which runs `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (step 4b copies both trees recursively, removes files the repo no longer has, restarts the bridge, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge). By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401`. |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
+   | `tracing/tapdash_langfuse/` (the patched Langfuse plugin; the gateway loads it through a symlink into the live clone) | Run `bash tracing/run_tests.sh` as `hermes` first. The change is loaded at the next gateway restart, so follow [When the plugin changes](#when-the-plugin-changes) (hook re-review before the pull) |
    | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
@@ -558,7 +559,8 @@ observer may be listed.
 | Name | Source | What it does | Reviewed (date) | Result |
 |---|---|---|---|---|
 | `platforms__raft.adapter._on_pre_tool_call` (full name `hermes_plugins.platforms__raft.adapter._on_pre_tool_call`) | Hermes Raft platform plugin, on `proto-agents` | Records telemetry about each call; always returns `None`, on every path including errors. Never returns `modify`, `block` or any other directive. | 2026-10-21 | Listed in `observer_hooks`; gateway restarted; calls asked about normally again |
-| `hermes_plugins.langfuse.on_pre_tool_call` | Nous Research official `langfuse` plugin v2.0.0 @ commit `c2a9596`, on `proto-agents` | Starts a Langfuse tool observation from a copy of the call's arguments (`_capture_content` builds new structures with `_safe_value`). Returns `None` on every path and never changes the arguments. Its `on_post_tool_call` only changes the plugin's own copies. | 2026-10-22 | Listed in `observer_hooks`. The plugin was switched on 2026-10-22 04:37 UTC ([Tracing (Langfuse)](#tracing-langfuse)); after that restart calls were asked about normally and a $1 payment ran once after one approval ([record](acceptance-2026-10-22-langfuse.md)) |
+| `hermes_plugins.langfuse.on_pre_tool_call` | Nous Research official `langfuse` plugin v2.0.0 @ commit `c2a9596`, on `proto-agents` | Starts a Langfuse tool observation from a copy of the call's arguments (`_capture_content` builds new structures with `_safe_value`). Returns `None` on every path and never changes the arguments. Its `on_post_tool_call` only changes the plugin's own copies. | 2026-10-22 | Listed in `observer_hooks`. The plugin was switched on 2026-10-22 04:37 UTC ([Tracing (Langfuse)](#tracing-langfuse)); after that restart calls were asked about normally and a $1 payment ran once after one approval ([record](acceptance-2026-10-22-langfuse.md)). **Retired at the `tapdash-langfuse` deploy** (the catalog plugin is disabled and this entry is removed from `observer_hooks` in the same restart); the row stays for history |
+| `hermes_plugins.tapdash_langfuse.on_pre_tool_call` | TapDash patched copy of the Nous `langfuse` v2.0.0 @ commit `c2a9596` (`tracing/tapdash_langfuse`), on `proto-agents` | The same function as the upstream one reviewed on 2026-10-22 (row above): byte-identical, checked by a diff when the copy was built. Starts a Langfuse tool observation from a copy of the call's arguments. Returns `None` on every path and never changes the arguments. The patches only touch `on_post_tool_call` (pattern tags) and the start of the root trace (user id, name), never this hook | 2026-10-22 | To be listed in `observer_hooks` at the deploy (not listed yet: the plugin is not deployed). Calls must still be asked about normally after that restart ([deploy](#switch-to-the-patched-plugin-deploy)) |
 
 `<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook or middleware
 registry (e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
@@ -574,11 +576,19 @@ at 04:37:45 and the gateway restarted; the Langfuse keys were typed in by Yaakov
 13:42 UTC the same day (`HERMES_LANGFUSE_MAX_DEPTH` 16). What was checked, and the audit of what Langfuse shows:
 [acceptance-2026-10-22-langfuse.md](acceptance-2026-10-22-langfuse.md).
 
+**Patched plugin: built and tested, NOT deployed yet.** The three gaps in that audit (no `userId`, every trace named
+`Hermes turn`, no way to find the traces of one approval) are fixed in TapDash's patched copy,
+[`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse) ([The patched plugin](#the-patched-plugin-tapdash-langfuse)).
+It goes live in [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy), after its pull requests are
+merged. **Until then, what is live is still the unpatched catalog plugin `langfuse`.** The rest of this section names
+the plugin `tapdash-langfuse` and its hook `hermes_plugins.tapdash_langfuse.on_pre_tool_call`, as they are after the
+deploy; before it, read `langfuse` and `hermes_plugins.langfuse.on_pre_tool_call`.
+
 What it records (a hooks-only plugin, no tools):
 
 | Level in Langfuse | What it is |
 |---|---|
-| Trace | One per message turn, named `Hermes turn`. Input = the user's message, output = the final reply. All turns of one chat share a session id, including the turn after an approval |
+| Trace | One per message turn. Input = the user's message, output = the final reply. All turns of one chat share a session id, including the turn after an approval. Named `Hermes turn` while the unpatched plugin is live; with the patched plugin `telegram-turn`, `teams-turn`, `cli-turn` (`<platform>-turn`), `cron-run` for a cron job, or `hermes-turn` when the platform is unknown. `userId` = the chat sender id (patched plugin; none for a turn without a sender), the sender's display name is in the trace metadata as `user_name`. Tags: any pattern tags such as `park:P-XXXXXXXX` |
 | Generation | One per model call (`LLM call 1`, `LLM call 2`, ...). Input = the system prompt + the last 12 messages; output = the answer; model name and token counts are filled in |
 | Observation | One per tool call (type `TOOL`: arguments and result) and one per subagent. A call that was parked shows level `WARNING` with status message `plugin_block` |
 
@@ -602,6 +612,7 @@ starts. A change needs a restart (ledger check first, see [Turn it off](#turn-it
 | `HERMES_LANGFUSE_MAX_DEPTH` | `16` | no | How many levels of nested data are kept per field. The plugin default (4) cut 16 observations, including the arguments of `create_payment`. 10 still cut the payment's `linked_txn` (11 levels deep inside the tool-call envelope) and the QuickBooks tool schemas. At 16 nothing is cut (checked with the plugin's own serializer: 10 gave 1 + 5 cut-offs, 16 gave none). Cut-off data shows as `<max-depth>` |
 | `HERMES_LANGFUSE_MAX_CHARS` | `50000` | no | Characters kept per field. The default (12000) cut root outputs of about 14,000 characters |
 | `HERMES_LANGFUSE_RELEASE` | `hermes-v0.22.3` | no | The release label on each trace. **Update it when Hermes is upgraded** (`hermes-v<version>`), then restart, so traces can be told apart by version |
+| `HERMES_LANGFUSE_TAG_PATTERNS` | to be added at the deploy (patched plugin only; the catalog plugin ignores it): `park=\bP-[0-9A-F]{8}\b` | no | Trace tags from patterns, `label=regex` pairs separated by `;`. Every match in the turn's user message, a tool call's arguments or a tool's result adds the trace tag `label:value` (value = group 1 if the regex has a group, else the whole match). With this value a trace that mentions park id `P-1A2B3C4D` gets the tag `park:P-1A2B3C4D`. Limits: at most 10 pattern tags per trace; a tag over 200 characters or not US-ASCII is skipped; only the first 200 000 characters of each text are scanned; with `HERMES_LANGFUSE_CAPTURE=metadata` no pattern tags are added (a tag would carry content). A bad entry (no `=`, a label that is not `[a-z0-9_-]{1,40}`, or a regex that does not compile) logs one warning and is ignored; the other entries still work |
 | `HERMES_LANGFUSE_PUBLIC_KEY` | the project's public key (`pk-lf-...`) | typed in | Half of the key pair. An identifier rather than a secret on its own, but handled like the other key |
 | `HERMES_LANGFUSE_SECRET_KEY` | the project's secret key (`sk-lf-...`) | yes, typed in | Reads and writes the project's traces |
 
@@ -616,9 +627,77 @@ type in a chat, everything the model is sent and answers, and every tool's argum
 amounts, ids) leaves the VM and sits at Langfuse. That is acceptable for the QuickBooks **sandbox** on the test VM. It
 is a decision to make again before real books ([backlog](backlog.md#before-real-books), item 9).
 
+### The patched plugin (`tapdash-langfuse`)
+
+**Status: built and tested, not deployed.** A copy of the Nous Research `langfuse` plugin (v2.0.0 @ commit `c2a9596`,
+MIT) lives in this repo at [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse), with TapDash's changes. Every
+change against upstream is listed in [`PATCHES.md`](../../tracing/tapdash_langfuse/PATCHES.md). Decisions and reasons:
+[design](../../docs/specs/2026-10-22-langfuse-trace-gaps-design.md) (D1 to D8). On the VM it is installed as a symlink,
+`~/.hermes/plugins/tapdash-langfuse` to `/home/hermes/tapdash-agents/tracing/tapdash_langfuse` (the same pattern as
+durable-park), under the plugin name `tapdash-langfuse` and the import name `hermes_plugins.tapdash_langfuse`. The
+catalog `langfuse` plugin is disabled at the deploy but kept installed, for rollback.
+
+| What changes | How |
+|---|---|
+| `userId` on each trace | The chat sender id Hermes passes to the turn's `pre_llm_call` hook (`sender_id`). Left out when there is none (cron, some CLI turns) or when it is not US-ASCII or is over 200 characters (Langfuse's limits); never altered. The sender's display name goes in the root metadata as `user_name` (cut to 200 characters) |
+| Trace names | `<platform>-turn`, `cron-run`, `hermes-turn` (see [the table above](#tracing-langfuse)). The root observation has the same name. Model calls are still `LLM call N` |
+| Trace tags from patterns | `HERMES_LANGFUSE_TAG_PATTERNS` (settings table). A tag found late in a turn (in a tool result) is put on the trace before the root ends, so the filter finds it. Generic: the plugin knows nothing about durable-park |
+
+**No durable-park code and no approval behaviour changes.** The hook durable-park cares about, `on_pre_tool_call`, is
+the same function as upstream's, byte for byte (checked with a diff when the copy was built). The patches scan text in
+`on_post_tool_call` and when the root trace starts, never in `on_pre_tool_call`; the plugin still only observes, returns
+`None` and never changes a call's arguments. Its row is in [Hooks reviewed so far](#hooks-reviewed-so-far).
+
+**Tests.** `bash tracing/run_tests.sh`, as `hermes` on the VM (it uses the Hermes environment's Python, installs `pytest`
+into a cache directory outside the repo, and runs with warnings as errors). It is upstream's suite plus the new tests,
+without upstream's four `TestSystemPromptCrossesHookBoundary` tests, which re-run Hermes core's request builder and
+cannot run from a checkout (design D8). CI does not run them yet ([backlog](backlog.md#langfuse-tracing-gaps-from-the-2026-10-22-audit), item 6).
+
+### Switch to the patched plugin (deploy)
+
+Not done yet. Do it only after the pull requests with `tracing/` and these docs are merged and the live clone is up to
+date (`git -C /home/hermes/tapdash-agents pull --ff-only`, as in [Deploy a change](#deploy-a-change)). As `hermes`:
+
+1. `bash tracing/run_tests.sh` in the live clone: all tests pass. Diff `on_pre_tool_call` against the upstream copy at
+   `c2a9596` (`diff <(sed -n '/^def on_pre_tool_call/,/^def /p' <upstream>/__init__.py) <(sed -n '/^def on_pre_tool_call/,/^def /p' tracing/tapdash_langfuse/__init__.py)` prints nothing).
+2. Back up `~/.hermes/.env` and `~/.hermes/config.yaml` (suffix `.bak-langfuse-gaps-<UTC time>`).
+3. Add the new setting once, quoted so the backslashes stay (it holds no secret):
+   `printf '%s\n' 'HERMES_LANGFUSE_TAG_PATTERNS=park=\bP-[0-9A-F]{8}\b' >> ~/.hermes/.env`
+   (end the last line first if it has no newline, as in [Turn it on](#turn-it-on-admin)).
+4. `ln -s /home/hermes/tapdash-agents/tracing/tapdash_langfuse ~/.hermes/plugins/tapdash-langfuse`
+5. Set `observer_hooks` by hand in `config.yaml` ([Plugin settings](#plugin-settings)) to exactly these two:
+   `hermes_plugins.platforms__raft.adapter._on_pre_tool_call` and `hermes_plugins.tapdash_langfuse.on_pre_tool_call`.
+   This **removes** `hermes_plugins.langfuse.on_pre_tool_call`. Read it back with
+   `hermes config get plugins.entries.durable-park.settings.observer_hooks` (a list of 2 strings).
+6. `hermes plugins disable langfuse`, then `hermes plugins enable tapdash-langfuse`.
+7. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)), and restart
+   `hermes-gateway` straight after, with **nothing restarted between steps 5 and 7**. Then run
+   [Check it works](#check-it-works): `hermes plugins list` shows `tapdash-langfuse` enabled and `langfuse` disabled, the
+   `durable-park loaded` line counts 2 observer hooks, and there is no `foreign pre_tool_call` line.
+8. Send a chat message, then a $1 payment that parks, and approve it. Find the traces by the tag
+   ([Find everything about one approval](#find-everything-about-one-approval)): the parking turn, the approval turn and
+   the run are returned, `userId` is the sender's chat id, and the trace names are `telegram-turn`. The payment must
+   still ask once and run once.
+
+**Why the old entry is removed in the same restart.** The observer list must match the plugins that are loaded.
+After this restart the catalog plugin is not loaded, so its hook name no longer needs to be listed, and the new
+plugin's name must be. **Removing the name of an observer whose plugin is still loaded makes durable-park refuse every
+tool call** (an outage, not a loss of safety; [Allow another hook](#allow-another-hook-observer_hooks)). So never take
+`hermes_plugins.langfuse.on_pre_tool_call` out while the catalog plugin is enabled, and never enable `tapdash-langfuse`
+without its name listed.
+
+**Rollback** (any failure above): restore both backups, or put the observer list back to Raft plus
+`hermes_plugins.langfuse.on_pre_tool_call` by hand; `hermes plugins enable langfuse` and
+`hermes plugins disable tapdash-langfuse`; check the ledger; restart `hermes-gateway`; run
+[Check it works](#check-it-works) with the old names. The two plugin states and the two observer lists must match,
+for the reason above. The symlink and the `HERMES_LANGFUSE_TAG_PATTERNS` line can stay (the catalog plugin ignores the
+setting, and a disabled plugin is not loaded).
+
 ### Turn it on (admin)
 
-This is how it was switched on on 2026-10-22; use the same steps to switch it on again after it was turned off.
+This is how the catalog plugin was switched on on 2026-10-22; use the same steps to switch the tracing plugin on again
+after it was turned off (names as after the deploy; the plugin directory is the symlink from step 4 of the
+[deploy](#switch-to-the-patched-plugin-deploy)).
 
 1. In Langfuse (project `proto-agents`, Settings, API keys), create a key pair. The secret key is shown once.
 2. Type the keys in on the VM as `hermes`. Nothing is echoed, nothing goes in chat or the repo:
@@ -634,38 +713,44 @@ This is how it was switched on on 2026-10-22; use the same steps to switch it on
 3. Check that the non-secret settings in the table above are in `.env` (names only: `grep -c '^HERMES_LANGFUSE_' ~/.hermes/.env`
    counts the lines; `grep -o '^HERMES_LANGFUSE_[A-Z_]*' ~/.hermes/.env` lists the names). Add any that are missing.
    Also check that `hermes config get plugins.entries.durable-park.settings.observer_hooks` still lists
-   `hermes_plugins.langfuse.on_pre_tool_call` (it is taken out only under "remove for good" below). Without it,
+   `hermes_plugins.tapdash_langfuse.on_pre_tool_call` (it is taken out only under "remove for good" below). Without it,
    durable-park refuses every tool call once the plugin is enabled (an outage, not a loss of safety).
-4. `hermes plugins enable langfuse`.
+4. `hermes plugins enable tapdash-langfuse` (and the catalog `langfuse` plugin must stay disabled: with both enabled
+   every turn is traced twice, and the second hook needs its own `observer_hooks` entry).
 5. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)), and restart `hermes-gateway`
    straight after, so no approval can be parked in between. Then run [Check it works](#check-it-works).
 
 ### Check it works
 
 ```sh
-hermes plugins list | grep -i -e langfuse -e durable-park      # langfuse enabled, durable-park enabled
+hermes plugins list | grep -i -e langfuse -e durable-park      # tapdash-langfuse enabled, langfuse disabled, durable-park enabled
 grep -i -e 'durable-park loaded' -e 'foreign pre_tool_call' ~/.hermes/logs/agent.log | tail
 grep -e 'Langfuse plugin:' -e 'Langfuse tracing:' ~/.hermes/logs/agent.log | tail     # nothing dated after the last start (older lines also match)
-grep 'plugin=langfuse' ~/.hermes/logs/agent.log | tail -3
+grep 'plugin=.*langfuse' ~/.hermes/logs/agent.log | tail -3
 cat ~/.hermes/plugin-data/durable-park/tool_policy_status.json       # "ok": true
 cat ~/.hermes/plugin-data/durable-park/plugin_load.json            # present, pid = the gateway's MainPID
 ```
 
 What good looks like (seen on 2026-10-22):
 
-- `hermes plugins list` shows `langfuse` enabled.
+- `hermes plugins list` shows `langfuse` enabled (seen on 2026-10-22, before the patched plugin). After the deploy it
+  must show `tapdash-langfuse` enabled and `langfuse` disabled.
 - The `durable-park loaded: ... 2 observer hook(s) ...` line (two: Raft and Langfuse), and **no**
-  `foreign pre_tool_call hook(s) present` line. If there is one, the Langfuse hook name is not listed, and durable-park
-  refuses every call ([Allow another hook](#allow-another-hook-observer_hooks)).
+  `foreign pre_tool_call hook(s) present` line. If there is one, the Langfuse hook name is not listed (or the other
+  Langfuse plugin is still loaded), and durable-park refuses every call ([Allow another hook](#allow-another-hook-observer_hooks)).
 - The Langfuse plugin writes **no "loaded" line**, so do not look for one. A missing or placeholder key is the only thing
   it complains about, with a warning that starts `Langfuse plugin:` or `Langfuse tracing:`. None must appear after the
-  last start.
-- Every start logs `capability_check plugin=langfuse capability=tools.override decision=deny`. That is normal and
+  last start. The patched plugin also logs one warning for each bad entry of `HERMES_LANGFUSE_TAG_PATTERNS`: there
+  must be none for the live value.
+- Every start logs `capability_check plugin=<plugin name> capability=tools.override decision=deny`
+  (`langfuse` seen on 2026-10-22; not yet seen for `tapdash-langfuse`). That is normal and
   harmless: the plugin asks for a capability it does not need and is refused.
 - `tool_policy_status.json` has `"ok": true` and `plugin_load.json` exists.
-- Send one chat message. After a short delay a trace named `Hermes turn` appears in Langfuse (project
-  `proto-agents`, environment `proto-agents`, release as in the table) with the full text. See
+- Send one chat message. After a short delay a trace appears in Langfuse (project `proto-agents`, environment
+  `proto-agents`, release as in the table) with the full text: named `Hermes turn` with the unpatched plugin, and
+  with the patched plugin named `telegram-turn` (or the platform's name) with `userId` = the sender's chat id. See
   [Read traces](#read-traces).
+- With the patched plugin: a message or tool result that contains a park id gives the trace the tag `park:P-...`.
 - Make one QuickBooks call. It must still be asked about in withHuman as before, and a parked payment must still run
   at most once. Tracing changes none of that.
 
@@ -706,6 +791,17 @@ Change `fromStartTime` (UTC) to the start of the window you want. Print only wha
 level, trace id): the rows hold full chat and tool content. With `npx langfuse-cli`, export the keys into the
 process environment the same way (from the `.env` lines, without echoing) and do not pass them as arguments.
 
+### Find everything about one approval
+
+With the patched plugin (and `HERMES_LANGFUSE_TAG_PATTERNS` set as in the settings table) every trace that mentions
+a park id carries the tag `park:P-XXXXXXXX`: the turn that parked the call (the id is in the tool result), the turn
+after the approval (`[durable-park] P-... was APPROVED ...`) and the run (`"park_id": "P-..."`, in the same trace as
+the approval turn). **Filter the traces by that tag.** In the Langfuse web app: Tracing, Filter, Tags, pick
+`park:P-XXXXXXXX`. From the VM, use the v2 observations call from [Read traces](#read-traces) with
+`fields=core,basic,trace_context` and a filter on the column `traceTags`, operator `any of`, value
+`["park:P-XXXXXXXX"]` (the `filter` parameter is a JSON list). The park id comes from the ledger or the approval
+message. Traces from before the deploy have no such tag: search them by the park id in the text.
+
 ### Secret scan (how it was done, and how to repeat it)
 
 Full capture means a secret that reaches the model or a tool result would also reach Langfuse, so the traces were
@@ -729,19 +825,21 @@ Expect exactly one kind of hit: the public key in `scope.attributes.public_key`.
 ### Turn it off
 
 1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
-2. `hermes plugins disable langfuse`, then restart `hermes-gateway`. Nothing is sent after the restart.
+2. `hermes plugins disable tapdash-langfuse`, then restart `hermes-gateway`. Nothing is sent after the restart.
    Traces already sent stay in Langfuse until its 30-day window on the free plan has passed.
 
-Leave `hermes_plugins.langfuse.on_pre_tool_call` in `observer_hooks` for now: a listed hook that is not loaded does no
-harm. But **do not update or reinstall the plugin while it is enabled**, and never enable an updated plugin before its
-hook has been reviewed: the name stays listed, so a changed hook would be allowed silently at the next restart. See
-[When the plugin changes](#when-the-plugin-changes).
+Leave `hermes_plugins.tapdash_langfuse.on_pre_tool_call` in `observer_hooks` for now: a listed hook that is not loaded
+does no harm. But **do not change the plugin's code while it is enabled** without the review in
+[When the plugin changes](#when-the-plugin-changes), and never enable a changed plugin before its hook has been
+reviewed: the name stays listed, so a changed hook would be allowed silently at the next restart. To go back to the
+unpatched catalog plugin instead of switching tracing off, use the rollback in
+[Switch to the patched plugin](#switch-to-the-patched-plugin-deploy).
 
 To remove it for good, **in this order**:
 
 1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
-2. `hermes plugins disable langfuse` (or remove the plugin), then restart `hermes-gateway`. The plugin is no longer loaded.
-3. Only now take `hermes_plugins.langfuse.on_pre_tool_call` out of `observer_hooks` (and its row in
+2. `hermes plugins disable tapdash-langfuse` (or remove the plugin), then restart `hermes-gateway`. The plugin is no longer loaded.
+3. Only now take `hermes_plugins.tapdash_langfuse.on_pre_tool_call` out of `observer_hooks` (and its row in
    [Hooks reviewed so far](#hooks-reviewed-so-far)). Check the ledger again, then restart `hermes-gateway` again.
 4. Delete the two key lines from `~/.hermes/.env` and revoke the key pair in Langfuse.
 
@@ -764,22 +862,24 @@ hook](#allow-another-hook-observer_hooks)).
 
 ### When the plugin changes
 
-The hook is listed in `observer_hooks` because of the code that was read: v2.0.0 at commit `c2a9596`. The listing is by
-name only, so an updated plugin whose hook now does something else would be allowed silently at the next gateway restart
-(a crash restart is enough). So **never update or reinstall the plugin while it is enabled.** In this order:
+The hook is listed in `observer_hooks` because of the code that was read: upstream v2.0.0 at commit `c2a9596`, and our
+copy's `on_pre_tool_call`, which is byte-identical to it. The listing is by name only, so a changed hook that now does
+something else would be allowed silently at the next gateway restart (a crash restart is enough). Because the plugin
+is a symlink into the live clone, `git pull` in the live clone changes the code the next restart loads. So a change
+under `tracing/tapdash_langfuse/` goes live only like this:
 
-1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
-2. `hermes plugins disable langfuse`, then restart `hermes-gateway`. The plugin is no longer loaded; leave the
-   `observer_hooks` entry in place.
-3. Update the plugin and pin the new version and commit (for example `hermes plugins install langfuse --yes-deps
-   --no-enable`, then confirm the commit). Do not enable it.
-4. Read the new hook again (steps 2 and 3 of [Allow another hook](#allow-another-hook-observer_hooks)) and update its row
-   in [Hooks reviewed so far](#hooks-reviewed-so-far). If you cannot confirm it never returns `modify`, do not enable it:
-   take the entry out as in "remove for good" under [Turn it off](#turn-it-off). Also update the version in the root
-   [Built on](../../README.md#built-on) table.
-5. Check the ledger again, `hermes plugins enable langfuse`, restart `hermes-gateway`, then run
-   [Check it works](#check-it-works) (the `durable-park loaded` line must still count 2 observer hooks and show no
-   `foreign pre_tool_call` line).
+1. In your worktree: `bash tracing/run_tests.sh` passes, and `on_pre_tool_call` still matches the upstream function
+   (the diff in step 1 of the [deploy](#switch-to-the-patched-plugin-deploy) prints nothing), or the changed hook is
+   read again (steps 2 and 3 of [Allow another hook](#allow-another-hook-observer_hooks)). If you cannot confirm it
+   never returns `modify`, do not merge it. List the change in `PATCHES.md`.
+2. Update its row in [Hooks reviewed so far](#hooks-reviewed-so-far) (a new date and what was read), and, for a new
+   upstream version, the version in the root [Built on](../../README.md#built-on) table.
+3. Only then pull into the live clone. Check that no row is `parked`, `approved` or `executing`
+   ([health check](#health-check)), restart `hermes-gateway`, then run [Check it works](#check-it-works) (the
+   `durable-park loaded` line must still count 2 observer hooks and show no `foreign pre_tool_call` line).
+
+To take a newer upstream version: copy it over the vendored files, re-apply the changes listed in `PATCHES.md`, and
+do steps 1 to 3. Never use `hermes plugins install langfuse` to update: it would change the catalog copy, not ours.
 
 After a **Hermes upgrade**, also set `HERMES_LANGFUSE_RELEASE` to the new version (`hermes-v<version>`) and restart, so
 new traces carry the right release.
@@ -990,6 +1090,10 @@ Several secrets were pasted into chat during testing (approved for testing only)
   nothing restarts them at boot until you do this. The config rollback does not undo the venv switch: the install's
   `facts.json` now points at venv `58c7a333` (the Teams packages) and the old venv `e74ec07b` still exists. Only with nothing `parked`, `approved` or
   `executing`. Plan: [docs/plans/2026-10-20-one-agent-merge.md](../../docs/plans/2026-10-20-one-agent-merge.md).
+- **The patched Langfuse plugin (once deployed)**: go back to the unpatched catalog plugin with the rollback in
+  [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy): enable `langfuse`, disable `tapdash-langfuse`,
+  and make `observer_hooks` match the plugin that is loaded, in one restart with nothing `parked`, `approved` or
+  `executing`.
 - **Code**: `git revert <commit>` in the clone, push, then make it live as in [Deploy a change](#deploy-a-change).
   For the bridge and receiver that includes copying the reverted files to `/opt/durable-park` again: the root
   copies do not change by themselves.
