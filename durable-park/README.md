@@ -24,8 +24,8 @@ row" rule applies.
 **Known risk, narrowed on 2026-10-22:** `hermes` no longer has sudo (Clean Setup Phase 1), so a hijacked agent that
 found a way to run code as that user can no longer read `/etc/durable-park/` (the QuickBooks credentials) through sudo,
 or change `/opt/durable-park`. What remains: the ledger and the plugin data are still owned by `hermes`, so such an agent
-could forge ledger rows; the secrets `hermes` reads by design (`instance_token`, `audit_key`, `wake_secret`, `bridge_secret`) stay
-readable; and an agent with a file or terminal tool could still reach everything `hermes` owns. durable-park
+could forge ledger rows; the secrets `hermes` reads by design (`instance_token`, `audit_key`, `wake_secret`) stay
+readable (`bridge_secret` is root-only since the bridge got its own user, `dpbridge`, on 2026-10-22); and an agent with a file or terminal tool could still reach everything `hermes` owns. durable-park
 therefore is not a full security boundary yet: the lockdown (no file, terminal or code tools) must stay in place until Clean
 Setup Phase 2 (a separate ledger owner, spec §4.5). Yaakov accepted the earlier, wider risk on 2026-10-20 for the QuickBooks
 sandbox exploration phase. The open items are in the [backlog](docs/backlog.md#before-real-books), before any real books.

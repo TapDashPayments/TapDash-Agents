@@ -30,8 +30,9 @@ the root README's [Built on](../../README.md#built-on) table.
 How strong is the first guarantee today? **On proto-agents it is not yet a full security boundary.** The plugin and the
 ledger trust the user `hermes`, which is also the user the agent runs as. The bridge no longer trusts the ledger: it
 keeps no state and asks withHuman with a read-only organization key, so a forged ledger row cannot get a gateway
-call approved. It still runs as `hermes` (the key `audit_key` is one of the secrets `hermes` reads by design), but from a
-root-owned copy that `hermes` cannot change, since it has no sudo (Clean Setup Phase 1). The agent has **no file or
+call approved. It no longer runs as `hermes` either: it runs as its own system user `dpbridge`, from a root-owned copy
+that `hermes` cannot change (no sudo since Clean Setup Phase 1), and systemd holds its port, so nothing the bot runs can
+kill the bridge or answer "approve" in its place ([section 6](#6-where-everything-runs)). The agent has **no file or
 terminal tools** (the v1 tool lockdown, `deploy/hermes_tool_policy.py`); that holds the first guarantee against an
 agent that goes looking for a way round it. Since Clean Setup Phase 1 (2026-10-22 02:22 UTC) `hermes` has no sudo, so
 the root-owned parts (`/opt/durable-park`, `tunnel.env`, the other root-only secrets) are out of its reach. The ledger is
@@ -55,9 +56,17 @@ What that means today:
   `sudo -u hermes sudo -n true` is refused). If the agent ever got a terminal or file tool (a configuration change,
   a Hermes upgrade, a hijack), it still could **not** read the QuickBooks client secret, the refresh token or the
   withHuman tunnel token in `tunnel.env` (root-only), or change the code in `/opt/durable-park`. It **could** still read
-  the secrets `hermes` uses by design (`instance_token`, `audit_key`, `wake_secret`, `bridge_secret`), and, because the
+  the secrets `hermes` uses by design (`instance_token`, `audit_key`, `wake_secret`), and, because the
   ledger is still owned by `hermes` (Phase 2 not done), forge ledger rows (they no longer get a gateway call approved:
   the bridge checks withHuman). That is why file, terminal and code tools stay off until Phase 2.
+- The gateway bridge no longer shares the bot's user (since 2026-10-22). withHuman does not sign the bridge's
+  "approve" or "human" answers, so whoever answers on `127.0.0.1:8791` decides. The bridge runs as `dpbridge` (no login,
+  no home, no group but its own), so the bot cannot signal it or read its memory; the systemd socket unit
+  `durable-park-bridge.socket` holds the port at all times, so the bot cannot bind it while the bridge restarts
+  (`Restart=always`); `bridge_secret` is `root:root 0600`, so the bot cannot read the key that signs withHuman's
+  deliveries. `audit_key` stays readable by `hermes` (the plugin names the decider with it); it is read-only, so it
+  lets a hijacked agent list requests, never approve one. `deploy/bridge_check.py` verifies all of this at every deploy
+  and the deploy stops if it fails.
 - Even so, durable-park asks withHuman about every tool call except `parked_action_execute`, `clarify` and the two
   read-only Tool Search catalog tools (`tool_search`, `tool_describe`, [section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)), and
   withHuman's pipeline decides which need a person; with the lockdown the only non-QuickBooks tool the agent reaches
@@ -102,7 +111,7 @@ flowchart LR
     bstatus[("breaker_status.json")]
     route["Hermes webhook route<br/>127.0.0.1:8644"]
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
-    bridge["bridge<br/>127.0.0.1:8791 - user hermes<br/>keeps no state"]
+    bridge["bridge<br/>127.0.0.1:8791 (held by systemd) - user dpbridge<br/>keeps no state"]
     sweep["sweep<br/>cron every 5 min"]
     tunnel["wh-tunnel container<br/>QuickBooks MCP server"]
     funnelA{{"Funnel /aap/events"}}
@@ -155,7 +164,8 @@ flowchart LR
 | approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key), and one shared gate that is rebuilt when the token file changes (the replaced gate's HTTP client is closed one rebuild later, as a call may still be using it). |
 | breaker | `plugin/durable_park/breaker.py` | Circuit breaker for withHuman outages: after 3 consecutive errors it stays open for 30 s (calls are refused without asking), then lets calls through again until an outcome is recorded; a failure re-opens, a success closes. It records open/close in `breaker_status.json` next to the ledger (written only on a change); it never calls withHuman itself. Started with a status file that still says open (a restart during an outage), it starts open but lets calls through at once, so the first success writes the close. |
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
-| bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. |
+| bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). |
+| bridge check | `deploy/bridge_check.py` | Read-only isolation check, run as root by `configure_hermes.sh` right after the bridge answers 401 (the deploy stops if it fails) and by hand ([runbook](runbook.md#health-check)). Seven checks: the socket unit is active and listens on exactly `127.0.0.1:8791`; the service is active and its main process runs as `dpbridge`; only systemd and that process hold the port; no other process runs `bridge.app`; no user-level `durable-park-bridge*` unit exists for any user; `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; `bridge_secret` is `root:root 0600` (stat only, never read). |
 | sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, and once each when withHuman becomes unreachable (breaker open) and answers again. Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
 
 ### Plugin settings
@@ -170,7 +180,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
-| `audit_key_file` | `/etc/durable-park/audit_key` | Optional for the plugin (the bridge needs the same file). A withHuman org API key with `audit.read`, `request.read` and `request.read.unrouted` and nothing else; the plugin only uses `audit.read`. Read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
+| `audit_key_file` | `/etc/durable-park/audit_key` | Optional for the plugin (the bridge needs the same key: systemd hands it a private copy when the bridge starts, so a rotation also needs `sudo systemctl restart durable-park-bridge`). A withHuman org API key with `audit.read`, `request.read` and `request.read.unrouted` and nothing else; the plugin only uses `audit.read`. Read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
 | `audit_base_url` | `https://app.withhuman.ai` | Where that audit lookup (`GET /api/v1/audit`) goes. A bad `audit_*` setting (not a string, empty, a path that cannot be resolved) only switches the name off with a warning in the log; unlike the other settings it never refuses tool calls. |
 | `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json`, `formcheck_status.json` and `plugin_load.json` are written next to it. |
 | `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
@@ -551,6 +561,7 @@ and re-run against the real code on the VM (2026-10-21):
 | Tool returns a clear error | `failed`, error stored; nothing to check. | Fix and ask again |
 | A decision's wake is lost (Hermes down, wake refused) | The sweep re-posts wakes every 5 minutes until the chat is told. | Nobody |
 | Bridge cannot confirm the gateway call (no matching consumed park, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
+| The bridge process dies or is restarted | systemd keeps listening on `127.0.0.1:8791` (the socket unit holds the port) and restarts the service after 1 s (`Restart=always`); a delivery meanwhile waits in the socket's backlog or times out, and withHuman asks a person instead. Nobody else can bind the port and answer. | Nobody; check the unit if it keeps restarting ([runbook](runbook.md#health-check)) |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
 | Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
@@ -560,7 +571,10 @@ and re-run against the real code on the VM (2026-10-21):
 | Another park is still waiting in the chat | A new call that withHuman sends to a person is blocked: "already waiting", and its request is cancelled. Calls withHuman answers at once still run or are refused. A park can wait up to 168 h. | Decide the waiting one |
 
 Known gaps (see the [backlog](backlog.md)): an inject Hermes accepted but
-dropped is never retried.
+dropped is never retried. `bridge_check.py` is a deploy-time check, not a monitor: its process scan (no other process
+runs `bridge.app`) is a heuristic that can raise a false alarm, it does not look at the running bridge's supplementary
+groups or at the permissions of `/etc/durable-park` itself, and a change to the socket unit takes effect only after
+`sudo systemctl restart durable-park-bridge.socket` (the deploy script does not restart a running socket).
 
 ## 6. Where everything runs
 
@@ -571,10 +585,19 @@ dropped is never retried.
 | Teams tunnel | `ubuntu` | Microsoft devtunnel `proto-agents-bot`, forwards to the gateway's `127.0.0.1:3978` | outbound only | systemd user unit `devtunnel-hermes` (user `ubuntu`) |
 | Claude connector "Proto-Agents" | `ubuntu` (the admin; was `hermes` until 2026-10-22) | `/home/ubuntu/hermes-shell-mcp` (shell access for Claude on this VM; reaches Hermes with `sudo -u hermes ...`) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
-| bridge | `hermes` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` | system unit `durable-park-bridge` |
+| bridge | `dpbridge` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` (the socket is held by systemd, not by the bridge process) | system units `durable-park-bridge.socket` (holds the port) and `durable-park-bridge` (`Restart=always`) |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
 | tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` | outbound only | Docker, container `wh-tunnel` |
 | Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
+
+System users behind that table:
+
+| User | What runs as it | Groups that matter |
+|---|---|---|
+| `hermes` | the agent, the plugin, the sweep, the Hermes user units | `dpwake` (reads `wake_secret`); no sudo |
+| `aaprecv` | the receiver | `dpwake` |
+| `dpbridge` | the gateway bridge | its own group only; no login, no home, shell `nologin`; deliberately not in `dpwake` or `hermes` (`bridge_check.py` checks it) |
+| `ubuntu` | the admin and the Claude connector | passwordless sudo |
 
 - The git clone is `/home/hermes/tapdash-agents`; `/home/hermes/durable-park` is a link to its `durable-park/`
   folder, so older paths keep working.
@@ -605,12 +628,14 @@ the repo) and never printed by any script.
 | `instance_token` | 0640 root:hermes | plugin, Hermes (`wh` MCP server via the secrets helper) | withHuman instance credential: approval requests and the gateway |
 | `receiver.json` | 0600 aaprecv | receiver | withHuman webhook signing secret + the receiver's own credential copy |
 | `wake_secret` | 0640 root:dpwake | receiver, sweep, Hermes (via the secrets helper) | signs the local wake to Hermes |
-| `bridge_secret` | 0640 root:dpwake | bridge | verifies withHuman's pipeline webhook signature |
+| `bridge_secret` | 0600 root:root | bridge (systemd reads it as root and hands the bridge a private copy: `LoadCredential`) | verifies withHuman's pipeline webhook signature. The bot cannot read it |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
-| `audit_key` | 0640 root:hermes | bridge (every gateway call), plugin (optional) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
+| `audit_key` | 0640 root:hermes | bridge (every gateway call; systemd copies it when the bridge starts: `LoadCredential`), plugin (optional; reads the file) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
 
-Since Clean Setup Phase 1 (2026-10-22) the user `hermes` has no sudo: an agent that got a terminal or file tool could still read the files that `hermes` reads by design (`instance_token`, `audit_key`, and `wake_secret` and `bridge_secret` through group `dpwake`), but not `tunnel.env` or `provisioner_token` (root-only) or `receiver.json` (`aaprecv`). The ledger is still `hermes`-owned until Phase 2, and the v1 lockdown withholds those tools today. See backlog items 0 and 7.
+Since Clean Setup Phase 1 (2026-10-22) the user `hermes` has no sudo: an agent that got a terminal or file tool could still read the files that `hermes` reads by design (`instance_token`, `audit_key`, and `wake_secret` through group `dpwake`), but not `tunnel.env`, `provisioner_token` or `bridge_secret` (root-only) or `receiver.json` (`aaprecv`). The ledger is still `hermes`-owned until Phase 2, and the v1 lockdown withholds those tools today. See backlog items 0 and 7.
+
+`bridge_secret` and `audit_key` reach the bridge as systemd credentials (`LoadCredential`: private copies made when the service starts, in a directory only `dpbridge` can read). A rotation of either therefore takes effect after `sudo systemctl restart durable-park-bridge`; the socket unit keeps the port during the restart.
 
 Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before-production).
 
