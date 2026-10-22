@@ -269,3 +269,175 @@ def test_list_error_str_is_its_code():
     err = ListError("no-key")
     assert err.code == "no-key"
     assert str(err) == "no-key"
+
+
+# --- optional q ------------------------------------------------------------------------------------------------
+
+
+def test_q_is_omitted_entirely_when_none(key_file):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="hermes", q=None, limit=10)
+    (req,) = rec.requests
+    assert "q" not in req.url.params
+    assert dict(req.url.params) == {"agent_slug": "hermes", "limit": "10"}
+
+
+def test_q_is_omitted_when_not_passed_at_all(key_file):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="hermes")
+    assert "q" not in rec.requests[0].url.params
+
+
+def test_q_is_still_sent_when_given(key_file):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="hermes", q="create_payment")
+    assert rec.requests[0].url.params["q"] == "create_payment"
+
+
+# --- bounded body ----------------------------------------------------------------------------------------------
+
+MIB = 1024 * 1024
+CAP = 4 * MIB
+
+
+class Drip(httpx.SyncByteStream):
+    """A response body that yields ``chunks`` one by one, counting how many were handed out.
+
+    ``on_chunk`` runs just before each chunk is handed out (a test uses it to advance a fake clock)."""
+
+    def __init__(self, chunks, on_chunk=None):
+        self._chunks = chunks
+        self._on_chunk = on_chunk
+        self.yielded = 0
+
+    def __iter__(self):
+        for chunk in self._chunks:
+            if self._on_chunk is not None:
+                self._on_chunk()
+            self.yielded += 1
+            yield chunk
+
+    def close(self):
+        pass
+
+
+def json_body_of_size(size):
+    prefix, suffix = b'{"requests":[],"pad":"', b'"}'
+    body = prefix + b"x" * (size - len(prefix) - len(suffix)) + suffix
+    assert len(body) == size
+    return body
+
+
+def test_max_body_bytes_is_4_mib():
+    import bridge.whapi as whapi
+
+    assert whapi.MAX_BODY_BYTES == CAP
+
+
+def test_body_over_the_cap_raises_too_large_and_reading_stops(key_file):
+    drip = Drip([b"x" * MIB] * 10)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "too-large"
+    assert drip.yielded == 5  # the fifth 1 MiB chunk is the first to pass 4 MiB; the other five are never read
+
+
+def test_body_one_byte_over_the_cap_raises_too_large(key_file):
+    rec = Recorder(lambda request: httpx.Response(200, content=json_body_of_size(CAP + 1)))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "too-large"
+
+
+def test_body_exactly_at_the_cap_is_accepted(key_file):
+    body = json_body_of_size(CAP)
+    quarter = CAP // 4
+    drip = Drip([body[i:i + quarter] for i in range(0, CAP, quarter)])
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    assert make(key_file, rec).list(agent_slug="a", q="t") == []
+    assert drip.yielded == 4
+
+
+def test_non_200_body_is_not_read_at_all(key_file):
+    drip = Drip([b"x" * MIB] * 10)
+    rec = Recorder(lambda request: httpx.Response(500, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "http-500"
+    assert drip.yielded == 0
+
+
+# --- wall-clock deadline while reading -------------------------------------------------------------------------
+
+
+def test_slow_drip_past_the_deadline_raises_deadline_and_reading_stops(key_file):
+    clock = FakeClock(1000.0)
+
+    def tick():
+        clock.now += 0.4
+
+    drip = Drip([b"x" * 10] * 10, on_chunk=tick)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec, clock=clock).list(agent_slug="a", q="t", deadline=1001.0)
+    assert code_of(exc) == "deadline"
+    assert drip.yielded == 3  # 1000.4 and 1000.8 are inside the deadline; 1001.2 is past it
+
+
+def test_slow_drip_reaching_exactly_the_deadline_raises_deadline(key_file):
+    clock = FakeClock(1000.0)
+
+    def tick():
+        clock.now += 0.5
+
+    drip = Drip([b"x" * 10] * 10, on_chunk=tick)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec, clock=clock).list(agent_slug="a", q="t", deadline=1001.0)
+    assert code_of(exc) == "deadline"
+    assert drip.yielded == 2  # 1001.0 is not < 1001.0
+
+
+def test_slow_drip_without_a_deadline_is_bounded_by_the_per_call_timeout(key_file):
+    clock = FakeClock(1000.0)
+
+    def tick():
+        clock.now += 1.0
+
+    drip = Drip([b"x" * 10] * 10, on_chunk=tick)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec, per_call_timeout=3.0, clock=clock).list(agent_slug="a", q="t")
+    assert code_of(exc) == "deadline"
+    assert drip.yielded == 3  # 1003.0 is not < 1000.0 + 3.0
+
+
+def test_fast_body_inside_the_deadline_is_accepted(key_file):
+    clock = FakeClock(1000.0)
+
+    def tick():
+        clock.now += 0.1
+
+    body = json_body_of_size(100)
+    drip = Drip([body[:50], body[50:]], on_chunk=tick)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    assert make(key_file, rec, clock=clock).list(agent_slug="a", q="t", deadline=1001.0) == []
+
+
+# --- no environment trust --------------------------------------------------------------------------------------
+
+
+def test_client_is_built_with_trust_env_false(key_file, monkeypatch):
+    built = []
+    real_client = httpx.Client
+
+    class SpyClient(real_client):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(httpx, "Client", SpyClient)
+    make(key_file, Recorder()).list(agent_slug="a", q="t")
+    assert len(built) == 1
+    assert built[0].trust_env is False

@@ -9,6 +9,7 @@ caller turns it into "ask a human".
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -17,11 +18,12 @@ import httpx
 DEFAULT_API_BASE = "https://app.withhuman.ai/api/v1"
 DEFAULT_KEY_FILE = "/etc/durable-park/audit_key"
 MAX_LIMIT = 200
+MAX_BODY_BYTES = 4 * 1024 * 1024
 
 
 class ListError(Exception):
     """A listing failed. ``code`` is one of: ``no-key``, ``deadline``, ``http-<status>``, ``shape``,
-    ``transport``, ``bad-base-url``. It never carries the key, a URL or a response body."""
+    ``transport``, ``too-large``, ``bad-base-url``. It never carries the key, a URL or a response body."""
 
     def __init__(self, code: str):
         super().__init__(code)
@@ -51,27 +53,44 @@ class RequestLister:
             raise ListError("no-key")
         return key
 
-    def list(self, *, agent_slug: str, q: str, limit: int = 50, deadline: float | None = None) -> list:
+    def list(self, *, agent_slug: str, q: str | None = None, limit: int = 50,
+             deadline: float | None = None) -> list:
+        start = self._clock()
         timeout = self._per_call_timeout
         if deadline is not None:
-            remaining = deadline - self._clock()
+            remaining = deadline - start
             if remaining <= 0:
                 raise ListError("deadline")
             timeout = min(timeout, remaining)
+        # The wall-clock limit for the whole call, body included: the caller's deadline, else start + timeout.
+        limit_at = deadline if deadline is not None else start + self._per_call_timeout
         key = self._read_key()
-        params = {"agent_slug": agent_slug, "q": q, "limit": max(1, min(MAX_LIMIT, int(limit)))}
+        params = {"agent_slug": agent_slug, "limit": max(1, min(MAX_LIMIT, int(limit)))}
+        if q is not None:
+            params["q"] = q
         headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
         try:
-            with httpx.Client(transport=self._transport, follow_redirects=False) as client:
-                response = client.get(f"{self._base_url}/requests", params=params, headers=headers,
-                                      timeout=timeout)
+            with httpx.Client(transport=self._transport, follow_redirects=False, trust_env=False) as client:
+                with client.stream("GET", f"{self._base_url}/requests", params=params, headers=headers,
+                                   timeout=timeout) as response:
+                    if response.status_code != 200:
+                        raise ListError(f"http-{response.status_code}")
+                    chunks = []
+                    size = 0
+                    for chunk in response.iter_bytes():
+                        size += len(chunk)
+                        if size > MAX_BODY_BYTES:
+                            raise ListError("too-large")
+                        chunks.append(chunk)
+                        if not self._clock() < limit_at:
+                            raise ListError("deadline")
+        except ListError:
+            raise
         except Exception:  # any httpx (or lower-level) failure; its text may echo the request, so drop it
             raise ListError("transport") from None
-        if response.status_code != 200:
-            raise ListError(f"http-{response.status_code}")
         try:
-            body = response.json()
-        except ValueError:
+            body = json.loads(b"".join(chunks))
+        except ValueError:  # includes UnicodeDecodeError and JSONDecodeError
             raise ListError("shape") from None
         requests = body.get("requests") if isinstance(body, dict) else None
         if not isinstance(requests, list):
