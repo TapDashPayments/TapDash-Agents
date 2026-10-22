@@ -73,6 +73,8 @@ Assumed (not stated; Yaakov confirms or corrects):
 
 ### 4.1 Clean Setup Phase 1 — users, connector, sudo, SSH
 
+> **Status (2026-10-22 02:22 UTC, 2026-10-21 10:22 PM ET): DONE** (the docs update in step 9 is in the same change as this note). Still open from this phase: restrict Tailscale SSH to `ubuntu` in the Tailscale admin console (see "Not in this phase" below), and the optional Hermes dashboard login rotation. Record: [acceptance note](../../durable-park/docs/acceptance-2026-10-21-ask-every-call.md#note-2026-10-22-clean-setup-phase-1-done-rows-1-to-5). Phase 2 (§4.5) is not started.
+
 Goal: the agent's user `hermes` has no root path; `ubuntu` is the admin; nothing the agent runs changes.
 
 | Step | What | Exact place |

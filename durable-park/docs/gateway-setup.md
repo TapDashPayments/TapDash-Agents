@@ -1,8 +1,8 @@
 # QuickBooks behind the withHuman gateway (tunnel)
 
 By design the agent does not hold QuickBooks credentials (the v1 tool lockdown, re-applied 2026-10-21 03:16 UTC, enforces it as a
-configuration guard; it is not a permission boundary, because `hermes` has passwordless sudo and the file
-`/etc/durable-park/tunnel.env` is readable with it; see [architecture](architecture.md#the-three-guarantees)). A withHuman **tunnel** container
+configuration guard; since Clean Setup Phase 1 (2026-10-22) `hermes` has no sudo and cannot read the root-only
+`/etc/durable-park/tunnel.env`, but the ledger is still `hermes`-owned until Phase 2, so it is not yet a full permission boundary; see [architecture](architecture.md#the-three-guarantees)). A withHuman **tunnel** container
 (`wh-tunnel`) runs on the VM, makes one outbound HTTPS connection to
 `app.withhuman.ai`, and starts the Intuit QuickBooks MCP server as a child
 process. Every call goes through the withHuman approval pipeline first.
@@ -16,7 +16,7 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
 | Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` |
-| Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` |
+| Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
 asking you to upgrade"). If that happens: look up the newest tag at
