@@ -200,6 +200,8 @@ UNKNOWN_ERRORS = {
 # A timeout is still ``unknown`` (the write may have landed), but the bot is told so in plain words.
 TIMEOUT_ERRORS = {
     "mcp timeout": {"error": "MCP call failed: TimeoutError: tools/call create_payment timed out after 120s"},
+    # the exact text from the live ledger note of 2026-10-22 (the $1 payment that withHuman asked about twice)
+    "live 300 s": {"error": "MCP call failed: TimeoutError: MCP call timed out after 300.0s (configured timeout: 300.0s)"},
     "tagged": {"error": "[TOOL_ERROR] MCP call failed: TimeoutError: tools/call create_payment timed out after 300s"},
     "respawn retry timed out": {"error": "MCP call failed after respawning the stdio subprocess for 'wh': "
                                          "TimeoutError: tools/call create_payment timed out after 300s"},

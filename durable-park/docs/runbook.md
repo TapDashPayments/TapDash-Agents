@@ -274,7 +274,8 @@ Alerts come from the sweep and arrive in the Telegram DM with the bot (the cron 
 
 `durable-park: P-XXXXXXXX outcome UNKNOWN - check <tool> in the sandbox before retrying`
 
-When the call timed out the message is different, so the bot can say so in plain words:
+The sweep alert above is the same for every `unknown`. The executor's own reply to the bot (what the bot reads
+in its chat, not the Telegram alert) differs when the call timed out, so the bot can say so in plain words:
 
 `durable-park: P-XXXXXXXX outcome UNKNOWN - <tool> did not finish in time. It may or may not have gone through. Check <tool> in the sandbox before trying again.`
 

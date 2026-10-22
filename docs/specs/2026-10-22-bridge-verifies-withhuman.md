@@ -59,7 +59,7 @@ human verdict; the `why` code is what the bridge's log says.
    `now - consumed_at <= WINDOW_SECONDS`,
    `P.context` is a dict without a truthy `args_truncated`, `P.arguments` is a dict and
    `args_digest(P.arguments) == digest`. `P.decision.expires_at` is never read (see the facts above).
-   The window is what retires a park: live parks consumed days ago still show `consumption.outcome` null,
+   The window is what retires a park: live parks consumed days ago still have no `consumption.outcome` (absent or null; the code uses `.get`),
    because the executor never reports an outcome (`gatecall.py` builds the gate with `report_outcomes=False`),
    so without the window a consumed park with no outcome would stay eligible for ever.
 3. Zero matches -> human (`no-approved-park`). More than one -> human (`ambiguous-park`).
