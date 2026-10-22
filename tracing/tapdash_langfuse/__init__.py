@@ -653,11 +653,11 @@ def _trace_name(platform: str) -> str:
 
 
 def _ascii_attr(value: Any) -> Optional[str]:
-    """TapDash: the stripped string when it is US-ASCII and 1-200 chars (Langfuse's userId limit), else None."""
+    """TapDash: the value itself when it is a US-ASCII string of 1-200 chars with no leading or trailing
+    whitespace (Langfuse's userId limit), else None. Never altered: an invalid value is left out (spec D2)."""
     if not isinstance(value, str):
         return None
-    value = value.strip()
-    if not value or len(value) > 200 or not value.isascii():
+    if not value or len(value) > 200 or not value.isascii() or value != value.strip():
         return None
     return value
 
@@ -671,10 +671,14 @@ _MAX_TURN_SENDERS = 256
 
 
 def _remember_sender(turn_key: str, sender_id: str, user_name: str) -> None:
-    if not turn_key or not (sender_id or user_name):
+    if not turn_key:
         return
     with _SENDER_LOCK:
+        # Always drop an older entry for this key, so a stale sender is never applied to a later turn that
+        # reuses the key and has no sender.
         _TURN_SENDERS.pop(turn_key, None)
+        if not (sender_id or user_name):
+            return
         _TURN_SENDERS[turn_key] = (sender_id or "", user_name or "")
         while len(_TURN_SENDERS) > _MAX_TURN_SENDERS:
             _TURN_SENDERS.pop(next(iter(_TURN_SENDERS)), None)

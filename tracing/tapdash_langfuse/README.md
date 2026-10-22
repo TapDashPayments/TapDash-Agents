@@ -122,7 +122,12 @@ matches the turn's user message, a tool call's arguments or a tool's result, the
   other entries still work.
 - At most 10 pattern tags per trace. A tag over 200 characters or not US-ASCII is skipped.
 - Only the first 200 000 characters of each scanned text are scanned.
-- With `HERMES_LANGFUSE_CAPTURE=metadata` no pattern tags are added (a tag would carry content).
+- With `HERMES_LANGFUSE_CAPTURE=metadata` no pattern tags are added (a tag would carry content). The trace
+  `userId` (chat sender id) and the root metadata `user_name` are still sent in that mode.
+- Pattern tags are taken from the raw text and are **not** passed through secret redaction, even in `sanitized`
+  mode (a tag carries the raw match). Only use patterns that match non-secret ids.
+- A pattern runs on up to 200 000 characters of each text, so it must avoid catastrophic backtracking (Python's
+  `re` has no timeout, and the user message is scanned while the plugin holds its state lock).
 - A tag found in a tool result is added to the trace while the turn is still running.
 
 ## Capture modes

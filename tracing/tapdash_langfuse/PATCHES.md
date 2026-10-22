@@ -27,10 +27,12 @@ Keep this list complete: every difference from upstream goes here, in the commit
      is opened while `_STATE_LOCK` is held, and that lock is not re-entrant.
    - `on_pre_llm_call` takes `sender_id` and, before its early return, remembers it with the chat user's name
      (`get_session_env("HERMES_SESSION_USER_NAME")`, imported inside the function so the plugin still loads
-     without the gateway), keyed by `turn_id or task_id`.
+     without the gateway), keyed by `turn_id or task_id`. A turn with no sender drops any older entry under that
+     key, so a stale sender is never applied to a later turn.
    - `_start_root_trace` pops that sender, names the root observation and the propagated `trace_name`
      `<platform>-turn` / `cron-run` / `hermes-turn` (it was always `Hermes turn`), adds `user_id` to the
-     propagated attributes only when the sender is US-ASCII and 1-200 chars, and adds `user_name` (cut to 200)
+     propagated attributes only when the sender is a US-ASCII string of 1-200 chars with no leading or trailing
+     whitespace (an invalid value is left out, never altered; `_ascii_attr`), and adds `user_name` (cut to 200)
      to the root metadata.
    - No upstream test asserted the old name `Hermes turn`, so no upstream test assertion changed.
    - New tests: `tests/test_tapdash_patches.py`.
@@ -44,7 +46,11 @@ Keep this list complete: every difference from upstream goes here, in the commit
    - Limits: at most 10 pattern tags per trace (`_MAX_PATTERN_TAGS`); a tag over 200 chars or not US-ASCII is
      skipped; only the first 200 000 chars of each scanned text (`_MAX_SCAN_CHARS`); non-string values are scanned
      as JSON (`json.dumps` semantics with `default=str`, but not ASCII-escaped, and stopped after 200 000 chars).
-   - `HERMES_LANGFUSE_CAPTURE=metadata`: no pattern tags (a tag would carry content).
+   - `HERMES_LANGFUSE_CAPTURE=metadata`: no pattern tags (a tag would carry content). `userId` and `user_name` are
+     still sent in that mode.
+   - Privacy and safety: pattern tags are taken from the raw text and are not passed through secret redaction, even
+     in `sanitized` mode, so only use patterns that match non-secret ids. Patterns run on up to 200 000 chars per
+     text and must avoid catastrophic backtracking (`re` has no timeout; the root scan runs under `_STATE_LOCK`).
    - Where scanning happens: `_start_root_trace` scans the last user message (the raw content, not the captured
      copy that `HERMES_LANGFUSE_MAX_CHARS` shortens) and puts the tags into the propagated tags before the root
      opens; `on_post_tool_call` scans `[args, result]` outside `_STATE_LOCK`, then adds the tags under it, if the
@@ -68,7 +74,7 @@ bash tracing/run_tests.sh            # as the hermes user on the test VM
 bash tracing/run_tests.sh -k attribution
 ```
 
-Expected today: `160 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
+Expected today: `161 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
 through Hermes's dependency installer, which drops the test path, so they cannot run from a checkout.
 
 ## Update procedure (taking a newer upstream)

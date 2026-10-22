@@ -122,7 +122,9 @@ def test_pop_sender_unknown_and_known(plugin):
 
 
 def test_ascii_attr(plugin):
-    assert plugin._ascii_attr("  abc  ") == "abc"
+    assert plugin._ascii_attr("123") == "123"
+    assert plugin._ascii_attr(" 123 ") is None  # never altered: a value with outer whitespace is left out
+    assert plugin._ascii_attr("123\n") is None
     assert plugin._ascii_attr("") is None
     assert plugin._ascii_attr("   ") is None
     assert plugin._ascii_attr(None) is None
@@ -130,6 +132,12 @@ def test_ascii_attr(plugin):
     assert plugin._ascii_attr("é") is None
     assert plugin._ascii_attr("a" * 200) == "a" * 200
     assert plugin._ascii_attr("a" * 201) is None
+
+
+def test_remember_empty_sender_drops_stale_entry(plugin):
+    plugin._remember_sender("k", "1", "A")
+    plugin._remember_sender("k", "", "")
+    assert plugin._pop_sender("k") == ("", "")
 
 
 # ---- HERMES_LANGFUSE_TAG_PATTERNS (spec D4-D6) ----

@@ -41,7 +41,7 @@ setting of Nous's `langfuse` plugin (v2.0.0 @ `c2a9596`) can fix:
 - **D7 — durable-park safety.** No durable-park code changes. `on_pre_tool_call` stays byte-identical to upstream;
   scanning happens in `on_post_tool_call` and at root start only. The observer name changes to
   `hermes_plugins.tapdash_langfuse.on_pre_tool_call`; it is re-reviewed and listed in `observer_hooks` (the old
-  `hermes_plugins.langfuse.on_pre_tool_call` entry is removed in the same restart that disables the catalog plugin).
+  `hermes_plugins.langfuse.on_pre_tool_call` entry is removed in a second, ledger-checked restart, after the catalog plugin has stopped loading; the new name is listed first, so there is no moment where durable-park would refuse calls; amended after final review).
 - **D8 — tests.** Upstream's suite plus new tests run on the VM with the Hermes environment's Python
   (`tracing/run_tests.sh`). Upstream's 4 `TestSystemPromptCrossesHookBoundary` tests are deselected: they run
   Hermes core's request builder, which reinstalls packages and re-executes the process, dropping the test path;
