@@ -999,3 +999,16 @@ def test_a_schema_too_complex_problem_has_its_own_alert_text(world, monkeypatch,
     write_lift(tmp_path, (LIFT_TOOL, "schema_too_complex", "params"))
     out, = runs(world, monkeypatch, capsys, 1)
     assert "complex" in out and LIFT_TOOL in out and "a note problem (" not in out
+
+
+def test_a_fifo_planted_as_a_marker_does_not_hang_the_sweep_and_is_alerted(world, monkeypatch, capsys, tmp_path):
+    import threading
+    os.mkfifo(tmp_path / "lift_status.unwritable.7")
+    outcome = []
+    thread = threading.Thread(target=lambda: outcome.append(world.main(monkeypatch)), daemon=True)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive() and outcome == [0]
+    out = capsys.readouterr().out
+    assert out.startswith("durable-park ALERT: lift problems could not be saved (not a regular file)")
+    assert len(out.splitlines()) == 1

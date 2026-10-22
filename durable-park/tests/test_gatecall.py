@@ -5,6 +5,7 @@ import logging
 import fcntl
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -1054,6 +1055,7 @@ def test_a_marker_stays_while_another_thread_still_has_entries_it_could_not_writ
 
 def test_a_complex_key_does_not_use_up_the_budget_of_its_sibling():
     schema = fan_out_schema()
+    schema["properties"]["a"] = schema["properties"]["params"]  # a listed key whose rules fan out
     schema["properties"]["b"] = {"type": "object", "properties": {"withhuman_context": {"type": "string"}}}
     args = {"a": {"withhuman_context": "x"}, "b": {"withhuman_context": "y"}}
     out, reports = lift_report(args, schema)
@@ -1103,3 +1105,49 @@ def test_a_lock_owned_by_someone_else_is_used_but_its_mode_is_left_alone(tmp_pat
     monkeypatch.setattr(os, "geteuid", lambda: os.stat(lock).st_uid + 1)  # as if another user created it
     LiftStatus(str(tmp_path / "lift_status.json")).record("t", "declared", "params")
     assert lock.stat().st_mode & 0o777 == 0o640 and (tmp_path / "lift_status.json").exists()
+
+
+# ---- third review: a planted FIFO must never hang a tool call or the sweep; unlisted keys judged order-free -------
+
+
+def returns_within(seconds, fn, *args):
+    """Run ``fn`` in a thread; True when it returned within ``seconds`` (a hang leaves the thread behind, daemon)."""
+    thread = threading.Thread(target=fn, args=args, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    return not thread.is_alive()
+
+
+def test_a_fifo_planted_at_the_marker_never_hangs_a_tool_call(tmp_path, caplog):
+    os.mkfifo(tmp_path / f"{MARKER}.me")  # nobody reads it: a plain open would block forever
+    block_lock(tmp_path)  # the report cannot be written, so the marker is attempted
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    with caplog.at_level(logging.WARNING, logger="durable_park"):
+        assert returns_within(0.5, status.record, "t", "declared", "a")
+        assert returns_within(0.5, status.record, "t", "lift_error", "b")
+    assert "could not write the lift unwritable marker" in caplog.text  # surfaced, not swallowed
+    assert stat.S_ISFIFO((tmp_path / f"{MARKER}.me").stat().st_mode)  # and never replaced or followed
+
+
+def test_a_fifo_planted_at_the_lock_never_hangs_a_tool_call_and_is_reported(tmp_path, caplog):
+    os.mkfifo(tmp_path / "lift_status.json.lock")
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    with caplog.at_level(logging.ERROR, logger="durable_park"):
+        assert returns_within(0.5, status.record, "t", "declared", "a")
+        assert returns_within(0.5, status.record, "t", "lift_error", "b")
+    assert not (tmp_path / "lift_status.json").exists()
+    (marker,) = markers(tmp_path)
+    assert (tmp_path / marker).read_text().split()[1] == "NotARegularFile"
+    assert "could not write lift_status.json (NotARegularFile)" in caplog.text
+
+
+def test_an_unlisted_key_is_judged_the_same_whatever_the_order_of_the_listed_ones():
+    complex_rules = fan_out_schema()["properties"]["params"]
+    plain_rules = {"type": "object", "properties": {"withhuman_context": {"type": "string"}}}
+    defs = fan_out_schema()["$defs"]
+    first = {"type": "object", "$defs": defs, "properties": {
+        "a": complex_rules, "b": plain_rules, "withhuman_context": {"type": "string"}}}
+    second = {"type": "object", "$defs": defs, "properties": {
+        "b": plain_rules, "a": complex_rules, "withhuman_context": {"type": "string"}}}
+    args = {"zz": {"withhuman_context": "x"}}
+    assert lift_report(args, first) == lift_report(args, second) == (args, [("declared", "zz", "")])

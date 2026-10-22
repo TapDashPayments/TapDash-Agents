@@ -38,6 +38,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 import sys
@@ -462,13 +463,22 @@ def _lift_unwritable_alert(ledger_path: str, now: datetime) -> None:
     for name in present:
         if name in alerted:
             continue
-        try:
-            with open(os.path.join(directory, name), encoding="utf-8", errors="replace") as handle:
-                text = handle.read(200)
-        except OSError:  # it is there (for example a directory) but unreadable: still an outage, error unknown
-            text = ""
-        parts = text.split()
-        error = parts[1] if len(parts) >= 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,59}", parts[1]) else "unknown error"
+        text = ""
+        error = None
+        try:  # never block (a planted FIFO), never follow a symlink, never read anything but a regular file
+            fd = os.open(os.path.join(directory, name), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_NOCTTY)
+            try:
+                if stat.S_ISREG(os.fstat(fd).st_mode):
+                    text = os.read(fd, 200).decode("utf-8", errors="replace")
+                else:
+                    error = "not a regular file"
+            finally:
+                os.close(fd)
+        except OSError:  # unreadable, or a symlink: still an outage, error unknown
+            pass
+        if error is None:
+            parts = text.split()
+            error = parts[1] if len(parts) >= 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,59}", parts[1]) else "unknown error"
         print(f"durable-park ALERT: lift problems could not be saved ({_clean(error, 60)}); the agent's note may "
               "be reaching servers unreported. Check the permissions of lift_status.json and its lock next to "
               "the ledger.", flush=True)

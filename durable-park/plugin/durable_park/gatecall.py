@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import copy
+import errno
 import fcntl
 import json
 import logging
@@ -233,8 +234,19 @@ def _key_declares(props: dict, key: Any, root: Any, budget: _Budget | None = Non
     when the budget ran out)."""
     if key in props:
         return _declares_context_in(props[key], root, budget=budget)
-    found = [_declares_context_in(rules, root, budget=budget) for name, rules in props.items() if name != CONTEXT_FIELD]
-    return True if True in found else (None if None in found else False)
+    unknown = False
+    for name, rules in props.items():
+        if name == CONTEXT_FIELD:
+            continue
+        own = _Budget() if budget is not None else None  # each sibling has its own budget: the order never matters
+        verdict = _declares_context_in(rules, root, budget=own)
+        if verdict is True:
+            return True
+        if verdict is None:
+            unknown = True
+            if own is not None and own.exhausted:
+                budget.exhausted = True
+    return None if unknown else False
 
 
 def lift_gateway_context(args: Any, schema: dict | None,
@@ -418,18 +430,30 @@ def _flush_at_exit(ref: "weakref.ReferenceType[LiftStatus]") -> None:
         status.flush()
 
 
+class NotARegularFile(OSError):
+    """Something other than a regular file sits where the report's lock or a marker belongs (a planted FIFO,
+    device or directory): it is never used."""
+
+
 def _open_shared(path: str, flags: int, mode: int) -> int:
     """Open ``path`` creating it with exactly ``mode`` (the umask does not narrow it): files that several users read
-    or write (the report's lock, the markers) must work for a process running as another user. A symlink at
-    ``path`` is never followed (the open fails), and only a regular file this process's user owns gets its mode
-    set: a file another user created keeps the mode they gave it."""
-    fd = os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW, mode)
+    or write (the report's lock, the markers) must work for a process running as another user. The open never
+    blocks (``O_NONBLOCK``: a FIFO nobody reads fails at once instead of hanging the tool call) and never follows a
+    symlink; anything but a regular file is refused (``NotARegularFile``). Only a regular file this process's user
+    owns gets its mode set: a file another user created keeps the mode they gave it."""
+    fd = os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY, mode)
     try:
         info = os.fstat(fd)
-        if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid():
-            os.fchmod(fd, mode)
-    except OSError:
-        pass
+        if not stat.S_ISREG(info.st_mode):
+            raise NotARegularFile(errno.EINVAL, "not a regular file", path)
+        if info.st_uid == os.geteuid():
+            try:
+                os.fchmod(fd, mode)
+            except OSError:
+                pass
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 
@@ -470,6 +494,7 @@ class LiftStatus:
         self._io = threading.Lock()  # one writing thread at a time in this process
         self._marker_lock = threading.Lock()  # a failure's marker and a success's cleanup never interleave
         self._fail_gen = 0  # counts failures: a success only clears the outage if none happened since it began
+        self._last_exc: BaseException | None = None  # the latest failure, for a marker written late by another thread
         self._pending: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._known: set[tuple[str, str, str, str]] = set()
         self._last_write: float | None = None
@@ -594,19 +619,30 @@ class LiftStatus:
         except OSError as exc:  # the marker then stays and the sweep keeps alerting: loud, not silent
             log.error("could not remove %s (%s)", os.path.basename(self.marker_path), type(exc).__name__)
 
-    def _failed(self, exc: BaseException) -> None:
-        """This process could not write: remember it and leave the marker (once per outage)."""
-        with self._marker_lock:
+    def _failed(self, exc: BaseException, deadline: float) -> None:
+        """This process could not write: remember it and leave the marker (once per outage). Waits for another
+        thread's marker work only until ``deadline`` (plus one retry tick); a marker not written now is written by
+        the next failure."""
+        with self._lock:
+            was_failed = self._write_failed
+            self._write_failed = True
+            self._fail_gen += 1  # a write that began before this failure must not end the outage
+            self._last_exc = exc
+            want = not self._marker_tried and bool(self._path)
+        if not was_failed:
+            log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
+        if not want:
+            return
+        if not self._marker_lock.acquire(timeout=max(LIFT_LOCK_RETRY_SECONDS, deadline - time.monotonic())):
+            return  # the thread busy with the marker writes it for this failure once it is done (see ``_flush``)
+        try:
             with self._lock:
-                was_failed = self._write_failed
-                self._write_failed = True
-                self._fail_gen += 1
-                write = not self._marker_tried and bool(self._path)
+                write = not self._marker_tried
                 self._marker_tried = True
-            if not was_failed:
-                log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
             if write:
                 self._write_marker_file(exc)
+        finally:
+            self._marker_lock.release()
 
     def _flush(self, deadline: float) -> None:
         if not self._path:
@@ -615,7 +651,7 @@ class LiftStatus:
                 self._pending.clear()
             return
         if not self._io.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            self._failed(LockTimeout())  # another thread is still writing; what this call added stays pending
+            self._failed(LockTimeout(), deadline)  # another thread is still writing; what this call added stays pending
             return
         try:
             with self._lock:
@@ -627,7 +663,7 @@ class LiftStatus:
                 with self._lock:
                     for ident, pending in batch.items():
                         self._add(ident, pending["delta"], pending["first_seen"], pending["last_seen"])
-                self._failed(exc)
+                self._failed(exc, deadline)
                 return
             with self._marker_lock:
                 with self._lock:
@@ -641,6 +677,13 @@ class LiftStatus:
                         self._marker_tried = False
                 if over:
                     self._clear_marker()
+                with self._lock:  # a failure that could not get its turn at the marker meanwhile: write it now
+                    late = self._fail_gen != generation and not self._marker_tried and self._last_exc is not None
+                    if late:
+                        self._marker_tried = True
+                        exc = self._last_exc
+                if late:
+                    self._write_marker_file(exc)
         finally:
             self._io.release()
 

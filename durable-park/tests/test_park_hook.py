@@ -2246,3 +2246,22 @@ def test_one_calls_many_problems_wait_for_the_report_lock_once(env):
         assert time.monotonic() - started < 0.6
     finally:
         holder.close()
+
+
+def test_a_fifo_planted_at_the_marker_never_hangs_two_tool_calls(env):
+    import threading
+    env.provider.auto = "approved"
+    os.mkfifo(env.tmp_path / f"lift_status.unwritable.{os.getpid()}")
+    (env.tmp_path / "lift_status.json.lock").mkdir()  # the report cannot be written, so the marker is attempted
+    hook = status_hook(env, schema_fn=lambda tool: DECLARES)
+    results = []
+
+    def one(call_id):
+        results.append(call(hook, GW_TOOL, args=copy.deepcopy(NESTED), tool_call_id=call_id))
+
+    for call_id in ("call-1", "call-2"):
+        thread = threading.Thread(target=one, args=(call_id,), daemon=True)
+        thread.start()
+        thread.join(0.5)
+        assert not thread.is_alive(), call_id
+    assert results == [None, None] and len(env.ledger.list_by_status("allowed")) == 2
