@@ -53,6 +53,22 @@ setting of Nous's `langfuse` plugin (v2.0.0 @ `c2a9596`) can fix:
   Hermes core's request builder, which reinstalls packages and re-executes the process, dropping the test path;
   they do not cover patched code. CI does not run these tests yet (backlog).
 
+## Tools offered on each LLM call
+
+Each "LLM call N" generation records which tools the model was offered, so a trace shows whether a tool was even
+available when the model did not use it (for example with Hermes Tool Search on, where only a small set is sent).
+`on_pre_llm_request` reads `request["body"]["tools"]` and adds two metadata keys: `tools_offered` (sorted names) and
+`tools_offered_count` (int).
+
+- Both request styles are read: OpenAI `{"type": "function", "function": {"name": ...}}` and Anthropic / flat
+  `{"name": ...}`. Anything else is skipped; if no name is found, both keys are left out. The code runs inside
+  `_failsafe`, so an odd shape can never break the generation.
+- Names only (never descriptions or schemas), so it is safe in every capture mode, `metadata` included.
+- At most 200 names, each cut to 64 characters. Order of steps: dedupe on the full name, count (`tools_offered_count`
+  is that distinct count, before the cap and the cut), cut to 64, dedupe again, sort, cap. The count can therefore be
+  larger than the list when the cap applies or when long names collapse after the cut.
+- Only `on_pre_llm_request` changes; `_start_child_observation`, `on_pre_tool_call` and `register` stay as they are.
+
 ## Out of scope
 
 Pull request to Nous; durable-park changes; an event for the approval decision itself; production.

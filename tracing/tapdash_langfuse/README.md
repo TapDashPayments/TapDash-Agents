@@ -94,6 +94,21 @@ session. Under a multiplexed gateway each profile traces with its own keys.
 Each turn is its own trace, so `HERMES_LANGFUSE_SAMPLE_RATE` samples individual turns, not whole
 conversations.
 
+### What each generation's metadata shows (TapDash patch)
+
+Besides upstream's keys (`provider`, `platform`, `api_mode`, `base_url`, `message_count`, `approx_input_tokens`,
+`system_prompt_chars`), every **LLM call N** generation carries two keys that are not in upstream:
+
+- `tools_offered`: the sorted names of the tools sent to the model in that API call (from the request body's
+  `tools`, OpenAI style `{"type": "function", "function": {"name": ...}}` or Anthropic style `{"name": ...}`).
+  At most 200 names, each cut to 64 characters, no duplicates. Names only, never descriptions or schemas, so it is
+  recorded in every capture mode, `metadata` included.
+- `tools_offered_count`: how many distinct tool names the request had, counted before the 200 cap and before the
+  64-character cut (250 tools give 200 names and a count of 250).
+
+If the request has no `tools`, or none with a usable name, both keys are left out. With Hermes Tool Search on, the
+list is the small set offered on that call; `tool_describe` calls already show what the model looked up.
+
 ## Optional tuning
 
 ```bash

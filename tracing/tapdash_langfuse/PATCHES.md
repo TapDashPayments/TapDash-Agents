@@ -81,6 +81,24 @@ Keep this list complete: every difference from upstream goes here, in the commit
    paragraph and `hermes plugins remove langfuse` are marked as not applying here; the stale "Hermes turn" text
    now names the per-platform trace names; the tuning section documents `HERMES_LANGFUSE_TAG_PATTERNS`, marked as a
    TapDash patch (with its JSON-escape limit).
+7. `__init__.py`: every "LLM call N" generation records which tools were offered to the model (TAP2-125). Not in
+   upstream.
+   - `on_pre_llm_request` reads `request["body"]["tools"]` (only when `request` and its `body` are dicts) through the
+     new helper `_tools_offered(body)`, called inside `_failsafe("tools offered")`, and adds two keys to the
+     generation's metadata: `tools_offered` (sorted list of tool names) and `tools_offered_count` (int).
+   - Shapes: OpenAI style `{"type": "function", "function": {"name": ...}}` and Anthropic / flat style
+     `{"name": ...}`. Any other entry (not a dict, no usable name, name not a non-empty string) is skipped. If `tools`
+     is missing, is not a list or yields no name, both keys are left out.
+   - Limits: at most 200 names (`_MAX_TOOLS_OFFERED`), each cut to 64 characters (`_MAX_TOOL_NAME_CHARS`).
+   - Order of steps (decision): (1) collect the distinct FULL names; (2) `tools_offered_count` = how many there are,
+     before any cut or cap (250 distinct tools give 200 names and count 250); (3) cut each name to 64 characters and
+     deduplicate again, so the list never holds a duplicate even when two long names share their first 64
+     characters; (4) sort; (5) keep the first 200. So the count can be higher than the list for two reasons: the cap,
+     and long names that collapse into one after the cut.
+   - Names only, never descriptions or schemas, so it is recorded in every capture mode (including `metadata`).
+   - `_start_child_observation`, `on_pre_tool_call` and `register` are unchanged.
+   - New: `_tools_offered`, `_MAX_TOOLS_OFFERED`, `_MAX_TOOL_NAME_CHARS` and tests in `tests/test_tools_offered.py`.
+   - Docs: README ("What each generation's metadata shows") and the design doc ("Tools offered on each LLM call").
 
 `on_pre_tool_call` is unchanged from upstream.
 
@@ -106,7 +124,7 @@ bash tracing/run_tests.sh            # as the hermes user on the test VM
 bash tracing/run_tests.sh -k attribution   # extra pytest arguments are added; the deselection below always stays
 ```
 
-Expected today: `168 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
+Expected today: `199 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
 through Hermes's dependency installer, which would run against the gateway's shared Hermes environment and drops the
 test path, so they cannot run from a checkout. The script deselects them with `--deselect` by node id, so a `-k` or
 `-m` of your own cannot bring them back. It runs under the Python of the Hermes environment the running gateway

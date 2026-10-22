@@ -1061,6 +1061,35 @@ def _emit_moa_reference_generations(state: TraceState, *, client: Langfuse, refe
                          cost_details=cost_details, metadata=metadata)
 
 
+_MAX_TOOLS_OFFERED = 200
+_MAX_TOOL_NAME_CHARS = 64
+
+
+def _tools_offered(body: Any) -> Optional[tuple[list[str], int]]:
+    """Tool NAMES offered to the model in a provider request body (TapDash patch), as ``(names, count)``.
+
+    Reads ``body["tools"]``: OpenAI style ``{"type": "function", "function": {"name": ...}}`` and Anthropic /
+    flat style ``{"name": ...}``; any other entry, and any name that is not a non-empty string, is skipped.
+    ``count`` is the number of distinct full names before the cap. Names are cut to 64 characters, deduplicated
+    again (two long names can share their first 64), sorted and capped at 200. ``None`` when there is nothing to
+    report. Names only, never descriptions or schemas, so this is safe in every capture mode."""
+    tools = body.get("tools") if isinstance(body, dict) else None
+    if not isinstance(tools, list):
+        return None
+    full_names: set[str] = set()
+    for entry in tools:
+        if not isinstance(entry, dict):
+            continue
+        function = entry.get("function")
+        name = function.get("name") if isinstance(function, dict) else entry.get("name")
+        if isinstance(name, str) and name:
+            full_names.add(name)
+    if not full_names:
+        return None
+    names = sorted({name[:_MAX_TOOL_NAME_CHARS] for name in full_names})
+    return names[:_MAX_TOOLS_OFFERED], len(full_names)
+
+
 def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str = "", model: str = "",
                        provider: str = "", base_url: str = "", api_mode: str = "", api_call_count: int = 0,
                        request_messages: Any = None, messages: Any = None, message_count: int = 0,
@@ -1076,6 +1105,12 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
     body_model = request["body"].get("model") if isinstance(request, dict) and isinstance(request.get("body"), dict) else None
     if isinstance(body_model, str) and body_model:
         model = body_model
+
+    tools_meta: dict = {}
+    with _failsafe("tools offered"):
+        offered = _tools_offered(request.get("body")) if isinstance(request, dict) else None
+        if offered:
+            tools_meta = {"tools_offered": offered[0], "tools_offered_count": offered[1]}
 
     input_messages = _coerce_request_messages(request_messages=request_messages, messages=messages,
                                               conversation_history=conversation_history, user_message=user_message)
@@ -1100,6 +1135,7 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
             "provider": provider, "platform": platform, "api_mode": api_mode, "base_url": safe_base_url,
             "message_count": message_count, "approx_input_tokens": approx_input_tokens,
             **({"system_prompt_chars": system_chars} if system_chars else {}),
+            **tools_meta,
         }
         state.generations[req_key] = _start_child_observation(
             state, name=f"LLM call {api_call_count}", as_type="generation",
