@@ -1362,12 +1362,14 @@ cd /home/hermes/tapdash-agents-wt/<name>/durable-park
 PY=$(python3 -I -c 'import glob,json,os; f=glob.glob(os.path.expanduser("~/.hermes/installs/*/facts.json"))[0]; print(json.load(open(f))["packages"]["venv"]["environment"]+"/bin/python")')
 SP=$(ls -d ~/tapdash-agents/durable-park/.venv/lib/python3*/site-packages); T=$HOME/scratch-pytest
 mkdir -p $T/libs && for m in _pytest pytest pluggy iniconfig pygments py.py; do ln -sfn $SP/$m $T/libs/$m; done
-PYTHONPATH=$HOME/.hermes/hermes-agent:$T/libs PATH=$HOME/stubbin:$PATH \
+mkdir -p $T/stubbin && printf '#!/bin/sh\nexit 1\n' > $T/stubbin/systemctl && chmod +x $T/stubbin/systemctl
+PYTHONPATH=$HOME/.hermes/hermes-agent:$T/libs PATH=$T/stubbin:$PATH \
   $PY -m pytest -q -W error -p no:cacheprovider --basetemp=$T/base tests/test_hermes_integration.py
 ```
 
-`/home/hermes/stubbin` is kept on purpose for this step (do not delete it). It holds a fake `systemctl` (a script that
-just exits 1), put first on the `PATH` so that the test cannot reach the real systemd units.
+The `stubbin` line makes a fake `systemctl` (a script that just exits 1) inside the scratch folder and puts it first on
+the `PATH`, so the test cannot reach the real systemd units. Nothing needs to exist beforehand (the old
+`/home/hermes/stubbin` was removed on 2026-10-22).
 
 It must pass with no skips (a skip means Hermes was not importable). A failure after an upgrade means Hermes changed
 what the hook receives: read [section 4b](architecture.md#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)
