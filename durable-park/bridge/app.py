@@ -4,9 +4,13 @@ When the model runs an approved parked call (``parked_action_execute``), the cal
 withHuman MCP gateway. The gateway's approval pipeline POSTs a signed ``request_approval_block.webhook``
 here and asks what to do with it. We answer:
 
-* ``approve`` exactly once, when the delivery is a live one for the configured agent and matches an
-  ``executing`` park (same Hermes tool name, exact same arguments) whose gateway pass is not used yet;
+* ``approve`` exactly once, when the delivery is a live one for the configured agent and withHuman itself
+  holds one approved, consumed park request for the same Hermes tool name and exact same arguments that no
+  other gateway request has used yet (the rule is ``bridge.verify.decide``; the questions go to withHuman
+  through ``bridge.whapi.RequestLister``);
 * ``human`` for everything else, including every error.
+
+The bridge keeps no state and never opens the ledger (a file the bot's Linux user can write).
 
 Signature scheme (withHuman webhook endpoints; confirmed against github.com/withHumanAI/withhuman
 ``internal/webhookdelivery``): header ``WithHuman-Signature: t=<unix>,v1=<hex>``; ``v1`` is HMAC-SHA256
@@ -14,7 +18,7 @@ over ``"<t>." + raw body`` keyed with the WHOLE ``whsec_...`` string as UTF-8 te
 timestamp tolerance 300 s either side; hex digest compared in constant time.
 
 The response JSON carries ONLY ``outcome`` and ``reason`` (withHuman rejects unknown fields).
-Argument values and the secret are never logged.
+Argument values, the signing secret and the organization key are never logged.
 """
 
 from __future__ import annotations
@@ -26,13 +30,10 @@ import json
 import logging
 import os
 import re
-import sqlite3
-import threading
 import time
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
@@ -40,7 +41,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from durable_park.ledger import Ledger, args_digest
+from bridge.verify import GatewayCall, decide, expected_park, hermes_tool_name  # noqa: F401 - re-exported
+from bridge.whapi import DEFAULT_API_BASE, DEFAULT_KEY_FILE, ListError, RequestLister
+from durable_park.ledger import args_digest
 
 log = logging.getLogger("durable_park.bridge")
 
@@ -53,43 +56,12 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8791
 ROUTE = "/wh/bridge"
 NO_PARK_REASON = "No approved park for this exact call"
-DELIVERIES_FILENAME = "bridge_deliveries.db"
+PARK_LIST_LIMIT = 50
+NEIGHBOUR_LIST_LIMIT = 200  # withHuman's maximum page; ``decide`` does not trust it: it wants an old item in the list
+LIST_BUDGET_SECONDS = 3.5  # both withHuman calls together; withHuman's webhook block gives up at 5 s
 
 _SIGNATURE_HEX = re.compile(r"[0-9a-fA-F]{64}")
 _UNSAFE_LOG_CHARS = re.compile(r"[^\w.:@/+-]")
-
-# Hermes MCP tool naming (hermes-agent tools/mcp_tool_schema.py, v0.22.2): every char outside
-# [A-Za-z0-9_] becomes "_" and names over 64 chars get a deterministic 8-hex sha256 suffix.
-# withHuman sends the downstream server's own tool name (e.g. "create-bill"), so the bridge must
-# build the name exactly the way Hermes registered it, or a parked call never matches.
-HERMES_MCP_SERVER = "wh"
-_HERMES_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
-_HERMES_NAME_MAX = 64
-_HERMES_NAME_HASH = 8
-
-
-def hermes_tool_name(server: str, tool: str) -> str:
-    """The name Hermes registers for gateway tool <server>__<tool> under MCP server `wh`."""
-    full = (f"mcp__{HERMES_MCP_SERVER}__{_HERMES_NAME_UNSAFE.sub('_', server)}"
-            f"__{_HERMES_NAME_UNSAFE.sub('_', tool)}")
-    if len(full) <= _HERMES_NAME_MAX:
-        return full
-    suffix = "_" + hashlib.sha256(full.encode("utf-8")).hexdigest()[:_HERMES_NAME_HASH]
-    return full[:_HERMES_NAME_MAX - len(suffix)] + suffix
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS deliveries (
-    idempotency_key TEXT PRIMARY KEY,
-    delivery_id     TEXT,
-    outcome         TEXT NOT NULL,
-    park_id         TEXT,
-    created_at      TEXT NOT NULL,
-    name            TEXT,
-    args_digest     TEXT,
-    agent_slug      TEXT
-);
-"""
-_BOUND_COLUMNS = ("name", "args_digest", "agent_slug")
 
 
 def verify_signature(header: str | None, body: bytes, secret: str | None, now: float) -> bool:
@@ -134,101 +106,13 @@ def _clean(value: Any, limit: int = 80) -> str:
     return _UNSAFE_LOG_CHARS.sub("?", text)[:limit] or "-"
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
-class _DeliveryStore:
-    """Persistent record keyed by the WithHuman idempotency key (stable across retries of one delivery).
-
-    Lives in its own sqlite file next to the ledger so the ledger schema is untouched. ``decide_once`` runs
-    the decision while holding the write lock, so concurrent retries of one key get one answer.
-    """
-
-    def __init__(self, path: str):
-        self.path = path
-        self._ready = False
-        self._lock = threading.Lock()
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        con = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
-        try:
-            con.execute("PRAGMA busy_timeout=5000")
-            con.execute("PRAGMA journal_mode=WAL")
-            if not self._ready:
-                con.executescript(_SCHEMA)
-                have = {r[1] for r in con.execute("PRAGMA table_info(deliveries)")}
-                for column in _BOUND_COLUMNS:  # a file from before the replay binding: old rows then mismatch
-                    if column not in have:
-                        con.execute(f"ALTER TABLE deliveries ADD COLUMN {column} TEXT")
-                self._ready = True
-            yield con
-        finally:
-            con.close()
-
-    def decide_once(self, key: str, delivery_id: str, name: str, digest: str, slug: str,
-                    decide: Callable[[], tuple[str, str | None]]) -> tuple[str, str | None, str]:
-        """Return ``(outcome, park_id, how)``; ``decide`` runs only for the first delivery of ``key``.
-
-        ``how`` is ``new``, ``replay`` or ``replay-mismatch``. A stored answer is replayed only when this
-        request's Hermes tool name, arguments digest and agent slug equal the ones stored with the key;
-        otherwise the answer is ``human`` and nothing is approved or recorded.
-        """
-        with self._lock, self._connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            try:
-                row = con.execute("SELECT outcome, park_id, name, args_digest, agent_slug FROM deliveries"
-                                  " WHERE idempotency_key=?", (key,)).fetchone()
-                if row is not None:
-                    con.execute("COMMIT")
-                    if (row[2], row[3], row[4]) != (name, digest, slug):
-                        return "human", None, "replay-mismatch"
-                    return row[0], row[1], "replay"
-                outcome, park_id = decide()
-                con.execute("INSERT INTO deliveries (idempotency_key, delivery_id, outcome, park_id, created_at,"
-                            " name, args_digest, agent_slug) VALUES (?,?,?,?,?,?,?,?)",
-                            (key, delivery_id, outcome, park_id, _now_iso(), name, digest, slug))
-                con.execute("COMMIT")
-                return outcome, park_id, "new"
-            except BaseException:
-                con.execute("ROLLBACK")
-                raise
-
-
-class LedgerMissing(Exception):
-    """The configured ledger file does not exist (the bridge never creates it)."""
-
-
 class Bridge:
-    def __init__(self, ledger_path: str, expected_agent: str, deliveries_path: str | None = None):
-        self.ledger_path = ledger_path
+    def __init__(self, expected_agent: str, lister: Any, clock: Callable[[], float] = time.time,
+                 monotonic: Callable[[], float] = time.monotonic):
         self.expected_agent = expected_agent
-        self._ledger: Ledger | None = None
-        self._ledger_lock = threading.Lock()
-        self._missing_logged = False
-        self._deliveries = _DeliveryStore(
-            deliveries_path or str(Path(ledger_path).expanduser().parent / DELIVERIES_FILENAME))
-
-    def _get_ledger(self) -> Ledger:
-        with self._ledger_lock:
-            if self._ledger is None:
-                path = Path(self.ledger_path).expanduser()
-                if not path.is_file():  # Ledger() would silently create an empty one at a wrong path
-                    if not self._missing_logged:
-                        self._missing_logged = True
-                        log.error("bridge ledger %s does not exist: answering human until it does", path)
-                    raise LedgerMissing(str(path))
-                self._missing_logged = False
-                self._ledger = Ledger(str(path))
-            return self._ledger
-
-    def _match(self, name: str, digest: str) -> tuple[str, str | None]:
-        ledger = self._get_ledger()
-        row = ledger.find_executing_match(name, digest)
-        if row is not None and ledger.mark_gateway_passed(row.park_id):
-            return "approve", row.park_id
-        return "human", None
+        self.lister = lister
+        self.clock = clock
+        self.monotonic = monotonic
 
     def process(self, raw: bytes, header_delivery_id: str | None, header_key: str | None) -> dict[str, str]:
         """Decide one signature-verified delivery. Never raises; every failure is ``human``."""
@@ -238,12 +122,11 @@ class Bridge:
         try:
             outcome, park_id, why = self._decide(raw, header_key, info)
         except Exception as exc:  # noqa: BLE001 - any bug must fall back to a human, never an approval
-            outcome, park_id, why = "human", None, (
-                "ledger-missing" if isinstance(exc, LedgerMissing) else f"error:{type(exc).__name__}")
+            outcome, park_id, why = "human", None, f"error:{type(exc).__name__}"
         log.info("bridge delivery=%s server=%s tool=%s arg_keys=[%s] digest=%s outcome=%s why=%s",
                  info["delivery"], info["server"], info["tool"], info["keys"], info["digest"], outcome, why)
         if outcome == "approve":
-            return {"outcome": "approve", "reason": f"Matches approved park {park_id}"}
+            return {"outcome": "approve", "reason": f"Matches approved park request {park_id}"}
         return {"outcome": "human", "reason": NO_PARK_REASON}
 
     def _decide(self, raw: bytes, header_key: str | None, info: dict[str, str]) -> tuple[str, str | None, str]:
@@ -278,17 +161,24 @@ class Bridge:
         body_key = payload.get("idempotency_key")
         if body_key is not None and body_key != header_key:
             return "human", None, "idempotency-mismatch"
-        name = hermes_tool_name(server, tool)
-        digest = info["digest"]
-        self._get_ledger()  # raises LedgerMissing before anything is recorded
-        outcome, park_id, how = self._deliveries.decide_once(
-            header_key, str(payload.get("delivery_id") or ""), name, digest, slug,
-            lambda: self._match(name, digest))
-        if how == "replay-mismatch":
-            return "human", None, "replay-mismatch"
-        if outcome == "approve":
-            return "approve", park_id, "replay" if how == "replay" else f"park={park_id}"
-        return "human", None, "replay" if how == "replay" else "no-park"
+        request_id = request.get("id")
+        if not isinstance(request_id, str) or not request_id:  # real deliveries always carry it; no id, no verdict
+            return "human", None, "no-request-id"
+        call = GatewayCall(request_id, server, tool, arguments, slug)
+        park_tool, _ = expected_park(server, tool)
+        deadline = self.monotonic() + LIST_BUDGET_SECONDS
+        try:
+            parks = self.lister.list(agent_slug=slug, q=park_tool, limit=PARK_LIST_LIMIT, deadline=deadline)
+            # every recent request of the agent, whatever its tool: Hermes folds "-" into "_" in tool names, so a
+            # filter on the tool name would miss a second use under the other spelling
+            neighbours = self.lister.list(agent_slug=slug, q=None, limit=NEIGHBOUR_LIST_LIMIT, deadline=deadline)
+        except ListError as exc:  # withHuman slow, unreachable or unhappy: a person decides
+            return "human", None, exc.code
+        now = datetime.fromtimestamp(self.clock(), timezone.utc)
+        verdict = decide(call, parks, neighbours, now)
+        if verdict.approve:
+            return "approve", verdict.park_request_id, verdict.why
+        return "human", None, verdict.why
 
 
 async def _read_body(request: Request) -> bytes | None:
@@ -305,10 +195,11 @@ async def _read_body(request: Request) -> bytes | None:
     return b"".join(chunks)
 
 
-def create_app(*, ledger_path: str, secret: str | None, expected_agent: str = DEFAULT_EXPECTED_AGENT,
-               deliveries_path: str | None = None, clock: Callable[[], float] = time.time) -> Starlette:
+def create_app(*, secret: str | None, lister: Any, expected_agent: str = DEFAULT_EXPECTED_AGENT,
+               clock: Callable[[], float] = time.time,
+               monotonic: Callable[[], float] = time.monotonic) -> Starlette:
     """Build the ASGI app. With ``secret=None`` it still starts but answers 401 to everything."""
-    bridge = Bridge(ledger_path, expected_agent, deliveries_path)
+    bridge = Bridge(expected_agent, lister, clock, monotonic)
 
     async def endpoint(request: Request) -> Response:
         raw = await _read_body(request)  # raw bytes first: the signature covers them exactly
@@ -327,30 +218,62 @@ def create_app(*, ledger_path: str, secret: str | None, expected_agent: str = DE
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="durable-park gateway bridge (withHuman webhook block)")
-    parser.add_argument("--ledger", default=os.environ.get("DURABLE_PARK_LEDGER"),
-                        help="path of the durable-park ledger.db (env DURABLE_PARK_LEDGER)")
     parser.add_argument("--secret-file",
                         default=os.environ.get("DURABLE_PARK_BRIDGE_SECRET_FILE", DEFAULT_SECRET_FILE),
                         help="file holding the withHuman whsec_ signing secret")
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--host", default=None, help=f"listen address (default {DEFAULT_HOST})")
+    parser.add_argument("--port", type=int, default=None, help=f"listen port (default {DEFAULT_PORT})")
+    parser.add_argument("--systemd-socket", action="store_true",
+                        default=os.environ.get("DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET") == "1",
+                        help="serve on the listening socket systemd passes as fd 3 (socket activation) instead of "
+                             "binding --host/--port (env DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET=1)")
     parser.add_argument("--expected-agent",
                         default=os.environ.get("DURABLE_PARK_EXPECTED_AGENT", DEFAULT_EXPECTED_AGENT),
                         help="agent slug a delivery must carry to be approvable")
-    ns = parser.parse_args(argv)
-    if not ns.ledger:
-        parser.error("--ledger (or env DURABLE_PARK_LEDGER) is required")
-    return ns
+    parser.add_argument("--api-base", default=os.environ.get("DURABLE_PARK_WH_API_BASE", DEFAULT_API_BASE),
+                        help="withHuman API base URL, https only (env DURABLE_PARK_WH_API_BASE)")
+    parser.add_argument("--key-file", default=os.environ.get("DURABLE_PARK_WH_KEY_FILE", DEFAULT_KEY_FILE),
+                        help="file holding the withHuman organization key, re-read on every call (under the "
+                             "systemd unit it is systemd's copy made at service start, so a rotated key needs "
+                             "a service restart) (env DURABLE_PARK_WH_KEY_FILE)")
+    args = parser.parse_args(argv)
+    if args.systemd_socket:
+        if args.host is not None or args.port is not None:
+            parser.error("--systemd-socket cannot be combined with --host or --port")
+    else:
+        args.host = DEFAULT_HOST if args.host is None else args.host
+        args.port = DEFAULT_PORT if args.port is None else args.port
+    return args
+
+
+def systemd_listen_fd(environ: Any, pid: int) -> int:
+    """The fd of the one socket systemd handed us (always 3), or exit: serve nothing without it.
+
+    systemd sets ``LISTEN_PID`` to the pid it started and ``LISTEN_FDS`` to the number of sockets, passed from
+    fd 3. A stale or inherited environment (another pid, another count) must never make us serve.
+    """
+    if environ.get("LISTEN_PID") != str(pid) or environ.get("LISTEN_FDS") != "1":
+        raise SystemExit("--systemd-socket: no socket from systemd (LISTEN_PID/LISTEN_FDS)")
+    return 3
 
 
 def main(argv: list[str] | None = None) -> None:
     import uvicorn
 
     args = parse_args(argv)
+    fd = systemd_listen_fd(os.environ, os.getpid()) if args.systemd_socket else None
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    app = create_app(ledger_path=args.ledger, secret=load_secret(args.secret_file),
-                     expected_agent=args.expected_agent)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)
+    try:
+        lister = RequestLister(args.api_base, args.key_file)
+    except ListError:  # never echo the URL (it could carry credentials) or read the key
+        raise SystemExit("bridge: --api-base (env DURABLE_PARK_WH_API_BASE) must be an https:// URL") from None
+    app = create_app(secret=load_secret(args.secret_file), lister=lister, expected_agent=args.expected_agent)
+    if fd is None:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)
+        return
+    for name in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):  # not for children of ours to inherit
+        os.environ.pop(name, None)
+    uvicorn.run(app, fd=fd, log_level="info", access_log=False)
 
 
 if __name__ == "__main__":

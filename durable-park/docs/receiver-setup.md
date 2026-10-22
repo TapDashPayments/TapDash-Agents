@@ -24,6 +24,16 @@ the wall clock) it re-posts a wake for every `parked` row and every decided row 
 about, so a lost wake costs at most one sweep interval. withHuman's own retries (up to 7 days) only cover the receiver being unreachable or
 answering non-2xx (e.g. 401 before provisioning).
 
+## System users and groups
+
+| User | Created by | What runs as it | Groups that matter |
+|---|---|---|---|
+| `aaprecv` | configure_hermes.sh | the receiver | `dpwake` (reads `wake_secret`) |
+| `dpbridge` | configure_hermes.sh (`useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --user-group`) | the gateway bridge | its own group only; deliberately not in `dpwake` or `hermes`, so the bot cannot signal it |
+| `hermes` | already on the VM | the agent, the plugin, the sweep | `dpwake` (reads `wake_secret`); no sudo |
+
+Group `dpwake` (members `hermes`, `aaprecv`) guards `wake_secret` only; the bridge does not use it.
+
 ## Files and owners
 
 | Path | Owner / mode | Written by | Holds |
@@ -32,12 +42,12 @@ answering non-2xx (e.g. 401 before provisioning).
 | `/etc/durable-park/provisioner_token` | root:root 0600 | an admin (Step 6) | `whp_` provisioner token; delete after provisioning |
 | `/etc/durable-park/receiver.json` | aaprecv:aaprecv 0600 | provision.py | signing secret, registration id, idempotency key, instance id, the receiver's own copy of the instance token |
 | `/etc/durable-park/instance_token` | root:hermes 0640 | provision.py | `whc_` instance credential (plugin gate + gateway) |
-| `/etc/durable-park/bridge_secret` | root:dpwake 0640 | an admin | the `durable-park-bridge` webhook endpoint's signing secret (bridge) |
-| `/etc/durable-park/audit_key` | root:hermes 0640 | an admin (optional, [runbook](runbook.md#name-the-decider-optional)) | withHuman org API key, `audit.read` only; names who decided |
+| `/etc/durable-park/bridge_secret` | root:root 0600 | an admin | the `durable-park-bridge` webhook endpoint's signing secret (bridge: systemd reads it as root and hands the bridge a private copy, `LoadCredential`; the bot cannot read it) |
+| `/etc/durable-park/audit_key` | root:hermes 0640 | an admin ([runbook](runbook.md#the-gateway-bridge)) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else: the bridge lists requests with it (systemd copies the file when the bridge starts: restart `durable-park-bridge` after a rotation), the plugin (optional) reads the file and names who decided |
 | `/etc/durable-park/tunnel.env` | root:root 0600 | an admin (`enter-secrets.sh`) | QuickBooks app keys, refresh token, realm id, withHuman tunnel token |
-| `/opt/durable-park/` | root 0755 | configure_hermes.sh | the receiver/bridge venv (`agentapprovalprotocol==0.3.3`, `uvicorn==0.54.0`, `starlette==1.9.0`); root-owned copies of `receiver/{app,wake_post,provision}.py`, `bridge/*.py` and `plugin/durable_park/*.py` (the bridge uses `ledger.py`); `libexec/hermes-secrets` |
-| `~hermes/.hermes/plugin-data/durable-park/ledger.db` | hermes | the plugin | the ledger (`plugins.entries.durable-park.settings.ledger_path`; the sweep and the bridge use the same path) |
-| `~hermes/.hermes/plugin-data/durable-park/bridge_deliveries.db` | hermes | the bridge | per-delivery answers, for withHuman's retries |
+| `/opt/durable-park/` | root 0755 | configure_hermes.sh | the receiver/bridge venv (`agentapprovalprotocol==0.3.3`, `uvicorn==0.54.0`, `starlette==1.9.0`, `httpx==0.28.1`: the bridge imports httpx directly); root-owned copies of `receiver/{app,wake_post,provision}.py`, `bridge/*.py` and `plugin/durable_park/*.py` (the bridge uses `ledger.py` for `args_digest` and `gatecall.py` for `gateway_slug`, never the ledger file); `deploy/bridge_check.py` (the bridge's isolation check); `libexec/hermes-secrets` |
+| `~hermes/.hermes/plugin-data/durable-park/ledger.db` | hermes | the plugin | the ledger (`plugins.entries.durable-park.settings.ledger_path`; the sweep uses the same path; the bridge does not use the ledger) |
+| `~hermes/.hermes/plugin-data/durable-park/bridge_deliveries.db` | hermes | nobody (the old bridge) | unused: the bridge keeps no state; delete it once the new bridge is live |
 | `~hermes/.hermes/plugin-data/durable-park/formcheck_status.json`, `formcheck_alert_state.json` | hermes | the gateway's form self-check / the sweep | form checker health and the alert state |
 | `~hermes/.hermes/scripts/durable_park_sweep.sh` | hermes 0750 | configure_hermes.sh | cron wrapper: `exec /usr/bin/python3 -I <repo>/scripts/durable_park_sweep.py --ledger <ledger> --wake-secret-file /etc/durable-park/wake_secret --retention-days 30` |
 
@@ -85,6 +95,13 @@ Idempotent. It never prints a secret. Before provisioning, the receiver runs and
 with 401 (no `receiver.json` yet). It restarts the hermes user manager once (so the gateway and its
 cron scripts get the new `dpwake` group), later runs only restart `hermes-gateway`.
 
+**Before the first run, store `bridge_secret` and `audit_key`.** The script stops at the very start, changing nothing,
+when `/etc/durable-park/bridge_secret` or `/etc/durable-park/audit_key` is missing or empty, because the bridge unit
+loads both as credentials and cannot start without them ([gateway setup](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline),
+[runbook](runbook.md#the-gateway-bridge)). It creates the bridge's user `dpbridge`, installs the bridge's socket and
+service units, and after the bridge answers `401` to an unsigned request it runs `deploy/bridge_check.py`; a FAIL stops
+the script before the tool policy and the gateway restart.
+
 Checks after a deploy:
 
 ```sh
@@ -92,6 +109,8 @@ curl -s http://127.0.0.1:8644/health                               # {"status": 
 grep "durable-park loaded" ~/.hermes/logs/agent.log | tail -1        # plugin loaded, ledger path
 sudo tailscale funnel status                                       # /aap/events proxy http://127.0.0.1:8790/aap/events
 systemctl status durable-park-receiver                             # active (running)
+systemctl status durable-park-bridge.socket durable-park-bridge    # both active; the socket lists 127.0.0.1:8791
+sudo python3 -I /opt/durable-park/deploy/bridge_check.py           # seven "ok:" lines, exit 0
 hermes cron list                                                   # durable-park-sweep, */5 * * * *, telegram
 ~/.hermes/scripts/durable_park_sweep.sh                            # prints nothing when all is well
 ```
@@ -148,8 +167,10 @@ in the same gateway (since 2026-10-21), so only the `durable-park-sweep` cron jo
 > **Status:** the v1 lockdown is applied on proto-agents since 2026-10-21 03:16 UTC, as a stopgap. It had been lifted by hand (decided 2026-10-20) and was re-applied 2026-10-21 03:16 UTC. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC; [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1): `hermes` has no sudo. The ledger is still owned by `hermes` (Phase 2 not done), so the lockdown is still a configuration guard for the ledger, not a permission boundary (see [architecture](architecture.md#the-three-guarantees)). Hermes approvals stay off. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing row" rule applies. The text below says what the lockdown does and why.
 
 The agent's tools run as the `hermes` user. That user owns the ledger and can read `instance_token`. So
-an agent with a terminal or file tool, for example one hijacked by a prompt injection, could write an
-`executing` row and get the bridge to approve a gateway call no human approved.
+an agent with a terminal or file tool, for example one hijacked by a prompt injection, could write ledger rows
+and call QuickBooks around the gate. (Before the [bridge verified approvals in
+withHuman](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md), an `executing` row was also enough to get the
+bridge to approve a gateway call no human approved; the bridge now ignores the ledger.)
 
 v1 closes this by giving the model no local file, command, code, browser or scheduling tools at all.
 `deploy/hermes_tool_policy.py` (applied by `configure_hermes.sh` and `hermes_mcp.sh`, then checked before
@@ -193,6 +214,12 @@ the gateway registers any `mcp__wh__` tool outside `mcp__wh__quickbooks__*` (it 
 sweep is a no-agent cron script and is not affected.
 
 ## v2: separate ledger owner (design only, not built)
+
+> **Update (bridge):** the bridge no longer reads or writes the ledger and keeps no delivery records; it asks
+> withHuman with a read-only organization key ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).
+> The bullets below that give the bridge a socket, a uid, `find_executing_match` and `mark_gateway_passed` are
+> void. What remains of v2 is separating the ledger for the plugin and the sweep; the backlog tracks removing
+> the ledger altogether ("Option 2").
 
 The v1 tool policy is a configuration guard. A Hermes upgrade, a new plugin toolset or a hand edit could
 re-open the bypass. v2 makes it a privilege boundary instead:

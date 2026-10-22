@@ -33,8 +33,9 @@ def _code_lines():
 
 def test_never_creates_the_bridge_secret_and_never_echoes_secret_files():
     for line in _code_lines():
-        if "bridge_secret" in line:  # Yaakov stores it; the script may only check for it
-            assert line.startswith('[[ -e "$ETC/bridge_secret" ]] ||'), line
+        if "bridge_secret" in line:  # Yaakov stores it; the script may only check for it, or fix an existing file
+            assert line.startswith(('[[ -e "$ETC/bridge_secret" ]] &&', '[[ -s "$ETC/bridge_secret" ]] || die')), line
+            assert not re.search(r"\b(touch|tee|install|mktemp|cp|mv|cat|echo|printf)\b|>", line), line  # never created
         # the only reader of the wake secret is the secret-source helper, whose stdout goes to Hermes
         if "wake_secret" in line and ("cat " in line or "echo " in line):
             raise AssertionError(line)
@@ -67,12 +68,122 @@ def test_no_pipe_into_grep_q_under_pipefail():
         assert not re.search(r"\|\s*grep\b[^|]*-[a-zA-Z]*q", line), line
 
 
-def test_bridge_unit_uses_the_deployed_venv_and_ledger():
+def _unit_lines():
     unit = (SCRIPT.parent / "durable-park-bridge.service").read_text()
-    assert "ExecStart=/opt/durable-park/bin/python -B -m bridge.app --host 127.0.0.1 --port 8791" in unit
-    assert "Environment=DURABLE_PARK_LEDGER=/home/hermes/.hermes/plugin-data/durable-park/ledger.db" in unit
-    assert "User=hermes" in unit and "SupplementaryGroups=dpwake" in unit
-    assert 'LEDGER="$HERMES_HOME/plugin-data/durable-park/ledger.db"' in SCRIPT.read_text()
+    return [line.strip() for line in unit.splitlines() if line.strip() and not line.strip().startswith("#")]
+
+
+BRIDGE_SERVICE = SCRIPT.parent / "durable-park-bridge.service"
+BRIDGE_SOCKET = SCRIPT.parent / "durable-park-bridge.socket"
+
+
+def _unit_sections(path):
+    """{section: [non-comment lines]} of a unit file."""
+    sections, current = {}, None
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = sections.setdefault(line[1:-1], [])
+        else:
+            assert current is not None, line
+            current.append(line)
+    return sections
+
+
+def test_bridge_socket_unit_lets_systemd_hold_the_port():
+    """A socket unit owns 127.0.0.1:8791 at all times, so nothing the bot runs can bind it while the bridge restarts."""
+    sections = _unit_sections(BRIDGE_SOCKET)
+    assert set(sections) == {"Unit", "Socket", "Install"}
+    assert {"Accept=no", "ListenStream=127.0.0.1:8791", "NoDelay=true"} <= set(sections["Socket"])
+    assert [line for line in sections["Socket"] if line.startswith("ListenStream=")] == ["ListenStream=127.0.0.1:8791"]
+    assert sections["Install"] == ["WantedBy=sockets.target"]
+
+
+def test_bridge_unit_runs_as_its_own_user_in_no_other_group():
+    service = _unit_sections(BRIDGE_SERVICE)["Service"]
+    assert "User=dpbridge" in service and "Group=dpbridge" in service
+    for line in service:
+        assert not line.startswith("SupplementaryGroups"), line  # not dpwake, not hermes
+        assert line not in ("User=hermes", "Group=hermes"), line
+    assert not any("dpwake" in line for lines in _unit_sections(BRIDGE_SERVICE).values() for line in lines)
+
+
+def test_bridge_unit_is_bound_to_its_socket_and_always_restarts():
+    sections = _unit_sections(BRIDGE_SERVICE)
+    assert "Requires=durable-park-bridge.socket" in sections["Unit"]
+    assert "After=durable-park-bridge.socket network-online.target" in sections["Unit"]
+    assert "Wants=network-online.target" in sections["Unit"]  # without it the After= ordering has no effect
+    assert "Restart=always" in sections["Service"] and "RestartSec=1" in sections["Service"]
+    assert not any(line.startswith("Restart=on-failure") for line in sections["Service"])
+
+
+def test_bridge_service_never_trips_systemds_start_limit():
+    """With Accept=no systemd fails the socket unit (service-start-limit-hit) and closes the listening fd when the
+    service trips its start limit, which frees 127.0.0.1:8791 for anyone. The default limit (5 starts in 10 s) trips
+    in about 6 s of a persistent start failure with RestartSec=1, so the service must have no start limit at all
+    (systemd.unit: StartLimitIntervalSec=0 disables the rate limiting)."""
+    assert "StartLimitIntervalSec=0" in _unit_sections(BRIDGE_SERVICE)["Unit"]
+    assert not any(line.startswith("StartLimitBurst") for lines in _unit_sections(BRIDGE_SERVICE).values() for line in lines)
+
+
+def test_bridge_socket_has_no_trigger_limit_that_could_fail_it():
+    """systemd.socket: when TriggerLimitIntervalSec/TriggerLimitBurst (default 20 activations per 2 s for Accept=no)
+    is hit, the socket unit is put into a failure mode and closes its listening fd, so a burst of connections while
+    the bridge restarts would free the port. 0 disables the limit; PollLimit* still slows a flood down temporarily."""
+    assert "TriggerLimitIntervalSec=0" in _unit_sections(BRIDGE_SOCKET)["Socket"]
+
+
+def test_bridge_unit_takes_the_socket_from_systemd_and_reads_secrets_as_credentials():
+    service = _unit_sections(BRIDGE_SERVICE)["Service"]
+    exec_start = [line for line in service if line.startswith("ExecStart=")]
+    assert exec_start == ["ExecStart=/opt/durable-park/bin/python -B -m bridge.app --systemd-socket "
+                          "--secret-file %d/bridge_secret --key-file %d/audit_key --expected-agent proto-agents"]
+    assert "--host" not in exec_start[0] and "--port" not in exec_start[0]  # a usage error with --systemd-socket
+    assert "/etc/durable-park" not in exec_start[0]  # the files are read as root by systemd, not by the bridge
+    assert "LoadCredential=bridge_secret:/etc/durable-park/bridge_secret" in service
+    assert "LoadCredential=audit_key:/etc/durable-park/audit_key" in service
+    assert "WorkingDirectory=/opt/durable-park" in service
+    assert "Environment=PYTHONPATH=/opt/durable-park/plugin:/opt/durable-park" in service
+
+
+@pytest.mark.parametrize("line", [
+    "NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes", "PrivateDevices=yes",
+    "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes",
+    "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX", "RestrictSUIDSGID=yes", "LockPersonality=yes",
+    "CapabilityBoundingSet=", "UMask=0077",
+    "ProtectProc=invisible", "ProcSubset=pid",  # the bot's user cannot even see the bridge's process
+])
+def test_bridge_unit_hardening(line):
+    assert line in _unit_sections(BRIDGE_SERVICE)["Service"]
+
+
+def test_bridge_unit_is_stateless_and_cannot_touch_the_ledger():
+    """The bridge asks withHuman with the org key; it keeps no state, so no ledger path and no writable path."""
+    code = "\n".join(_unit_lines())
+    for gone in ("DURABLE_PARK_LEDGER", "ReadWritePaths", "--ledger", "ledger.db", "plugin-data"):
+        assert gone not in code, gone
+    assert "ProtectHome=yes" in code and "ProtectSystem=strict" in code
+    assert "ProtectHome=read-only" not in code
+
+
+def test_missing_or_empty_key_files_stop_the_script_before_anything_changes():
+    """LoadCredential makes the unit fail to start when a key file is missing, so the script says so up front
+    (and changes nothing), instead of stopping the old bridge and dying later at the 401 gate."""
+    code = "\n".join(_code_lines())
+    secret = next(l for l in _code_lines() if l.startswith('[[ -s "$ETC/bridge_secret" ]] || die'))
+    key = next(l for l in _code_lines() if l.startswith('[[ -s "$ETC/audit_key" ]] || die'))
+    for line in (secret, key):
+        assert "read -rs" in line and "docs/runbook.md" in line and "nothing was changed" in line, line
+    first_change = min(code.index(x) for x in (
+        "useradd --system --no-create-home", 'sync_tree "$REPO/bridge"', 'install_root "$REPO/deploy/$BRIDGE_UNIT.socket"',
+        'systemctl stop "$BRIDGE_UNIT"', 'chown root:root "$ETC/bridge_secret"', 'systemctl enable --now "$BRIDGE_UNIT.socket"'))
+    assert code.index(secret) < first_change and code.index(key) < first_change
+    # the old behaviour is gone: a missing key is no longer a warning
+    assert "the bridge answers 401 (Yaakov" not in code and "answers human to every gateway call (Yaakov" not in code
+    assert "the bridge answers human until the plugin creates it" not in code
+    assert "ReadWritePaths" not in SCRIPT.read_text()  # the ledger directory is no longer a bridge path
 
 
 def test_webhook_route_secret_is_a_bare_ref():
@@ -367,3 +478,126 @@ def test_bridge_health_gate_demands_401_before_going_on():
     assert 'journalctl -u "$BRIDGE_UNIT" -n 20' in code and "grep -v -i secret" in code
     gate = code.index("bridge_ok=0")
     assert "die " in code[gate:] and code.index("die \"bridge unit is not answering 401") > gate
+
+
+def _bridge_section():
+    """The code of the `4b. gateway bridge` section after the sync_tree helper, up to the sweep wrapper."""
+    code = "\n".join(_code_lines())
+    return code[code.index('install -d -m 0755 -o root -g root "$VENV/plugin"'):code.index('as_hermes install -d -m 0700 "$HERMES_HOME/scripts"')]
+
+
+def test_dpbridge_is_created_once_with_no_login_no_home_and_no_other_group():
+    code = "\n".join(_code_lines())
+    useradd = ("useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "
+               "--user-group dpbridge")
+    assert code.count(useradd) == 1
+    lines = _code_lines()
+    assert lines[lines.index(useradd) - 1] == "if ! getent passwd dpbridge >/dev/null; then"  # only when missing
+    for line in _code_lines():
+        if "dpbridge" in line:
+            assert "usermod" not in line and "dpwake" not in line and "-aG" not in line, line
+    assert 'for member in "$HERMES_USER" aaprecv; do' in code  # the dpwake members are still only these two
+    assert code.index(useradd) < code.index("sync_tree \"$REPO/bridge\"")  # exists before its unit is installed
+
+
+def test_bridge_secret_becomes_root_only_before_the_bridge_restarts():
+    """systemd reads it as root through LoadCredential, so the bot (group dpwake) no longer can."""
+    section = _bridge_section()
+    line = next(l for l in section.splitlines() if 'chown root:root "$ETC/bridge_secret"' in l)
+    assert line.startswith('[[ -e "$ETC/bridge_secret" ]] &&')  # only an existing file; the script never creates it
+    assert 'chmod 0600 "$ETC/bridge_secret"' in line and "CHANGED=1" in line  # LoadCredential copies at start
+    assert section.index(line) < section.index('restart_if_needed "$BRIDGE_UNIT"')
+    assert 'chown "root:$HERMES_USER" "$ETC/audit_key"' in "\n".join(_code_lines())  # audit_key stays root:hermes 0640
+
+
+def test_both_bridge_units_are_installed_and_the_socket_is_enabled_before_the_service_restarts():
+    section = _bridge_section()
+    socket_install = 'install_root "$REPO/deploy/$BRIDGE_UNIT.socket" "/etc/systemd/system/$BRIDGE_UNIT.socket" 0644'
+    service_install = 'install_root "$REPO/deploy/$BRIDGE_UNIT.service" "/etc/systemd/system/$BRIDGE_UNIT.service" 0644'
+    reload_ = "systemctl daemon-reload"
+    enable_socket = 'systemctl enable --now "$BRIDGE_UNIT.socket"'
+    order = [section.index(x) for x in (socket_install, service_install, reload_, enable_socket,
+                                         'restart_if_needed "$BRIDGE_UNIT"')]
+    assert order == sorted(order), order
+    assert 'systemctl enable --quiet "$BRIDGE_UNIT"' in section  # the service stays enabled, as today
+
+
+def test_a_service_that_still_holds_the_port_is_stopped_before_the_socket_takes_it():
+    """First migration: the old unit (User=hermes) binds 127.0.0.1:8791 itself, so `enable --now` on the socket
+    would fail with 'address already in use'. The stop happens only when the socket is not active yet."""
+    section = _bridge_section()
+    guard = 'if ! systemctl is-active --quiet "$BRIDGE_UNIT.socket"; then'
+    stop = 'systemctl stop "$BRIDGE_UNIT"'
+    assert section.index(guard) < section.index(stop) < section.index('systemctl enable --now "$BRIDGE_UNIT.socket"')
+    assert 0 < section.index(stop) - section.index(guard) < 120  # the stop sits directly under the guard
+
+
+def test_bridge_check_is_installed_root_owned_run_isolated_and_a_failure_or_absence_stops_the_script():
+    code = "\n".join(_code_lines())
+    section = _bridge_section()
+    absent = '[[ -f "$REPO/deploy/bridge_check.py" ]] || die'
+    assert absent in code and "nothing was changed" in next(l for l in _code_lines() if l.startswith(absent))
+    first_change = min(code.index(x) for x in ("useradd --system --no-create-home", 'sync_tree "$REPO/bridge"',
+                                               'systemctl stop "$BRIDGE_UNIT"'))
+    assert code.index(absent) < first_change  # a checkout without it is a broken deploy: stop before changing anything
+    assert 'if [[ -f "$REPO/deploy/bridge_check.py" ]]' not in code and 'if [[ -f "$VENV/deploy/bridge_check.py" ]]' not in code
+    assert 'install -d -m 0755 -o root -g root "$VENV/deploy"' in section
+    install = 'install_root "$REPO/deploy/bridge_check.py" "$VENV/deploy/bridge_check.py" 0755'
+    run = 'python3 -I "$VENV/deploy/bridge_check.py" || die '
+    assert install in section and run in section
+    gate = section.index("bridge unit: $(systemctl is-active")
+    assert section.index(install) < gate < section.index(run)  # always runs, after the 401 health gate passed
+    assert "--- 5." not in section
+
+
+def test_bridge_health_gate_curl_has_a_time_limit():
+    code = "\n".join(_code_lines())
+    assert "curl -s -m 3 -o /dev/null -w '%{http_code}' -X POST \"$BRIDGE_LOCAL\"" in code
+
+
+def _socket_failure_handler():
+    """The bridge_socket_failed() function of the script, as text."""
+    match = re.search(r"^bridge_socket_failed\(\) \{\n.*?^\}\n", SCRIPT.read_text(), re.S | re.M)
+    assert match, "configure_hermes.sh has no bridge_socket_failed()"
+    return match.group(0)
+
+
+def test_a_socket_that_cannot_start_stops_the_script_and_may_be_a_security_incident(tmp_path):
+    """First migration: the old unit is stopped, then the socket must take 127.0.0.1:8791. If that fails, something
+    else holds the port, and with the bot's user that is an impostor answering withHuman. The script must say so, show
+    who holds the port (ss output names processes, never secrets) and tell the admin not to go on."""
+    code = "\n".join(_code_lines())
+    assert 'systemctl enable --now "$BRIDGE_UNIT.socket" || bridge_socket_failed' in code
+    argv_file = tmp_path / "ss-args"
+    harness = f"""
+die() {{ printf 'configure_hermes: ERROR: %s\\n' "$*" >&2; exit 1; }}
+ss() {{ printf '%s\\n' "$*" > {argv_file}; printf 'LISTEN 0 5 127.0.0.1:8791 0.0.0.0:* users:(("python3",pid=999,fd=3))\\n'; }}
+BRIDGE_UNIT=durable-park-bridge
+{_socket_failure_handler()}
+bridge_socket_failed
+echo REACHED-AFTER-DIE
+"""
+    done = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    assert done.returncode == 1 and "REACHED-AFTER-DIE" not in done.stdout
+    assert "security incident" in done.stderr.lower()
+    assert 'users:(("python3",pid=999,fd=3))' in done.stderr  # the listener's line is shown
+    assert "do not continue" in done.stderr.lower()
+    assert argv_file.read_text().strip() == "-ltnp sport = :8791"
+
+
+def _receiver_package_pins():
+    match = re.search(r"^RECEIVER_PACKAGES=\((.*)\)$", SCRIPT.read_text(), re.M)
+    assert match, "RECEIVER_PACKAGES not found"
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def test_the_venv_pins_httpx_which_the_bridge_imports_directly():
+    """bridge/whapi.py imports httpx. It must not depend on agentapprovalprotocol happening to pull it in, so the
+    venv pins it, to the version the VM's /opt/durable-park venv has (0.28.1) and the dev requirements test against."""
+    assert "httpx==0.28.1" in _receiver_package_pins()
+
+
+def test_every_venv_pin_is_the_version_the_tests_run_against():
+    dev = (SCRIPT.parents[1] / "requirements-dev.txt").read_text().split()
+    pins = _receiver_package_pins()
+    assert pins and all(pin in dev for pin in pins), [pin for pin in pins if pin not in dev]

@@ -64,6 +64,10 @@ not load" section.
 The vendored Langfuse plugin (`tracing/tapdash_langfuse/` and `tracing/run_tests.sh`) is mapped to the runbook and to
 `tracing/tapdash_langfuse/PATCHES.md` in the "Tracing plugin (tapdash-langfuse)" rule: every difference from upstream
 goes into `PATCHES.md` in the same commit. Its tests run with `bash tracing/run_tests.sh`, not the durable-park pytest.
+The gateway bridge's own user and port (`durable-park/deploy/durable-park-bridge.service`, `durable-park-bridge.socket`
+and `bridge_check.py`) are mapped to `architecture.md` and `gateway-setup.md` in the "Gateway bridge isolation" rule (and,
+like the other deploy files, to the runbook and the two setup guides in "Deploy scripts and service units"): change one,
+update the bridge's tables and the "Own user and own port" section in the same commit.
 The withHuman entry pipeline kept as a reviewed file (`durable-park/deploy/withhuman/entry-pipeline.json`) is mapped to
 `architecture.md`: change the file, change the pipeline table there in the same commit.
 
