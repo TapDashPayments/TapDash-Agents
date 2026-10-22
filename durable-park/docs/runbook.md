@@ -539,10 +539,9 @@ for the same action, never an auto-approve.
 
 **The key.** The same file as [the decider name](#name-the-decider-optional), now with exactly three permissions:
 `audit.read`, `request.read`, `request.read.unrouted`. It must not be able to read rules or members, and it cannot
-approve, deny or change anything. It is read on every call, so storing a new one needs no restart. To move from the
-old audit-only key: in withHuman mint the new key with the three permissions, store it with the `read -rs` command
-under [Name the decider](#name-the-decider-optional) (it replaces the file), run the check below, then revoke the
-old key in withHuman. Never paste a key into chat.
+approve, deny or change anything. It is read on every call, so storing a new one needs no restart. On proto-agents
+the existing key (`durable-park audit`) was given `request.read` and `request.read.unrouted` in withHuman on
+2026-10-22, so the file on the VM did not change. Never paste a key into chat.
 
 **Check** (as `hermes`, after any bridge change; nothing is printed that is secret):
 
