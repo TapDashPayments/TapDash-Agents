@@ -47,7 +47,9 @@ Rules:
   ledger, not a permission boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay
   off until Phase 2. Re-running `configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
-  row" rule applies.
+  row" rule applies. **Stop `hermes-gateway` before running `configure_hermes.sh`**: its `hermes plugins enable`
+  step would otherwise reload every plugin in the running gateway ([warning](#never-change-plugins-while-the-gateway-runs),
+  [backlog](backlog.md#before-real-books), item 12).
   durable-park asks withHuman about every tool call except the exempt tools (`parked_action_execute`, `clarify`,
   `tool_search`, `tool_describe`); withHuman's
   pipeline decides which need a person; today that means the QuickBooks tools, since the agent has no terminal or
@@ -205,7 +207,7 @@ PY
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
    | `tracing/tapdash_langfuse/` (the patched Langfuse plugin; once it is deployed, the gateway loads it through a symlink into the live clone) | Run `bash tracing/run_tests.sh` as `hermes` first. The change is loaded at the next gateway restart **or the next plugin reload**, so follow [When the plugin changes](#when-the-plugin-changes) (hook re-review before the pull; pull with the gateway stopped) |
-   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
+   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`, and with the gateway stopped first ([warning](#never-change-plugins-while-the-gateway-runs), [backlog](backlog.md#before-real-books) item 12). Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
    Rollback: revert the code first (git checkout the previous `main`, restart the gateway with 0 active rows); never

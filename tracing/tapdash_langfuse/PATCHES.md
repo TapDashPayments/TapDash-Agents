@@ -84,6 +84,15 @@ Keep this list complete: every difference from upstream goes here, in the commit
 
 `on_pre_tool_call` is unchanged from upstream.
 
+## Known upstream hints left unchanged
+
+- `__init__.py` (the missing-credentials warning in `_build_client`, about line 281) logs "... or disable the plugin
+  (`hermes plugins disable langfuse`) to silence this warning". On proto-agents the plugin is `tapdash-langfuse`, not
+  `langfuse`, and a plugin must never be disabled with the gateway running: stop the gateway first, as in the runbook's
+  [Turn it off](../../durable-park/docs/runbook.md#turn-it-off) (warning:
+  [never change plugins while the gateway runs](../../durable-park/docs/runbook.md#never-change-plugins-while-the-gateway-runs)).
+  The message is left as upstream wrote it so the copy stays easy to diff.
+
 ## Running the tests
 
 ```sh

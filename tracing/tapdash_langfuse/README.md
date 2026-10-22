@@ -164,8 +164,10 @@ defense in depth, not a DLP guarantee. For personal sessions or shared Langfuse 
 
 ## Disable or remove
 
-**TapDash:** use the runbook's [Turn it off](../../durable-park/docs/runbook.md#turn-it-off) (stop the gateway
-first). Never run `hermes plugins remove langfuse` on the VM: it would delete the catalog copy that is kept
+**TapDash:** use the runbook's [Turn it off](../../durable-park/docs/runbook.md#turn-it-off): it stops the gateway
+first, then runs `hermes plugins disable tapdash-langfuse`, then starts the gateway (never disable a plugin with the
+gateway running; the plugin's own log hint to run `hermes plugins disable langfuse` is upstream's text and is not the
+procedure here, see [`PATCHES.md`](PATCHES.md)). Never run `hermes plugins remove langfuse` on the VM: it would delete the catalog copy that is kept
 installed as the rollback target. Upstream's text:
 
 ```bash
