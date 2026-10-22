@@ -2228,4 +2228,21 @@ def test_a_report_nobody_can_write_leaves_the_marker_and_never_stops_the_call(en
     hook = status_hook(env, schema_fn=lambda tool: DECLARES)
     assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None
     assert len(env.ledger.list_by_status("allowed")) == 1
-    assert (env.tmp_path / "lift_status.unwritable").exists()
+    assert any(p.name.startswith("lift_status.unwritable.") for p in env.tmp_path.iterdir())
+
+
+def test_one_calls_many_problems_wait_for_the_report_lock_once(env):
+    """Four problems in one call and another process holding the report lock: the call waits one bound (0.2 s),
+    not one per problem."""
+    import fcntl
+    import time
+    hook = status_hook(env)
+    args = {key: {"withhuman_context": 7} for key in ("a", "b", "c", "d")}  # a note that is not text: 4 problems
+    holder = open(env.tmp_path / "lift_status.json.lock", "a")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        started = time.monotonic()
+        assert call(hook, GW_TOOL, args=args)["message"].startswith("PARKED P-")
+        assert time.monotonic() - started < 0.6
+    finally:
+        holder.close()

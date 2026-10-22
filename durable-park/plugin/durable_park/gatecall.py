@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import copy
 import fcntl
 import json
@@ -11,8 +12,9 @@ import re
 import tempfile
 import threading
 import time
+import weakref
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 import httpx
 from agentapprovalprotocol import Call, Client, Gate
@@ -133,7 +135,24 @@ def declares_context(schema: Any) -> bool:
 
 MAX_SCHEMA_DEPTH = 10  # how deep ``$ref``/``allOf``/``anyOf``/``oneOf`` are followed before giving up
 MAX_PATTERN_CHARS = 200  # a longer ``patternProperties`` regex is not run (it comes from outside): unknown
+MAX_SCHEMA_NODES = 2000  # schema nodes visited per lift (a tool's whole rules): more is "cannot tell", and reported
 _UNRESOLVED = object()
+
+
+class _Budget:
+    """The schema nodes one lift may still visit: branches that fan out (every ``anyOf`` offering many ``$ref``s
+    that do the same) would otherwise take exponential time. ``exhausted`` is set once it ran out."""
+
+    def __init__(self, nodes: int = MAX_SCHEMA_NODES):
+        self.left = nodes
+        self.exhausted = False
+
+    def take(self) -> bool:
+        if self.left <= 0:
+            self.exhausted = True
+            return False
+        self.left -= 1
+        return True
 
 
 def _resolve_local_ref(ref: Any, root: Any) -> Any:
@@ -153,12 +172,14 @@ def _resolve_local_ref(ref: Any, root: Any) -> Any:
     return node
 
 
-def _declares_context_in(schema: Any, root: Any, seen: frozenset = frozenset(), depth: int = 0) -> bool | None:
+def _declares_context_in(schema: Any, root: Any, seen: frozenset = frozenset(), depth: int = 0,
+                         budget: _Budget | None = None) -> bool | None:
     """Does ``schema`` (the rules of one nested object) declare a ``withhuman_context`` property?
-    True: yes. False: no. None: cannot tell (remote or unresolvable ``$ref``, a bad pattern, a cycle, too deep).
+    True: yes. False: no. None: cannot tell (remote or unresolvable ``$ref``, a bad pattern, a cycle, too deep,
+    or ``budget`` ran out).
     A schema that is not an object (including plain ``true``/``false``) names no property: False. Sibling keywords
     combine the way ``allOf``/``anyOf``/``oneOf`` branches do: any True wins, then any None, else False."""
-    if depth > MAX_SCHEMA_DEPTH:
+    if depth > MAX_SCHEMA_DEPTH or (budget is not None and not budget.take()):
         return None
     if not isinstance(schema, dict):
         return False
@@ -167,7 +188,7 @@ def _declares_context_in(schema: Any, root: Any, seen: frozenset = frozenset(), 
         ref = schema["$ref"]
         target = _resolve_local_ref(ref, root)
         found.append(None if target is _UNRESOLVED or ref in seen
-                     else _declares_context_in(target, root, seen | {ref}, depth + 1))
+                     else _declares_context_in(target, root, seen | {ref}, depth + 1, budget))
     props = schema.get("properties")
     if isinstance(props, dict) and CONTEXT_FIELD in props:
         found.append(True)
@@ -187,7 +208,7 @@ def _declares_context_in(schema: Any, root: Any, seen: frozenset = frozenset(), 
             if not isinstance(branches, list):
                 found.append(None)
                 continue
-            found.extend(_declares_context_in(branch, root, seen, depth + 1) for branch in branches)
+            found.extend(_declares_context_in(branch, root, seen, depth + 1, budget) for branch in branches)
     if True in found:
         return True
     return None if None in found else False
@@ -204,13 +225,13 @@ def is_note_key(key: Any) -> bool:
     return isinstance(key, str) and _NOT_ALNUM.sub("", key.lower()) == "withhumancontext"
 
 
-def _key_declares(props: dict, key: Any, root: Any) -> bool | None:
+def _key_declares(props: dict, key: Any, root: Any, budget: _Budget | None = None) -> bool | None:
     """Do the tool's rules for the top-level ``key`` declare their own ``withhuman_context``? A key the rules do not
     list (Hermes may show the model a sanitized spelling of a property name) is judged by every other property:
     when any of them declares the field the key is left alone (when in doubt, skip, and say so)."""
     if key in props:
-        return _declares_context_in(props[key], root)
-    found = [_declares_context_in(rules, root) for name, rules in props.items() if name != CONTEXT_FIELD]
+        return _declares_context_in(props[key], root, budget=budget)
+    found = [_declares_context_in(rules, root, budget=budget) for name, rules in props.items() if name != CONTEXT_FIELD]
     return True if True in found else False
 
 
@@ -226,7 +247,8 @@ def lift_gateway_context(args: Any, schema: dict | None,
     (``_declares_context_in``: ``properties``, ``patternProperties``, ``allOf``/``anyOf``/``oneOf``, and local
     ``$ref`` such as ``#/$defs/X`` resolved inside ``schema``). Only a positive declaration leaves the key alone
     (the server really has that field): ``on_problem("declared", key, "")``. Rules that do not declare it, or cannot
-    be judged (remote ``$ref``, a bad pattern, a cycle), mean the note is removed. The first removed non-empty
+    be judged (remote ``$ref``, a bad pattern, a cycle, more than ``MAX_SCHEMA_NODES`` schema nodes: then
+    ``on_problem("schema_too_complex", key, "")`` too), mean the note is removed. The first removed non-empty
     string becomes the top-level note unless the top level already has the key. Every removed value that did not
     become the note, and is not an exact copy of the note the approver will see, is reported:
     ``on_problem("note_dropped", key, reason)`` with reason ``not text``, ``empty``,
@@ -240,6 +262,7 @@ def lift_gateway_context(args: Any, schema: dict | None,
     out = copy.deepcopy(args)
     top_present = CONTEXT_FIELD in out
     note: str | None = None
+    budget = _Budget()
 
     def report(kind: str, key: str, detail: str = "") -> None:
         if on_problem is not None:
@@ -253,9 +276,11 @@ def lift_gateway_context(args: Any, schema: dict | None,
         if not isinstance(value, dict) or CONTEXT_FIELD not in value:
             continue
         try:
-            declared = _key_declares(props, key, schema)
+            declared = _key_declares(props, key, schema, budget)
         except Exception:  # noqa: BLE001 - never raise out of the lift; "cannot tell" lifts
             declared = None
+        if declared is None and budget.exhausted:
+            report("schema_too_complex", str(key))  # lifted as "cannot tell", and said so
         if declared is True:
             report("declared", str(key))
             continue
@@ -359,13 +384,13 @@ def find_leftover_notes(args: Any, exclude: frozenset | set = frozenset()) -> tu
 
 
 LIFT_STATUS_FILENAME = "lift_status.json"
-LIFT_UNWRITABLE_FILENAME = "lift_status.unwritable"  # exists while the lift report cannot be written (the sweep alerts)
+LIFT_UNWRITABLE_FILENAME = "lift_status.unwritable"  # prefix: each process leaves ``<prefix>.<owner>`` while it cannot write
 MAX_LIFT_ENTRIES = 200
 LIFT_REWRITE_SECONDS = 60.0  # a repeat of a known problem rewrites the file at most this often (the count lags)
-LIFT_LOCK_WAIT_SECONDS = 0.2  # the most a tool call ever waits for the report's lock (retries every 20 ms)
+LIFT_LOCK_WAIT_SECONDS = 0.2  # the most one tool call (or one flush) ever waits, in total, to write the report
 LIFT_LOCK_RETRY_SECONDS = 0.02
 LIFT_KINDS = ("declared", "note_dropped", "schema_unavailable", "args_unreadable", "lift_error",
-              "note_left_inside", "check_incomplete", "report_reset")
+              "note_left_inside", "check_incomplete", "report_reset", "schema_too_complex")
 LIFT_OVERFLOW_TOOL = "*"  # problems beyond 200 waiting ones are counted here (per kind), never dropped
 LIFT_OVERFLOW_KEY = "(more than 200 problems waiting)"
 LIFT_RESET_TOOL = LIFT_STATUS_FILENAME  # ``report_reset``: the report was unreadable and was replaced
@@ -374,7 +399,7 @@ _MARKER_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 class LockTimeout(Exception):
-    """The report's lock was still held by someone else after ``LIFT_LOCK_WAIT_SECONDS``."""
+    """The report could not be written within ``LIFT_LOCK_WAIT_SECONDS``: another process (or thread) held it."""
 
 
 def _sweep_order(entry: dict) -> tuple:
@@ -385,6 +410,23 @@ def _ident(entry: dict) -> tuple[str, str, str, str]:
     return (entry["tool"], entry["kind"], entry["key"], entry["detail"])
 
 
+def _flush_at_exit(ref: "weakref.ReferenceType[LiftStatus]") -> None:
+    status = ref()
+    if status is not None:
+        status.flush()
+
+
+def _open_shared(path: str, flags: int, mode: int) -> int:
+    """Open ``path`` creating it with exactly ``mode`` (the umask does not narrow it): files that several users read
+    or write (the report's lock, the markers) must work for a process running as another user."""
+    fd = os.open(path, flags | os.O_CREAT, mode)
+    try:
+        os.fchmod(fd, mode)
+    except OSError:  # a file another user created: its mode is theirs to set
+        pass
+    return fd
+
+
 class LiftStatus:
     """Where the lift reports what it could not do, for the sweep to alert on (``lift_status.json`` next to the
     ledger). One entry per (tool, kind, key, detail) with ``first_seen``, ``last_seen`` and ``count``: names and
@@ -393,25 +435,33 @@ class LiftStatus:
     an entry that has not been written yet is never dropped (problems beyond 200 waiting ones are counted in one
     ``*`` entry per kind).
 
-    Several processes may write the file (the gateway, a CLI run that loads the plugin): every write takes an
-    ``flock`` on a sidecar lock file, re-reads the file, adds this process's new occurrences to what is there and
-    replaces it atomically, so nobody drops another's entries. The lock is only tried, never waited for: a tool
-    call waits at most 0.2 s for it and the entries then stay pending (written on the next record or ``flush``). A
-    file that cannot be parsed is kept as ``lift_status.json.corrupt`` before it is replaced, and the replacement
-    holds a ``report_reset`` entry so the sweep says so.
+    Several processes, possibly running as different users, may write the file (the gateway, a CLI run that
+    loads the plugin): every write takes an ``flock`` on a sidecar lock file, re-reads the file, adds this
+    process's new occurrences to what is there and replaces it atomically, so nobody drops another's entries.
+    The report is mode 0644 and the lock 0666, so another user can read the one and take the other (who may write
+    at all is the directory's permission).
 
-    A failed write keeps the occurrences in memory and is retried on every later call and by ``flush`` (the form
-    self-check thread calls it every 30 minutes). One error is logged per outage, and a marker file
-    ``lift_status.unwritable`` (UTC time and error type, nothing else) is written next to the report for the sweep
-    to alert on, unless the whole directory is unwritable (the form-check report goes stale then and says so). A
-    mere lock timeout leaves no marker unless it fails again on a later ``flush``. The next successful write (or
-    ``flush``) removes the marker. A repeat of a problem already in the file rewrites it only every 60 s (the
-    count lags; ``flush`` catches up). Thread-safe and never raises. ``path=None`` only remembers."""
+    A tool call records ALL its problems in one ``record_many`` and waits at most 0.2 s in total, whatever the
+    number of problems or threads: the in-process mutex is never held during file I/O, the thread that writes
+    waits for the flock until a deadline, and a thread that cannot get its turn by then gives up. What could
+    not be written stays in memory (written on the next record, by ``flush`` and at process exit).
 
-    def __init__(self, path: str | None = None, clock: Callable[[], float] = time.monotonic):
+    Whenever this process has entries it could not write (a lock timeout included) it leaves its OWN marker
+    ``lift_status.unwritable.<pid>`` (UTC time and error type, nothing else; mode 0644) for the sweep to alert
+    on, unless the whole directory is unwritable (the form-check report goes stale then and says so). Only the
+    process that made a marker removes it, after its next successful write: another process's success never
+    hides this one's failure. A file that cannot be parsed is kept as ``lift_status.json.corrupt`` before it is
+    replaced, and the replacement holds a ``report_reset`` entry so the sweep says so. A repeat of a problem
+    already in the file rewrites it only every 60 s (the count lags; ``flush`` catches up). Thread-safe and
+    never raises. ``path=None`` only remembers."""
+
+    def __init__(self, path: str | None = None, clock: Callable[[], float] = time.monotonic,
+                 owner: str | None = None):
         self._path = path
         self._clock = clock
-        self._lock = threading.Lock()
+        self._owner = owner
+        self._lock = threading.Lock()  # guards the fields below; never held during file I/O
+        self._io = threading.Lock()  # one writing thread at a time in this process
         self._pending: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._known: set[tuple[str, str, str, str]] = set()
         self._last_write: float | None = None
@@ -422,6 +472,8 @@ class LiftStatus:
             self._known = set(self._read_disk(keep_corrupt=False))
         except Exception:  # noqa: BLE001 - only used to tell a new problem from a repeat
             self._known = set()
+        if path:
+            atexit.register(_flush_at_exit, weakref.ref(self))  # what could not be written yet is tried once more
 
     @property
     def path(self) -> str | None:
@@ -429,7 +481,10 @@ class LiftStatus:
 
     @property
     def marker_path(self) -> str | None:
-        return os.path.join(os.path.dirname(os.path.abspath(self._path)), LIFT_UNWRITABLE_FILENAME) if self._path else None
+        if not self._path:
+            return None
+        owner = self._owner if self._owner is not None else str(os.getpid())
+        return os.path.join(os.path.dirname(os.path.abspath(self._path)), f"{LIFT_UNWRITABLE_FILENAME}.{owner}")
 
     def _read_disk(self, keep_corrupt: bool = True) -> dict[tuple[str, str, str, str], dict[str, Any]]:
         """The entries now in the file ({} when missing). An unparseable file is moved aside when ``keep_corrupt``;
@@ -456,42 +511,58 @@ class LiftStatus:
                 log.warning("%s was unreadable; kept as %s.corrupt", LIFT_STATUS_FILENAME, LIFT_STATUS_FILENAME)
             return {}
 
+    def _add(self, ident: tuple[str, str, str, str], delta: int, first_seen: str, last_seen: str) -> bool:
+        """Add occurrences to ``_pending`` (``_lock`` held). True when the slot's problem is new to the report."""
+        if ident not in self._pending and len(self._pending) >= MAX_LIFT_ENTRIES:
+            # Never evict an entry that has not been written: count the newcomer in the overflow entry.
+            ident = (LIFT_OVERFLOW_TOOL, ident[1], LIFT_OVERFLOW_KEY, "")
+        pending = self._pending.get(ident)
+        if pending is None:
+            self._pending[ident] = {"delta": delta, "first_seen": first_seen, "last_seen": last_seen}
+        else:
+            pending["delta"] += delta
+            pending["first_seen"] = min(pending["first_seen"], first_seen)
+            pending["last_seen"] = max(pending["last_seen"], last_seen)
+        return ident not in self._known
+
     def record(self, tool: str, kind: str, key: str = "", detail: str = "") -> None:
+        self.record_many(tool, [(kind, key, detail)])
+
+    def record_many(self, tool: str, problems: Iterable[tuple[str, str, str]]) -> None:
+        """Record every problem of one tool call with one write attempt, one wait of at most 0.2 s in total."""
         try:
+            deadline = time.monotonic() + LIFT_LOCK_WAIT_SECONDS
             now = datetime.now(timezone.utc).strftime(_STAMP_FORMAT)
             with self._lock:
-                ident = (str(tool), str(kind), str(key), str(detail))
-                if ident not in self._pending and len(self._pending) >= MAX_LIFT_ENTRIES:
-                    # Never evict an entry that has not been written: count the newcomer in the overflow entry.
-                    ident = (LIFT_OVERFLOW_TOOL, ident[1], LIFT_OVERFLOW_KEY, "")
-                pending = self._pending.get(ident)
-                if pending is None:
-                    pending = self._pending[ident] = {"delta": 0, "first_seen": now, "last_seen": now}
-                pending["delta"] += 1
-                pending["last_seen"] = now
-                due = (ident not in self._known or self._write_failed or self._last_write is None
-                       or self._clock() - self._last_write >= LIFT_REWRITE_SECONDS)
-                if due:
-                    self._flush_locked(from_tick=False)
+                recorded = False
+                new = False
+                for kind, key, detail in problems:
+                    recorded = True
+                    new |= self._add((str(tool), str(kind), str(key), str(detail)), 1, now, now)
+                due = recorded and (new or self._write_failed or self._last_write is None
+                                    or self._clock() - self._last_write >= LIFT_REWRITE_SECONDS)
+            if due:
+                self._flush(deadline)
         except Exception as exc:  # noqa: BLE001 - reporting must never break a tool call
             log.error("could not record a lift problem (%s)", type(exc).__name__)
 
     def flush(self) -> None:
-        """Write anything still waiting (a failed write, or counts held back), and clear a leftover marker once the
-        report can be written again. Never raises."""
+        """Write anything still waiting (a failed write, or counts held back), and clear this process's marker once
+        the report can be written again. Never raises."""
         try:
+            deadline = time.monotonic() + LIFT_LOCK_WAIT_SECONDS
+            marker = self.marker_path
             with self._lock:
-                marker = self.marker_path
-                if self._pending or (marker is not None and os.path.lexists(marker)):
-                    self._flush_locked(from_tick=True)
+                waiting = bool(self._pending)
+            if waiting or (marker is not None and os.path.lexists(marker)):
+                self._flush(deadline)
         except Exception as exc:  # noqa: BLE001
             log.error("could not flush lift problems (%s)", type(exc).__name__)
 
-    def _acquire(self, lock_file: Any) -> None:
-        deadline = time.monotonic() + LIFT_LOCK_WAIT_SECONDS
+    def _acquire(self, lock_fd: int, deadline: float) -> None:
         while True:
             try:
-                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released when the file closes
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released when the descriptor closes
                 return
             except BlockingIOError:
                 if time.monotonic() >= deadline:
@@ -499,12 +570,15 @@ class LiftStatus:
                 time.sleep(LIFT_LOCK_RETRY_SECONDS)
 
     def _write_marker(self, exc: BaseException) -> None:
-        """Tell the sweep the report cannot be written: UTC time and error type only. Best effort, once per outage."""
-        if self._marker_tried or not self._path:
-            return
-        self._marker_tried = True
+        """Tell the sweep this process cannot write the report: UTC time and error type only. Best effort, once per
+        outage."""
+        with self._lock:
+            if self._marker_tried or not self._path:
+                return
+            self._marker_tried = True
         try:
-            with open(self.marker_path, "w", encoding="utf-8") as handle:
+            fd = _open_shared(self.marker_path, os.O_WRONLY | os.O_TRUNC, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(f"{datetime.now(timezone.utc).strftime(_MARKER_STAMP_FORMAT)} {type(exc).__name__}\n")
         except OSError as err:  # the directory itself is unwritable: the form-check alert covers that case
             log.warning("could not write the lift unwritable marker (%s)", type(err).__name__)
@@ -515,65 +589,89 @@ class LiftStatus:
         except FileNotFoundError:
             pass
         except OSError as exc:  # the marker then stays and the sweep keeps alerting: loud, not silent
-            log.error("could not remove %s (%s)", LIFT_UNWRITABLE_FILENAME, type(exc).__name__)
+            log.error("could not remove %s (%s)", os.path.basename(self.marker_path), type(exc).__name__)
 
-    def _flush_locked(self, from_tick: bool) -> None:
+    def _failed(self, exc: BaseException) -> None:
+        with self._lock:
+            was_failed = self._write_failed
+            self._write_failed = True
+        if not was_failed:
+            log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
+        self._write_marker(exc)
+
+    def _flush(self, deadline: float) -> None:
         if not self._path:
-            self._known |= set(self._pending)
-            self._pending.clear()
+            with self._lock:
+                self._known |= set(self._pending)
+                self._pending.clear()
+            return
+        if not self._io.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            self._failed(LockTimeout())  # another thread is still writing; what this call added stays pending
             return
         try:
-            with open(self._path + ".lock", "a") as lock_file:
-                self._acquire(lock_file)
-                entries = self._read_disk()
-                if self._corrupt_seen:
-                    self._corrupt_seen = False
-                    now = datetime.now(timezone.utc).strftime(_STAMP_FORMAT)
-                    reset = self._pending.setdefault((LIFT_RESET_TOOL, "report_reset", "", ""),
-                                                     {"delta": 0, "first_seen": now, "last_seen": now})
-                    reset["delta"] += 1
-                    reset["last_seen"] = now
-                for ident, pending in self._pending.items():
-                    entry = entries.get(ident)
-                    if entry is None:
-                        entries[ident] = {"tool": ident[0], "kind": ident[1], "key": ident[2], "detail": ident[3],
-                                          "first_seen": pending["first_seen"], "last_seen": pending["last_seen"],
-                                          "count": pending["delta"]}
-                    else:
-                        entry["count"] += pending["delta"]
-                        entry["first_seen"] = min(entry["first_seen"], pending["first_seen"])
-                        entry["last_seen"] = max(entry["last_seen"], pending["last_seen"])
-                # Only entries already on disk before this write may be pushed out; what this write adds stays.
-                fresh = [e for e in entries.values() if _ident(e) in self._pending]
-                older = sorted((e for e in entries.values() if _ident(e) not in self._pending), key=_sweep_order)
-                room = max(0, MAX_LIFT_ENTRIES - len(fresh))
-                kept = sorted((older[-room:] if room else []) + fresh, key=_sweep_order)
-                data = {"entries": kept, "updated_at": datetime.now(timezone.utc).strftime(_STAMP_FORMAT)}
-                fd, tmp = tempfile.mkstemp(prefix=".lift-", dir=os.path.dirname(os.path.abspath(self._path)))
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                        json.dump(data, handle)
-                    os.replace(tmp, self._path)
-                except BaseException:
-                    try:
-                        os.unlink(tmp)
-                    except OSError:
-                        pass
-                    raise
-            self._known = {_ident(e) for e in kept}
-            self._pending.clear()
-            self._last_write = self._clock()
-            self._write_failed = False
-            self._marker_tried = False
+            with self._lock:
+                batch, self._pending = self._pending, {}
+            try:
+                kept = self._write(batch, deadline)
+            except Exception as exc:  # noqa: BLE001 - keep the occurrences and retry
+                with self._lock:
+                    for ident, pending in batch.items():
+                        self._add(ident, pending["delta"], pending["first_seen"], pending["last_seen"])
+                self._failed(exc)
+                return
+            with self._lock:
+                self._known = {_ident(e) for e in kept}
+                self._last_write = self._clock()
+                self._write_failed = False
+                self._marker_tried = False
             self._clear_marker()
-        except Exception as exc:  # noqa: BLE001 - keep the occurrences and retry; one error per outage
-            was_failed = self._write_failed
-            if not was_failed:
-                log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
-            self._write_failed = True
-            # A busy lock is normal for a moment: it is an outage only when a later flush fails too.
-            if not isinstance(exc, LockTimeout) or (from_tick and was_failed):
-                self._write_marker(exc)
+        finally:
+            self._io.release()
+
+    def _write(self, batch: dict[tuple[str, str, str, str], dict[str, Any]], deadline: float) -> list[dict[str, Any]]:
+        """Merge ``batch`` into the file under the flock; returns the entries now in it. Raises on any failure."""
+        lock_fd = _open_shared(self._path + ".lock", os.O_RDWR, 0o666)
+        try:
+            self._acquire(lock_fd, deadline)
+            entries = self._read_disk()
+            if self._corrupt_seen:
+                self._corrupt_seen = False
+                now = datetime.now(timezone.utc).strftime(_STAMP_FORMAT)
+                reset = batch.setdefault((LIFT_RESET_TOOL, "report_reset", "", ""),
+                                         {"delta": 0, "first_seen": now, "last_seen": now})
+                reset["delta"] += 1
+                reset["last_seen"] = now
+            for ident, pending in batch.items():
+                entry = entries.get(ident)
+                if entry is None:
+                    entries[ident] = {"tool": ident[0], "kind": ident[1], "key": ident[2], "detail": ident[3],
+                                      "first_seen": pending["first_seen"], "last_seen": pending["last_seen"],
+                                      "count": pending["delta"]}
+                else:
+                    entry["count"] += pending["delta"]
+                    entry["first_seen"] = min(entry["first_seen"], pending["first_seen"])
+                    entry["last_seen"] = max(entry["last_seen"], pending["last_seen"])
+            # Only entries already on disk before this write may be pushed out; what this write adds stays.
+            fresh = [e for e in entries.values() if _ident(e) in batch]
+            older = sorted((e for e in entries.values() if _ident(e) not in batch), key=_sweep_order)
+            room = max(0, MAX_LIFT_ENTRIES - len(fresh))
+            kept = sorted((older[-room:] if room else []) + fresh, key=_sweep_order)
+            data = {"entries": kept, "updated_at": datetime.now(timezone.utc).strftime(_STAMP_FORMAT)}
+            fd, tmp = tempfile.mkstemp(prefix=".lift-", dir=os.path.dirname(os.path.abspath(self._path)))
+            try:
+                os.fchmod(fd, 0o644)  # mkstemp makes it 0600: the sweep (another user) must read the report
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle)
+                os.replace(tmp, self._path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            return kept
+        finally:
+            os.close(lock_fd)
 
 
 def build_call(row: ParkRow) -> Call:

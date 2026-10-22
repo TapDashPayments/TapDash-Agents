@@ -915,15 +915,15 @@ UNWRITABLE = ("durable-park ALERT: lift problems could not be saved ({error}); t
               "servers unreported. Check the permissions of lift_status.json and its lock next to the ledger.")
 
 
-def mark_unwritable(tmp_path, text="2026-10-22T10:00:00Z PermissionError\n"):
-    (tmp_path / "lift_status.unwritable").write_text(text)
+def mark_unwritable(tmp_path, text="2026-10-22T10:00:00Z PermissionError\n", owner="4242"):
+    (tmp_path / f"lift_status.unwritable.{owner}").write_text(text)
 
 
 def test_an_unwritable_report_alerts_once_with_the_error_and_says_when_it_recovers(world, monkeypatch, capsys, tmp_path):
     mark_unwritable(tmp_path)
     first, second = runs(world, monkeypatch, capsys, 2)
     assert first.splitlines() == [UNWRITABLE.format(error="PermissionError")] and second == ""
-    (tmp_path / "lift_status.unwritable").unlink()
+    (tmp_path / "lift_status.unwritable.4242").unlink()
     third, fourth = runs(world, monkeypatch, capsys, 2)
     assert third.splitlines() == ["durable-park: lift problems can be saved again."] and fourth == ""
     mark_unwritable(tmp_path, "2026-10-22T11:00:00Z OSError\n")  # a new outage alerts again
@@ -949,3 +949,53 @@ def test_the_marker_alert_does_not_depend_on_the_report_being_readable(world, mo
 
 def test_no_marker_and_no_state_is_silent(world, monkeypatch, capsys, tmp_path):
     assert runs(world, monkeypatch, capsys, 2) == ["", ""]
+
+
+def test_every_writers_marker_alerts_and_the_recovery_line_waits_for_the_last_one(world, monkeypatch, capsys, tmp_path):
+    mark_unwritable(tmp_path, "2026-10-22T10:00:00Z PermissionError\n", owner="1")
+    mark_unwritable(tmp_path, "2026-10-22T10:00:00Z OSError\n", owner="2")
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert sorted(first.splitlines()) == sorted([UNWRITABLE.format(error="PermissionError"),
+                                                 UNWRITABLE.format(error="OSError")]) and second == ""
+    (tmp_path / "lift_status.unwritable.1").unlink()  # one writer recovers, the other still cannot write
+    third, = runs(world, monkeypatch, capsys, 1)
+    assert third == ""
+    (tmp_path / "lift_status.unwritable.2").unlink()
+    last, = runs(world, monkeypatch, capsys, 1)
+    assert last.splitlines() == ["durable-park: lift problems can be saved again."]
+
+
+def test_a_marker_that_appears_while_another_is_already_alerted_alerts_too(world, monkeypatch, capsys, tmp_path):
+    mark_unwritable(tmp_path, owner="1")
+    runs(world, monkeypatch, capsys, 1)
+    mark_unwritable(tmp_path, "2026-10-22T11:00:00Z OSError\n", owner="2")
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [UNWRITABLE.format(error="OSError")]
+
+
+def test_a_failing_unwritable_check_does_not_hide_the_lift_alerts(world, monkeypatch, capsys, tmp_path):
+    def boom(*args, **kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(sweep, "_lift_unwritable_alert", boom)
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="") in out.splitlines()
+    assert "durable-park ALERT: could not check for lift problems (RuntimeError)." in out.splitlines()
+
+
+def test_a_failing_lift_check_does_not_hide_the_unwritable_alert(world, monkeypatch, capsys, tmp_path):
+    def boom(*args, **kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(sweep, "_lift_alert", boom)
+    mark_unwritable(tmp_path)
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert UNWRITABLE.format(error="PermissionError") in out.splitlines()
+    assert "durable-park ALERT: could not check for lift problems (RuntimeError)." in out.splitlines()
+
+
+def test_a_schema_too_complex_problem_has_its_own_alert_text(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "schema_too_complex", "params"))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "complex" in out and LIFT_TOOL in out and "a note problem (" not in out

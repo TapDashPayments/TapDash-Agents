@@ -327,8 +327,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                     return _block(INVALID_ARGS_MESSAGE.format(tool=tool, problem=problem))
             # The call passed its form check: whatever the lift could not do is now real (a refused call never
             # reaches a server), so report it for the sweep's chat alert.
-            for kind, key, detail in lift_problems:
-                status.record(tool, kind, key, detail)
+            status.record_many(tool, lift_problems)  # one write attempt for the whole call
 
             # Step 5: one row per (session_id, tool_call_id); a replay gets the existing row.
             row = ledger.park(

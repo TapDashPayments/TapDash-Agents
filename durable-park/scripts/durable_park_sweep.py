@@ -87,6 +87,8 @@ LIFT_TEXTS = {
                          "(they are too large or nested too deep); it may reach the server."),
     "report_reset": ("durable-park ALERT: {tool} was unreadable and was replaced; the earlier lift problems are kept "
                      "in {tool}.corrupt."),
+    "schema_too_complex": ("durable-park ALERT: the rules of {tool} are too complex to read for the agent's note "
+                           "(inside {key}); the note was moved as if they declared no such field."),
 }
 PLUGIN_LOAD = "plugin_load.json"  # the load proof the plugin writes in the gateway (pid of that process)
 PLUGIN_LOAD_STATE = "plugin_load_alert_state.json"
@@ -447,34 +449,33 @@ def _lift_alert(ledger_path: str, now: datetime) -> None:
 
 
 def _lift_unwritable_alert(ledger_path: str, now: datetime) -> None:
-    """Alert once per outage when the hook left ``lift_status.unwritable`` (it could not write the lift report, so
-    note problems are not being reported), and once when the marker is gone. May raise: ``_lift_check`` reports that."""
+    """Alert once per marker when a process left ``lift_status.unwritable.<pid>`` (it could not write the lift
+    report, so its note problems are not being reported), and once when the last marker is gone. Every writing
+    process has its own marker, so one process's recovery never hides another's outage. May raise: ``_lift_check``
+    reports that."""
     directory = os.path.dirname(os.path.abspath(ledger_path))
     state_path = os.path.join(directory, LIFT_UNWRITABLE_STATE)
     state = _load_state(state_path)
-    alerted = state.get("alerted") is True
-    text = ""
-    try:
-        with open(os.path.join(directory, LIFT_UNWRITABLE), encoding="utf-8", errors="replace") as handle:
-            text = handle.read(200)
-        present = True
-    except FileNotFoundError:
-        present = False
-    except OSError:  # it is there (for example a directory) but unreadable: still an outage, error unknown
-        present = True
-    if present:
+    before = state.get("alerted")
+    alerted = {name for name in before if isinstance(name, str)} if isinstance(before, list) else set()
+    present = sorted(name for name in os.listdir(directory) if name.startswith(LIFT_UNWRITABLE))
+    for name in present:
+        if name in alerted:
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8", errors="replace") as handle:
+                text = handle.read(200)
+        except OSError:  # it is there (for example a directory) but unreadable: still an outage, error unknown
+            text = ""
         parts = text.split()
         error = parts[1] if len(parts) >= 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,59}", parts[1]) else "unknown error"
-        if not alerted:
-            print(f"durable-park ALERT: lift problems could not be saved ({_clean(error, 60)}); the agent's note may "
-                  "be reaching servers unreported. Check the permissions of lift_status.json and its lock next to "
-                  "the ledger.", flush=True)
-        alerted = True
-    elif alerted:
+        print(f"durable-park ALERT: lift problems could not be saved ({_clean(error, 60)}); the agent's note may "
+              "be reaching servers unreported. Check the permissions of lift_status.json and its lock next to "
+              "the ledger.", flush=True)
+    if alerted and not present:
         print("durable-park: lift problems can be saved again.", flush=True)
-        alerted = False
-    if (state.get("alerted") is True) != alerted:
-        _save_state(state_path, {"alerted": alerted})
+    if sorted(alerted) != present:
+        _save_state(state_path, {"alerted": present})
 
 
 def _lift_check(ledger_path: str, now: datetime) -> None:
@@ -482,11 +483,14 @@ def _lift_check(ledger_path: str, now: datetime) -> None:
     ALERT per error type until it works again, then one recovery line: a check that cannot run must not be silent."""
     directory = os.path.dirname(os.path.abspath(ledger_path))
     fail_path = os.path.join(directory, LIFT_CHECK_STATE)
-    try:
-        _lift_unwritable_alert(ledger_path, now)
-        _lift_alert(ledger_path, now)
-    except Exception as exc:  # noqa: BLE001
-        name = type(exc).__name__
+    failure: Exception | None = None
+    for check in (_lift_unwritable_alert, _lift_alert):  # one failing never hides the other
+        try:
+            check(ledger_path, now)
+        except Exception as exc:  # noqa: BLE001
+            failure = failure or exc
+    if failure is not None:
+        name = type(failure).__name__
         try:
             already = _load_state(fail_path).get("failed") == name
         except Exception:  # noqa: BLE001

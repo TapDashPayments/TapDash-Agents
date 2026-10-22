@@ -3,7 +3,10 @@ import hashlib
 import json
 import logging
 import fcntl
+import os
 import re
+import subprocess
+import sys
 import threading
 import time
 
@@ -718,6 +721,11 @@ def test_lift_treats_a_blank_nested_note_as_empty_not_as_the_approvers_reason():
 MARKER = "lift_status.unwritable"
 
 
+def markers(tmp_path):
+    """The per-process unwritable markers next to the report: ``lift_status.unwritable.<owner>``."""
+    return sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(MARKER))
+
+
 def block_lock(tmp_path):
     """Make ``lift_status.json.lock`` impossible to open (a directory of that name)."""
     (tmp_path / "lift_status.json.lock").mkdir()
@@ -731,7 +739,8 @@ def test_a_report_that_cannot_be_written_leaves_a_marker_with_time_and_error_typ
     block_lock(tmp_path)
     status = LiftStatus(str(tmp_path / "lift_status.json"))
     status.record("t", "declared", "params")
-    text = (tmp_path / MARKER).read_text()
+    (marker,) = markers(tmp_path)
+    text = (tmp_path / marker).read_text()
     stamp, error = text.split()
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp) and error == "IsADirectoryError"
     assert "declared" not in text and "params" not in text
@@ -741,16 +750,16 @@ def test_the_marker_is_removed_by_the_next_successful_write(tmp_path):
     block_lock(tmp_path)
     status = LiftStatus(str(tmp_path / "lift_status.json"))
     status.record("t", "declared", "params")
-    assert (tmp_path / MARKER).exists() and not (tmp_path / "lift_status.json").exists()
+    assert markers(tmp_path) and not (tmp_path / "lift_status.json").exists()
     unblock_lock(tmp_path)
     status.flush()
-    assert not (tmp_path / MARKER).exists()
+    assert markers(tmp_path) == []
     assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
 
 
 def test_no_marker_while_the_report_is_written_fine(tmp_path):
     LiftStatus(str(tmp_path / "lift_status.json")).record("t", "declared", "params")
-    assert not (tmp_path / MARKER).exists()
+    assert markers(tmp_path) == []
 
 
 def test_a_report_in_a_missing_directory_makes_no_marker_and_no_error(tmp_path, caplog):
@@ -764,14 +773,14 @@ def test_unwritten_entries_are_never_evicted_and_overflow_is_counted(tmp_path):
     status = LiftStatus(str(tmp_path / "lift_status.json"))
     for i in range(MAX_LIFT_ENTRIES + 5):
         status.record(f"tool_{i}", "declared", "params")
-    assert (tmp_path / MARKER).exists()
+    assert markers(tmp_path)
     unblock_lock(tmp_path)
     status.flush()
     entries = read_entries(tmp_path / "lift_status.json")
     assert sum(e["count"] for e in entries) == MAX_LIFT_ENTRIES + 5  # nothing was lost, all occurrences counted
     assert {"tool_0", "tool_1"} <= {e["tool"] for e in entries}  # the oldest unwritten entries were kept
     assert any(e["tool"] == "*" and e["kind"] == "declared" and e["count"] == 5 for e in entries)
-    assert not (tmp_path / MARKER).exists()
+    assert markers(tmp_path) == []
 
 
 def test_a_written_entry_may_make_room_but_never_an_entry_of_the_same_write(tmp_path):
@@ -799,11 +808,12 @@ def test_a_held_lock_never_blocks_the_caller_for_more_than_a_moment(tmp_path):
         status.record("t", "declared", "params")
         assert time.monotonic() - started < 1.0  # about 200 ms of retries, never an unbounded wait
         assert not (tmp_path / "lift_status.json").exists()
-        assert not (tmp_path / MARKER).exists()  # a mere lock timeout is not an outage yet
+        assert markers(tmp_path) == [f"{MARKER}.{os.getpid()}"]  # unsaved problems are never silent
     finally:
         holder.close()
-    status.flush()  # the next flush writes what was kept pending
+    status.flush()  # the next flush writes what was kept pending and clears the marker
     assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+    assert markers(tmp_path) == []
 
 
 def test_a_lock_that_stays_held_past_the_next_flush_leaves_the_marker(tmp_path, monkeypatch):
@@ -812,13 +822,13 @@ def test_a_lock_that_stays_held_past_the_next_flush_leaves_the_marker(tmp_path, 
     try:
         status = LiftStatus(str(tmp_path / "lift_status.json"))
         status.record("t", "declared", "params")
-        assert not (tmp_path / MARKER).exists()
         status.flush()
-        assert (tmp_path / MARKER).read_text().split()[1] == "LockTimeout"
+        (marker,) = markers(tmp_path)
+        assert (tmp_path / marker).read_text().split()[1] == "LockTimeout"
     finally:
         holder.close()
     status.flush()
-    assert not (tmp_path / MARKER).exists()
+    assert markers(tmp_path) == []
     assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
 
 
@@ -832,13 +842,161 @@ def test_a_report_that_was_unreadable_is_flagged_so_the_sweep_hears_of_the_reset
 
 
 def test_a_marker_left_by_an_earlier_run_is_cleared_by_the_first_flush_once_writing_works(tmp_path):
-    (tmp_path / MARKER).write_text("2026-10-22T10:00:00Z PermissionError\n")
-    LiftStatus(str(tmp_path / "lift_status.json")).flush()  # the gateway restarted; nothing to record yet
-    assert not (tmp_path / MARKER).exists() and (tmp_path / "lift_status.json").exists()
+    (tmp_path / f"{MARKER}.me").write_text("2026-10-22T10:00:00Z PermissionError\n")
+    LiftStatus(str(tmp_path / "lift_status.json"), owner="me").flush()  # restarted; nothing to record yet
+    assert markers(tmp_path) == [] and (tmp_path / "lift_status.json").exists()
+
+
+def test_a_marker_of_another_owner_is_never_cleared_by_a_flush(tmp_path):
+    (tmp_path / f"{MARKER}.gone").write_text("2026-10-22T10:00:00Z PermissionError\n")  # a process that is gone
+    LiftStatus(str(tmp_path / "lift_status.json"), owner="me").flush()
+    assert markers(tmp_path) == [f"{MARKER}.gone"]
 
 
 def test_a_marker_stays_while_the_report_still_cannot_be_written(tmp_path):
-    (tmp_path / MARKER).write_text("2026-10-22T10:00:00Z PermissionError\n")
+    (tmp_path / f"{MARKER}.me").write_text("2026-10-22T10:00:00Z PermissionError\n")
     block_lock(tmp_path)
-    LiftStatus(str(tmp_path / "lift_status.json")).flush()
-    assert (tmp_path / MARKER).exists()
+    LiftStatus(str(tmp_path / "lift_status.json"), owner="me").flush()
+    assert markers(tmp_path) == [f"{MARKER}.me"]
+
+
+# ---- review fixes: one lock bound per call, a marker per process, nothing lost at exit, bounded schema work --------
+
+
+def test_a_whole_calls_problems_wait_for_the_report_lock_once_not_once_per_problem(tmp_path):
+    holder = hold_lock(tmp_path)
+    try:
+        status = LiftStatus(str(tmp_path / "lift_status.json"))
+        problems = [("note_dropped", f"k{i}", "empty") for i in range(10)]
+        started = time.monotonic()
+        status.record_many("t", problems)
+        assert time.monotonic() - started < 0.6  # one ~0.2 s bound, not ten
+    finally:
+        holder.close()
+    status.flush()
+    assert sum(e["count"] for e in read_entries(tmp_path / "lift_status.json")) == 10  # nothing lost
+
+
+def test_threads_with_several_problems_each_never_wait_longer_than_one_bound_while_another_process_holds_the_lock(tmp_path):
+    holder = hold_lock(tmp_path)
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    waits = []
+
+    def one_call(n):
+        started = time.monotonic()
+        status.record_many("t", [("note_dropped", f"k{n}-{i}", "empty") for i in range(5)])
+        waits.append(time.monotonic() - started)
+
+    threads = [threading.Thread(target=one_call, args=(n,)) for n in range(8)]
+    began = time.monotonic()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    wall = time.monotonic() - began
+    try:
+        assert len(waits) == 8 and max(waits) < 0.6 and wall < 0.9  # about 0.2 s each, all at once
+    finally:
+        holder.close()
+    status.flush()
+    assert sum(e["count"] for e in read_entries(tmp_path / "lift_status.json")) == 40  # no problem lost
+
+
+def test_record_many_with_no_problems_does_nothing(tmp_path):
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    status.record_many("t", [])
+    assert not (tmp_path / "lift_status.json").exists() and markers(tmp_path) == []
+
+
+def test_the_default_marker_name_carries_the_process_id(tmp_path):
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    assert status.marker_path == str(tmp_path / f"{MARKER}.{os.getpid()}")
+
+
+def test_one_writers_marker_survives_another_writers_success_and_is_cleared_only_by_its_owner(tmp_path, monkeypatch):
+    path = str(tmp_path / "lift_status.json")
+    a, b = LiftStatus(path, owner="a"), LiftStatus(path, owner="b")
+
+    def cannot_read(*args, **kwargs):
+        raise PermissionError("not mine")
+
+    monkeypatch.setattr(a, "_read_disk", cannot_read)
+    a.record("t", "declared", "params")
+    assert markers(tmp_path) == [f"{MARKER}.a"]
+    b.record("t", "lift_error")  # B writes fine
+    b.flush()
+    assert markers(tmp_path) == [f"{MARKER}.a"]  # B's success did not clear A's marker
+    monkeypatch.undo()
+    a.flush()
+    assert markers(tmp_path) == []
+    assert {e["kind"] for e in read_entries(tmp_path / "lift_status.json")} == {"declared", "lift_error"}
+
+
+def test_the_report_the_lock_and_the_marker_are_readable_by_other_users(tmp_path, monkeypatch):
+    previous = os.umask(0o077)
+    try:
+        path = str(tmp_path / "lift_status.json")
+        LiftStatus(path).record("t", "declared", "params")
+        failing = LiftStatus(path, owner="x")
+        monkeypatch.setattr(failing, "_read_disk", lambda *a, **k: (_ for _ in ()).throw(OSError("no")))
+        failing.record("t", "lift_error")
+    finally:
+        os.umask(previous)
+    mode = lambda name: (tmp_path / name).stat().st_mode & 0o777
+    assert mode("lift_status.json") == 0o644  # the sweep may run as another user
+    assert mode("lift_status.json.lock") == 0o666  # another user's gateway must be able to take the lock
+    assert mode(f"{MARKER}.x") == 0o644
+
+
+def test_pending_entries_are_flushed_when_the_process_exits(tmp_path):
+    import durable_park
+    path = tmp_path / "lift_status.json"
+    holder = hold_lock(tmp_path)
+    code = (
+        "import sys\n"
+        "from durable_park.gatecall import LiftStatus\n"
+        "status = LiftStatus(sys.argv[1])\n"
+        "status.record('t', 'lift_error')\n"
+        "print('pending', flush=True)\n"
+        "sys.stdin.readline()\n")
+    plugin_dir = os.path.dirname(os.path.dirname(durable_park.__file__))
+    proc = subprocess.Popen([sys.executable, "-c", code, str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            text=True, env={**os.environ, "PYTHONPATH": plugin_dir})
+    try:
+        assert proc.stdout.readline().strip() == "pending"  # its write timed out: the entry is only in memory
+        assert not path.exists()
+        holder.close()
+        proc.stdin.write("\n")
+        proc.stdin.close()
+        proc.wait(timeout=20)
+    finally:
+        proc.kill()
+        proc.stdout.close()
+    assert [e["kind"] for e in read_entries(path)] == ["lift_error"]
+    assert markers(tmp_path) == []
+
+
+def fan_out_schema(width=20, levels=10):
+    """Every definition offers ``width`` branches that each lead to the next definition: ``width ** levels`` paths."""
+    defs = {}
+    for level in range(levels):
+        leaf = {"type": "object"} if level == levels - 1 else {"$ref": f"#/$defs/D{level + 1}"}
+        defs[f"D{level}"] = {"anyOf": [leaf] * width}
+    return {"type": "object", "$defs": defs,
+            "properties": {"params": {"$ref": "#/$defs/D0"}, "withhuman_context": {"type": "string"}}}
+
+
+def test_a_schema_with_exponential_fan_out_is_judged_within_a_small_budget_and_says_so():
+    args = {"params": {"a": 1, "withhuman_context": "why"}}
+    started = time.monotonic()
+    out, reports = lift_report(args, fan_out_schema())
+    assert time.monotonic() - started < 0.5
+    assert out == {"params": {"a": 1}, "withhuman_context": "why"}  # cannot tell: lift, as before
+    assert reports == [("schema_too_complex", "params", "")]  # and not silently
+
+
+def test_a_schema_inside_the_budget_is_judged_exactly_as_before():
+    schema = fan_out_schema(width=3, levels=3)
+    schema["$defs"]["D2"] = {"properties": {"withhuman_context": {"type": "string"}}}
+    out, reports = lift_report({"params": {"withhuman_context": "x"}}, schema)
+    assert out == {"params": {"withhuman_context": "x"}} and reports == [("declared", "params", "")]
