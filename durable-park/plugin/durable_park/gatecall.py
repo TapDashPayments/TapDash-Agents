@@ -740,7 +740,8 @@ class LiftStatus:
 
 def build_call(row: ParkRow) -> Call:
     """The AAP call for a ledger row: a pure function of the row (the executor replays it and must send the
-    identical body). Raises ``ValueError`` for arguments that are not strict JSON (e.g. NaN)."""
+    identical body, so the user and profile are the ones saved with the row at park time, never the current
+    session's). Raises ``ValueError`` for arguments that are not strict JSON (e.g. NaN)."""
     stored = json.loads(row.args_json)
     arguments, truncated = redact_arguments(stored)
     json.dumps(arguments, allow_nan=False)
@@ -748,6 +749,10 @@ def build_call(row: ParkRow) -> Call:
     reasoning = cut_utf16(note) if isinstance(note, str) and note else None
     context: dict[str, Any] = {
         "args_sha256": row.args_digest, "platform": platform_of(row.session_key), "session_key": row.session_key}
+    if row.user_id:
+        context["user_id"] = row.user_id
+    if row.profile:
+        context["profile"] = row.profile
     if truncated:
         context["args_truncated"] = True
     return Call(

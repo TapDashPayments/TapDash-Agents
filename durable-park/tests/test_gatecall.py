@@ -1151,3 +1151,39 @@ def test_an_unlisted_key_is_judged_the_same_whatever_the_order_of_the_listed_one
         "b": plain_rules, "a": complex_rules, "withhuman_context": {"type": "string"}}}
     args = {"zz": {"withhuman_context": "x"}}
     assert lift_report(args, first) == lift_report(args, second) == (args, [("declared", "zz", "")])
+
+
+def _fake_session_env(monkeypatch, values):
+    import types
+    module = types.ModuleType("gateway.session_context")
+    module.get_session_env = lambda name, default="": values.get(name, default)
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.session_context", module)
+
+
+def _scoped_row(tmp_path, **scope):
+    ledger = Ledger(str(tmp_path / "ledger.db"))
+    return ledger.park(
+        session_key="agent:main:telegram:dm:42", session_id="sess-1", tool_call_id="call-1",
+        tool="mcp__wh__quickbooks__create_payment", args={"amount": 12.5}, call_key="ck", server="park:quickbooks",
+        **scope)
+
+
+def test_build_call_sends_the_user_and_profile_saved_with_the_row(tmp_path):
+    call = build_call(_scoped_row(tmp_path, user_id="usr_123", profile="finance_admin"))
+    assert call.context["user_id"] == "usr_123" and call.context["profile"] == "finance_admin"
+
+
+def test_build_call_ignores_the_session_it_runs_in(tmp_path, monkeypatch):
+    """The executor replays the call and must send the body of park time, whoever is in the chat now."""
+    row = _scoped_row(tmp_path, user_id="u1", profile="p1")
+    _fake_session_env(monkeypatch, {"HERMES_SESSION_USER_ID": "u2", "HERMES_SESSION_PROFILE": "p2"})
+    context = build_call(row).context
+    assert context["user_id"] == "u1" and context["profile"] == "p1"
+
+
+def test_a_row_parked_without_user_or_profile_never_gets_them(tmp_path, monkeypatch):
+    row = _scoped_row(tmp_path)  # a row from before this feature has NULLs
+    _fake_session_env(monkeypatch, {"HERMES_SESSION_USER_ID": "u2", "HERMES_SESSION_PROFILE": "p2"})
+    context = build_call(row).context
+    assert "user_id" not in context and "profile" not in context

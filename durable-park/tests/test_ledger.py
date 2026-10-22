@@ -361,3 +361,37 @@ def test_migration_tolerates_a_concurrent_add_column(tmp_path, monkeypatch):
     Ledger(path)  # the column exists now
     monkeypatch.setattr(Ledger, "_column_names", staticmethod(lambda con: ["park_id"]))  # a stale PRAGMA read
     Ledger(path)  # its ALTER hits "duplicate column name": must not raise
+
+
+def test_a_ledger_from_before_user_and_profile_is_migrated_in_place(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    con = sqlite3.connect(path)
+    con.executescript(OLD_SCHEMA + "ALTER TABLE parks ADD COLUMN decided_by TEXT;")
+    con.execute("INSERT INTO parks (park_id, session_key, session_id, tool_call_id, tool, server, args_json,"
+                " args_digest, call_key, status, created_at, updated_at)"
+                " VALUES ('P-OLD','k','s','c','t','srv','{}','d','ck','approved','2026-10-20T00:00:00.000000Z',"
+                "'2026-10-20T00:00:00.000000Z')")
+    con.commit()
+    con.close()
+    ledger = Ledger(path)
+    old = ledger.get("P-OLD")
+    assert old.status == "approved" and old.user_id is None and old.profile is None
+    Ledger(path)  # idempotent: a second open finds the columns and changes nothing
+    row = ledger.park(session_key="k", session_id="s2", tool_call_id="c2", tool="t", args={}, call_key="x",
+                      server="srv", user_id="u1", profile="p1")
+    assert (ledger.get(row.park_id).user_id, ledger.get(row.park_id).profile) == ("u1", "p1")
+    assert ledger.get("P-OLD").user_id is None  # the old row is untouched
+    check = sqlite3.connect(path)
+    cols = [r[1] for r in check.execute("PRAGMA table_info(parks)")]
+    check.close()
+    assert cols.count("user_id") == 1 and cols.count("profile") == 1
+
+
+def test_a_replayed_park_keeps_the_user_and_profile_of_the_first_one(tmp_path):
+    ledger = make_ledger(tmp_path)
+    first = ledger.park(session_key="k", session_id="s", tool_call_id="c", tool="t", args={}, call_key="x",
+                        server="srv", user_id="u1", profile="p1")
+    again = ledger.park(session_key="k", session_id="s", tool_call_id="c", tool="t", args={}, call_key="x",
+                        server="srv", user_id="u2", profile="p2")
+    assert again.park_id == first.park_id and (again.user_id, again.profile) == ("u1", "p1")

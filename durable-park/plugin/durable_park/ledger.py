@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS parks (
     notified_at      TEXT,
     gateway_passed_at TEXT,
     decided_by       TEXT,
+    user_id          TEXT,
+    profile          TEXT,
     UNIQUE (session_id, tool_call_id)
 );
 CREATE INDEX IF NOT EXISTS parks_session ON parks (session_key, status);
@@ -82,6 +84,8 @@ class ParkRow:
     notified_at: str | None
     gateway_passed_at: str | None
     decided_by: str | None = None  # who decided in withHuman ("Name (channel)"), when the audit log said
+    user_id: str | None = None  # the Hermes session's user and profile at park time (NULL = unknown or a row
+    profile: str | None = None  # from before they were saved); the approval call is rebuilt from the row alone
 
 
 _COLUMNS = tuple(f.name for f in fields(ParkRow))
@@ -150,24 +154,25 @@ class Ledger:
         self.path = path
         with self._connect() as con:
             con.executescript(_SCHEMA)
-            self._add_decided_by(con)
+            self._add_missing_columns(con)
 
     @staticmethod
     def _column_names(con: sqlite3.Connection) -> list[str]:
         return [r[1] for r in con.execute("PRAGMA table_info(parks)")]
 
     @staticmethod
-    def _add_decided_by(con: sqlite3.Connection) -> None:
-        """Add ``decided_by`` to a ledger created before it existed. Idempotent; the gateway, the sweep and the
-        bridge all open this file through this class, so another process may add the column first: that
-        ("duplicate column name") is fine."""
-        if "decided_by" in Ledger._column_names(con):
-            return
-        try:
-            con.execute("ALTER TABLE parks ADD COLUMN decided_by TEXT")
-        except sqlite3.OperationalError as exc:
-            if "duplicate column name" not in str(exc):
-                raise
+    def _add_missing_columns(con: sqlite3.Connection) -> None:
+        """Add ``decided_by``, ``user_id`` and ``profile`` to a ledger created before they existed (old rows get
+        NULL). Idempotent; the gateway and the sweep open this file through this class, so another process may add a
+        column first: that ("duplicate column name") is fine."""
+        for name in ("decided_by", "user_id", "profile"):
+            if name in Ledger._column_names(con):
+                continue
+            try:
+                con.execute(f"ALTER TABLE parks ADD COLUMN {name} TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -183,8 +188,10 @@ class Ledger:
             con.close()
 
     def park(self, *, session_key: str, session_id: str, tool_call_id: str, tool: str,
-             args: dict, call_key: str, server: str) -> ParkRow:
-        """Record a parked call; idempotent on (session_id, tool_call_id)."""
+             args: dict, call_key: str, server: str, user_id: str | None = None,
+             profile: str | None = None) -> ParkRow:
+        """Record a parked call; idempotent on (session_id, tool_call_id) (a replay keeps the first row's user and
+        profile)."""
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             try:
@@ -198,10 +205,10 @@ class Ledger:
                 now = _now()
                 con.execute(
                     "INSERT INTO parks (park_id, session_key, session_id, tool_call_id, tool, server,"
-                    " args_json, args_digest, call_key, status, created_at, updated_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,'parked',?,?)",
+                    " args_json, args_digest, call_key, status, created_at, updated_at, user_id, profile)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,'parked',?,?,?,?)",
                     (park_id, session_key, session_id, tool_call_id, tool, server,
-                     canonical_json(args), args_digest(args), call_key, now, now))
+                     canonical_json(args), args_digest(args), call_key, now, now, user_id, profile))
                 row = con.execute("SELECT * FROM parks WHERE park_id=?", (park_id,)).fetchone()
                 con.execute("COMMIT")
                 return _row(row)

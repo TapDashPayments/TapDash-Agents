@@ -1030,3 +1030,79 @@ def test_note_cut_and_note_not_text_are_said_once_per_tool_and_never_repeated(wo
     write_lift(tmp_path, (LIFT_TOOL, kind, ""), ("mcp__wh__quickbooks__get_bill", kind, ""), count=900)
     other, = runs(world, monkeypatch, capsys, 1)
     assert other.splitlines() == [text.format(tool="mcp__wh__quickbooks__get_bill")]  # another tool is new
+
+TEAMS_URL = "https://example.invalid/teams/webhook/SECRET-TOKEN"
+
+
+class _Resp:
+    def __init__(self, status):
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _teams(monkeypatch, outcome=200):
+    """Fake the Teams POST: returns the list of (url, json body) sent."""
+    sent = []
+
+    def fake_urlopen(request, timeout=None):
+        sent.append((request.full_url, json.loads(request.data)))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _Resp(outcome)
+
+    monkeypatch.setattr(sweep.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("TEAMS_ALERT_WEBHOOK_URL", TEAMS_URL)
+    return sent
+
+
+def test_teams_off_without_a_webhook_setting(world, monkeypatch):
+    sent = _teams(monkeypatch)
+    monkeypatch.delenv("TEAMS_ALERT_WEBHOOK_URL")
+    world.row("executing", executing_minutes_ago=30)
+    assert world.main(monkeypatch) == 0
+    assert sent == []
+
+
+def test_teams_gets_the_alert_lines_the_sweep_printed(world, monkeypatch, capsys):
+    sent = _teams(monkeypatch)
+    pid = world.row("executing", executing_minutes_ago=30)
+    assert world.main(monkeypatch) == 0
+    printed = capsys.readouterr().out
+    assert printed  # stdout (the Telegram delivery) is unchanged
+    assert sent == [(TEAMS_URL, {"text": printed.strip()})]
+    assert pid in sent[0][1]["text"] and '"n"' not in sent[0][1]["text"]  # no argument values
+
+
+def test_teams_not_posted_when_there_is_no_alert(world, monkeypatch):
+    sent = _teams(monkeypatch)
+    assert world.main(monkeypatch) == 0
+    assert sent == []
+
+
+@pytest.mark.parametrize("outcome, reason", [
+    (OSError("boom"), "OSError"),
+    (urllib.error.HTTPError(TEAMS_URL, 500, "Server Error", {}, None), "HTTP 500")])
+def test_teams_failure_is_one_plain_alert_line_and_exit_zero(world, monkeypatch, capsys, outcome, reason):
+    _teams(monkeypatch, outcome)
+    world.row("executing", executing_minutes_ago=30)
+    assert world.main(monkeypatch) == 0  # the cron wrapper must not wrap the Telegram message in "exit code 1"
+    out = capsys.readouterr()
+    lines = out.out.splitlines()
+    assert "outcome UNKNOWN" in lines[0]  # the Telegram alert still goes out
+    assert lines[1:] == [f"durable-park ALERT: Teams post failed ({reason})."]  # one plain line, no URL
+    assert "teams alert failed" in out.err
+    assert "SECRET-TOKEN" not in out.out + out.err  # the webhook URL is never logged
+
+
+def test_a_crashing_sweep_still_posts_what_it_printed_and_raises(world, monkeypatch, capsys):
+    sent = _teams(monkeypatch)
+    world.row("executing", executing_minutes_ago=30)
+    monkeypatch.setattr(sweep, "_wake_targets", lambda ledger: (_ for _ in ()).throw(RuntimeError("bug")))
+    with pytest.raises(RuntimeError, match="bug"):  # the sweep's own error is not hidden
+        world.main(monkeypatch)
+    assert len(sent) == 1 and "outcome UNKNOWN" in sent[0][1]["text"]
