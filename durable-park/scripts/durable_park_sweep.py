@@ -80,6 +80,23 @@ def _positive_int(text: str) -> int:
     return value
 
 
+
+def send_teams_alert(webhook_url: str, message: str) -> bool:
+    """Send an alert message to a Microsoft Teams Incoming Webhook if configured."""
+    if not webhook_url:
+        return False
+    try:
+        import urllib.request
+        payload = json.dumps({"text": message}).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url, data=payload, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return 200 <= resp.status < 300
+    except Exception as exc:
+        _err(f"teams alert failed ({type(exc).__name__}): {exc}")
+        return False
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="durable-park sweep (Hermes cron --no-agent script)")
     parser.add_argument("--ledger", required=True, help="path of the ledger SQLite file")
@@ -87,6 +104,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--wake-url", default=DEFAULT_WAKE_URL)
     parser.add_argument("--retention-days", type=_positive_int, default=DEFAULT_RETENTION_DAYS,
                         help="delete allowed/refused/cancelled rows not updated for this many days (>= 1)")
+    parser.add_argument("--teams-webhook", default=os.environ.get("TEAMS_ALERT_WEBHOOK_URL", ""),
+                        help="Incoming webhook URL for sending alerts to Microsoft Teams")
     return parser.parse_args(argv)
 
 

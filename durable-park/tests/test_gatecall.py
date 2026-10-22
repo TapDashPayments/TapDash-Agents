@@ -178,3 +178,10 @@ def test_gate_denied(tmp_path):
     provider.decide(pending.request_id, "denied", note="no")
     verdict = gate.check(build_call(row))
     assert isinstance(verdict, Deny) and verdict.status == "denied"
+
+
+def test_build_call_with_user_profile(tmp_path):
+    row = make_row(tmp_path)
+    call = build_call(row, user_id="usr_123", profile="finance_admin")
+    assert call.context["user_id"] == "usr_123"
+    assert call.context["profile"] == "finance_admin"

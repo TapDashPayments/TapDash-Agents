@@ -105,13 +105,32 @@ def bounded_http(inner: httpx.BaseTransport | None = None) -> httpx.Client:
         timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False)
 
 
-def build_call(row: ParkRow) -> Call:
+def default_user_profile() -> tuple[str, str]:
+    """Returns (user_id, profile) from Hermes context env vars if present."""
+    try:
+        from gateway.session_context import get_session_env
+        user_id = get_session_env("HERMES_USER_ID", "") or ""
+        profile = get_session_env("HERMES_PROFILE", "") or ""
+        return user_id, profile
+    except ImportError:
+        return "", ""
+
+
+def build_call(row: ParkRow, user_id: str = "", profile: str = "") -> Call:
     """The AAP call for a ledger row: a pure function of the row (the executor replays it and must send the
     identical body). Raises ``ValueError`` for arguments that are not strict JSON (e.g. NaN)."""
     arguments, truncated = redact_arguments(json.loads(row.args_json))
     json.dumps(arguments, allow_nan=False)
     context: dict[str, Any] = {
         "args_sha256": row.args_digest, "platform": platform_of(row.session_key), "session_key": row.session_key}
+    if not user_id or not profile:
+        env_user, env_profile = default_user_profile()
+        user_id = user_id or env_user
+        profile = profile or env_profile
+    if user_id:
+        context["user_id"] = user_id
+    if profile:
+        context["profile"] = profile
     if truncated:
         context["args_truncated"] = True
     return Call(

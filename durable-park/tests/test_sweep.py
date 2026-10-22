@@ -647,3 +647,8 @@ def test_gateway_mainpid_sets_xdg_runtime_dir_when_unset(monkeypatch):
 def test_gateway_mainpid_keeps_an_existing_xdg_runtime_dir(monkeypatch):
     seen = _run_mainpid(monkeypatch, {"XDG_RUNTIME_DIR": "/run/user/77"})
     assert seen.get("env") is None  # inherit as is
+
+
+def test_send_teams_alert_disabled(tmp_path):
+    from durable_park_sweep import send_teams_alert
+    assert send_teams_alert("", "test message") is False
