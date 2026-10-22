@@ -639,8 +639,20 @@ grep -i -e 'durable-park loaded' -e 'foreign pre_tool_call' ~/.hermes/logs/agent
 1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
 2. `hermes plugins disable langfuse`, then restart `hermes-gateway`. Nothing is sent after the restart.
 
-To remove it for good, also take `hermes_plugins.langfuse.on_pre_tool_call` out of `observer_hooks` (and its row in
-[Hooks reviewed so far](#hooks-reviewed-so-far)), and delete the two key lines from `~/.hermes/.env`.
+Leave `hermes_plugins.langfuse.on_pre_tool_call` in `observer_hooks` for now: a listed hook that is not loaded does no
+harm.
+
+To remove it for good, **in this order**:
+
+1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
+2. `hermes plugins disable langfuse` (or remove the plugin), then restart `hermes-gateway`. The plugin is no longer loaded.
+3. Only now take `hermes_plugins.langfuse.on_pre_tool_call` out of `observer_hooks` (and its row in
+   [Hooks reviewed so far](#hooks-reviewed-so-far)). Check the ledger again, then restart `hermes-gateway` again.
+4. Delete the two key lines from `~/.hermes/.env` and revoke the key pair in Langfuse.
+
+Why this order: while the plugin is still loaded, its hook is a foreign `pre_tool_call` hook. If it is taken out of
+`observer_hooks` first, durable-park refuses every tool call ([Allow another
+hook](#allow-another-hook-observer_hooks)).
 
 ### Rotate the keys
 
@@ -660,7 +672,7 @@ To remove it for good, also take `hermes_plugins.langfuse.on_pre_tool_call` out 
 The hook is listed in `observer_hooks` because of the code that was read: v2.0.0 at commit `c2a9596`. After **any**
 update or reinstall of the plugin (a new version or commit), read its hook again (steps 2 to 5 of [Allow another
 hook](#allow-another-hook-observer_hooks)) and update the row in [Hooks reviewed so far](#hooks-reviewed-so-far). Until
-then, disable the plugin. Also update the version in the root [Built on](../../README.md#built-on) table.
+then, turn it off as in [Turn it off](#turn-it-off) (ledger check, disable, restart; leave the `observer_hooks` entry). Also update the version in the root [Built on](../../README.md#built-on) table.
 
 ## Add a form-checked tool
 
