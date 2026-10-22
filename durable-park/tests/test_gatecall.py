@@ -292,17 +292,115 @@ def test_build_call_with_a_note_is_still_a_pure_function_of_the_row(tmp_path):
     assert bodies[0]["agent_reasoning"] == "Find customer 58"
 
 
-@pytest.mark.parametrize("nested_rules", [
-    {"$ref": "#/$defs/params"},
-    {"allOf": [{"properties": {"withhuman_context": {"type": "string"}}}]},
-    {"anyOf": [{"type": "object"}]},
-    {"oneOf": [{"type": "object"}]},
-    {"patternProperties": {"^withhuman_": {"type": "string"}}},
-])
-def test_lift_skips_a_key_whose_rules_might_declare_the_field(nested_rules):
-    schema = {"properties": {"params": nested_rules, "withhuman_context": {"type": "string"}}}
-    args = {"params": {"criteria": "x", "withhuman_context": "maybe the server's"}}
-    assert lift_gateway_context(args, schema) == args
+def ctx_schema(nested, **extra):
+    """A gateway schema whose ``params`` rules are ``nested``; ``extra`` goes next to ``properties`` at the root."""
+    return {"properties": {"params": nested, "withhuman_context": {"type": "string"}}, **extra}
+
+
+NOTE_ARGS = {"params": {"criteria": "x", "withhuman_context": "the note"}}
+LIFTED_ARGS = {"params": {"criteria": "x"}, "withhuman_context": "the note"}
+DECLARING = {"type": "object", "properties": {"withhuman_context": {"type": "string"}}}
+PLAIN = {"type": "object", "properties": {"criteria": {"type": "string"}}}
+
+
+def lift_report(args, schema):
+    unknown = []
+    return lift_gateway_context(args, schema, on_unknown=unknown.append), unknown
+
+
+@pytest.mark.parametrize("schema", [
+    ctx_schema({"$ref": "#/$defs/P"}, **{"$defs": {"P": DECLARING}}),
+    ctx_schema({"$ref": "#/definitions/P"}, definitions={"P": DECLARING}),
+    ctx_schema({"$ref": "#/$defs/a~1b"}, **{"$defs": {"a/b": DECLARING}}),
+    ctx_schema({"$ref": "#/$defs/a~0b"}, **{"$defs": {"a~b": DECLARING}}),
+    ctx_schema({"$ref": "#/$defs/Outer"}, **{"$defs": {"Outer": {"$ref": "#/$defs/P"}, "P": DECLARING}}),
+    ctx_schema({"allOf": [PLAIN, DECLARING]}),
+    ctx_schema({"allOf": [{"$ref": "#/$defs/P"}]}, **{"$defs": {"P": DECLARING}}),
+    ctx_schema({"anyOf": [PLAIN, DECLARING]}),
+    ctx_schema({"oneOf": [DECLARING, {"$ref": "https://example.com/x.json"}]}),  # True beats unknown
+    ctx_schema({"patternProperties": {"^withhuman_": {"type": "string"}}}),
+    ctx_schema({"type": "object", "properties": {"criteria": {}}, "allOf": [DECLARING]}),  # siblings combine
+], ids=["defs", "definitions", "tilde1", "tilde0", "ref-chain", "allOf", "allOf-ref", "anyOf", "oneOf-true-wins",
+        "pattern", "siblings"])
+def test_lift_skips_a_key_whose_rules_declare_the_field(schema):
+    result, unknown = lift_report(NOTE_ARGS, schema)
+    assert result == NOTE_ARGS and unknown == []
+
+
+@pytest.mark.parametrize("schema", [
+    ctx_schema({"$ref": "#/$defs/P"}, **{"$defs": {"P": PLAIN}}),
+    ctx_schema({"$ref": "#/definitions/P"}, definitions={"P": PLAIN}),
+    ctx_schema({"$ref": "#/$defs/a~1b"}, **{"$defs": {"a/b": PLAIN}}),
+    ctx_schema({"allOf": [PLAIN, {"type": "object"}]}),
+    ctx_schema({"anyOf": [PLAIN, {"type": "object"}]}),
+    ctx_schema({"oneOf": [{"type": "object"}, True, False]}),
+    ctx_schema({"patternProperties": {"^x_": {"type": "string"}}}),
+    ctx_schema({"type": "object", "properties": {"criteria": {}}, "allOf": [PLAIN]}),
+], ids=["defs", "definitions", "tilde1", "allOf", "anyOf", "oneOf-bools", "pattern", "siblings"])
+def test_lift_lifts_when_the_rules_clearly_do_not_declare_the_field(schema):
+    result, unknown = lift_report(NOTE_ARGS, schema)
+    assert result == LIFTED_ARGS and unknown == []
+
+
+def _cycle():
+    return ctx_schema({"$ref": "#/$defs/A"}, **{"$defs": {"A": {"$ref": "#/$defs/B"}, "B": {"$ref": "#/$defs/A"}}})
+
+
+def _deep():
+    defs = {f"D{i}": {"$ref": f"#/$defs/D{i + 1}"} for i in range(30)}
+    defs["D30"] = PLAIN
+    return ctx_schema({"$ref": "#/$defs/D0"}, **{"$defs": defs})
+
+
+@pytest.mark.parametrize("schema", [
+    ctx_schema({"$ref": "https://example.com/x.json"}),
+    ctx_schema({"$ref": "other.json#/P"}),
+    ctx_schema({"$ref": "#/$defs/missing"}, **{"$defs": {}}),
+    ctx_schema({"$ref": "#/$defs/P/properties/x"}, **{"$defs": {"P": PLAIN}}),
+    ctx_schema({"$ref": 5}),
+    ctx_schema({"oneOf": [PLAIN, {"$ref": "https://example.com/x.json"}]}),  # no True, one unknown
+    ctx_schema({"anyOf": "not a list"}),
+    ctx_schema({"patternProperties": {"([": {"type": "string"}}}),  # invalid regex
+    ctx_schema({"$ref": "#/$defs/A"}, **{"$defs": {"A": {"$ref": "#/$defs/A"}}}),  # self reference
+    _cycle(),
+    _deep(),  # past the depth limit
+], ids=["remote", "relative-file", "missing", "pointer-into-nothing", "non-string-ref", "oneOf-unknown",
+        "bad-anyOf", "bad-regex", "self-ref", "cycle", "too-deep"])
+def test_lift_skips_and_reports_a_key_it_cannot_judge(schema):
+    result, unknown = lift_report(NOTE_ARGS, schema)
+    assert result == NOTE_ARGS and unknown == ["params"]
+
+
+def test_lift_reports_only_keys_that_carry_a_note_and_never_values():
+    schema = ctx_schema({"$ref": "https://example.com/x.json"})
+    quiet, unknown = lift_report({"params": {"criteria": "x"}}, schema)
+    assert quiet == {"params": {"criteria": "x"}} and unknown == []
+    args = {"params": {"withhuman_context": "private note"}, "zz": {"withhuman_context": "other"}}
+    schema["properties"]["zz"] = {"$ref": "#/nowhere"}
+    _, unknown = lift_report(args, schema)
+    assert unknown == ["params", "zz"]
+
+
+def test_lift_survives_a_failing_on_unknown_callback():
+    def boom(key):
+        raise RuntimeError("callback bug")
+
+    assert lift_gateway_context(NOTE_ARGS, ctx_schema({"$ref": "https://x/y"}), on_unknown=boom) == NOTE_ARGS
+
+
+def test_lift_treats_an_unexpected_error_while_judging_as_unknown(monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr("durable_park.gatecall._declares_context_in", boom)
+    result, unknown = lift_report(NOTE_ARGS, ctx_schema(PLAIN))
+    assert result == NOTE_ARGS and unknown == ["params"]
+
+
+def test_lift_ignores_a_non_dict_or_boolean_nested_schema():
+    for nested in (True, False, None, "object", []):
+        result, unknown = lift_report(NOTE_ARGS, ctx_schema(nested))
+        assert result == LIFTED_ARGS and unknown == [], nested
 
 
 def test_lift_still_lifts_when_the_nested_rules_are_plain():

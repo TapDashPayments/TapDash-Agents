@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Any, Callable, Iterable
 
 from agentapprovalprotocol import Allow, Deny, Pending
@@ -91,6 +92,10 @@ CHECK_UNAVAILABLE_MESSAGE = (
 )
 
 
+# The "could not tell" warning is logged once per (tool, key); this many pairs are remembered at most.
+MAX_UNKNOWN_WARNINGS = 1000
+
+
 def _block(message: str) -> dict[str, str]:
     return {"action": "block", "message": message}
 
@@ -145,12 +150,24 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
     checker = form_checker if form_checker is not None else FormChecker()
     exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
 
+    unknown_warned: set[tuple[str, str]] = set()  # (tool, key) pairs already warned about; bounded
+    unknown_lock = threading.Lock()
+
+    def warn_unknown(tool_name: str, key: str) -> None:
+        with unknown_lock:
+            if (tool_name, key) in unknown_warned or len(unknown_warned) >= MAX_UNKNOWN_WARNINGS:
+                return
+            unknown_warned.add((tool_name, key))
+        log.warning("could not tell whether %s.%s has its own withhuman_context; the note was left in place",
+                    tool_name, key)
+
     def lift_nested_context(tool_name: str, args: Any) -> Any:
         """``lift_gateway_context`` with the tool's registered rules; any error means the original arguments."""
         if not isinstance(args, dict):
             return args
         try:
-            return lift_gateway_context(args, (schema_fn or formcheck.registry_schema)(tool_name))
+            return lift_gateway_context(args, (schema_fn or formcheck.registry_schema)(tool_name),
+                                        on_unknown=lambda key: warn_unknown(tool_name, key))
         except Exception as exc:  # noqa: BLE001 - the lift is a cleanup, never a gate
             log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)
             return args
