@@ -1,0 +1,40 @@
+# Asks Kilo's Docs Keeper agent to check the docs of every new pull request.
+# Kilo checks out the PR, fixes docs on the PR branch if needed, and comments on the PR.
+# Needs two repository secrets (Settings > Secrets and variables > Actions):
+#   KILO_DOCS_KEEPER_WEBHOOK_URL  the trigger's webhook URL from Kilo (Webhooks / Triggers > docs-keeper-pr)
+#   KILO_DOCS_KEEPER_SECRET       the shared secret set on that trigger (sent in the X-Kilo-Secret header)
+# Without them the job skips quietly.
+name: Docs Keeper
+
+on:
+  pull_request:
+    # Not "synchronize": Docs Keeper's own pushes to the PR branch must not start it again.
+    types: [opened, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  ask-docs-keeper:
+    # Skip drafts, PRs from forks, and docs-only branches (Docs Keeper's own PRs use docs/...).
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !startsWith(github.event.pull_request.head.ref, 'docs/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Send the PR number to Kilo
+        env:
+          KILO_URL: ${{ secrets.KILO_DOCS_KEEPER_WEBHOOK_URL }}
+          KILO_SECRET: ${{ secrets.KILO_DOCS_KEEPER_SECRET }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$KILO_URL" ] || [ -z "$KILO_SECRET" ]; then
+            echo "Kilo secrets are not set, so Docs Keeper was not asked. See the comment at the top of this file."
+            exit 0
+          fi
+          jq -n --argjson pr "$PR_NUMBER" '{pr: $pr}' \
+            | curl -fsS --max-time 30 -X POST "$KILO_URL" \
+                -H "Content-Type: application/json" \
+                -H "X-Kilo-Secret: $KILO_SECRET" \
+                --data-binary @-

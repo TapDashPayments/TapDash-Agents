@@ -46,6 +46,7 @@ update every doc that is affected, and you check that what it now says is true.
 | CI on every push and pull request | the `Docs updated with code` job fails |
 | CI | every tracked file must be covered by the map, so new files get mapped (`--verify-map`) |
 | CI | every Mermaid diagram must parse (`tools/diagrams`), so a broken diagram cannot land |
+| Every new or reopened pull request | the `Docs Keeper` workflow asks Kilo's Docs Keeper agent to check the docs (see [Docs Keeper](#docs-keeper-automatic)) |
 
 See the rules: `python3 tools/docs_check/check_docs.py --explain`.
 
@@ -73,6 +74,25 @@ Docs-Not-Needed: renamed a local variable, no behaviour change
 ```
 
 Use it rarely: it shows up in the history, and reviewers will ask.
+
+### Docs Keeper (automatic)
+
+A helper checks the docs of your pull request for you. Its name is Docs Keeper, and it is an agent that lives in
+Kilo (a service we use).
+
+- **When it runs:** when you open a pull request, reopen one, or take one out of draft. It does not run for
+  drafts, for pull requests from forks, or for branches that start with `docs/`.
+- **What happens:** GitHub sends the pull request number to Kilo. Docs Keeper looks at the pull request and
+  checks that the docs match the code. If they do not, it may push a docs fix to your pull request branch. It
+  always leaves a comment that starts with `Docs Keeper:` to say what it did.
+- **What it never does:** it never changes code and it never merges anything.
+- **What it needs:** two repository secrets (Settings > Secrets and variables > Actions):
+  `KILO_DOCS_KEEPER_WEBHOOK_URL` (the web address Kilo gives us) and `KILO_DOCS_KEEPER_SECRET` (the shared
+  password for that address). If either one is missing, the workflow skips quietly and nothing happens.
+- **To turn it off:** delete those two secrets, or disable the `Docs Keeper` workflow in the Actions tab.
+
+The workflow is `.github/workflows/docs-keeper.yml`. It does not replace your own docs check: you still follow
+the rules above.
 
 ### Diagrams
 
