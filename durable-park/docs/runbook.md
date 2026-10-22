@@ -274,6 +274,12 @@ Alerts come from the sweep and arrive in the Telegram DM with the bot (the cron 
 
 `durable-park: P-XXXXXXXX outcome UNKNOWN - check <tool> in the sandbox before retrying`
 
+When the call timed out the message is different, so the bot can say so in plain words:
+
+`durable-park: P-XXXXXXXX outcome UNKNOWN - <tool> did not finish in time. It may or may not have gone through. Check <tool> in the sandbox before trying again.`
+
+It is the same state (`unknown`) and the same steps below: a timeout does not tell you whether the write landed.
+
 The approval was used but no result was recorded (gateway crash, session expired, interrupted call). The call
 **may or may not have happened**, and it will not be retried.
 

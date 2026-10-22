@@ -160,6 +160,11 @@ def unknown_message(row):
     return f"durable-park: {row.park_id} outcome UNKNOWN \u2014 check {row.tool} in the sandbox before retrying"
 
 
+def timeout_message(row):
+    return (f"durable-park: {row.park_id} outcome UNKNOWN — {row.tool} did not finish in time. "
+            f"It may or may not have gone through. Check {row.tool} in the sandbox before trying again.")
+
+
 def test_dispatch_exception_marks_unknown_without_leaking_text(env):
     row = env.approve()
     env.box.raises = RuntimeError("secret-token-123 exploded")
@@ -175,7 +180,6 @@ def test_dispatch_exception_marks_unknown_without_leaking_text(env):
 
 # Hermes' own error texts (tools/mcp_tool_handlers.py), as returned through registry.dispatch.
 UNKNOWN_ERRORS = {
-    "timeout": {"error": "MCP call failed: TimeoutError: tools/call create_payment timed out after 120s"},
     "interrupt": {"error": "MCP call interrupted: user sent a new message"},
     "teardown": {"error": "MCP call failed: RuntimeError: MCP tools/call create_payment on 'wh' was aborted by a "
                           "reconnect teardown; the request may already have been dispatched, so verify its effect "
@@ -191,6 +195,14 @@ UNKNOWN_ERRORS = {
                                  "needs_reauth": True, "server": "wh"},
     "stdio died mid-call": {"error": "MCP server 'wh' lost its stdio subprocess after the tool call began.",
                             "outcome_uncertain": True},
+}
+
+# A timeout is still ``unknown`` (the write may have landed), but the bot is told so in plain words.
+TIMEOUT_ERRORS = {
+    "mcp timeout": {"error": "MCP call failed: TimeoutError: tools/call create_payment timed out after 120s"},
+    "tagged": {"error": "[TOOL_ERROR] MCP call failed: TimeoutError: tools/call create_payment timed out after 300s"},
+    "respawn retry timed out": {"error": "MCP call failed after respawning the stdio subprocess for 'wh': "
+                                         "TimeoutError: tools/call create_payment timed out after 300s"},
 }
 
 FAILED_ERRORS = {
@@ -218,6 +230,20 @@ def test_ambiguous_tool_errors_mark_unknown(env, payload):
     after = env.ledger.get(row.park_id)
     assert after.status == "unknown" and after.note.startswith("tool error: ")
     assert json.loads(after.result_json) == payload  # the raw result is kept for the human who verifies
+    assert len(env.dispatched) == 1
+    assert run(env.build(), row.park_id)["status"] == "refused" and len(env.dispatched) == 1
+
+
+@pytest.mark.parametrize("payload", list(TIMEOUT_ERRORS.values()), ids=list(TIMEOUT_ERRORS))
+def test_timeouts_mark_unknown_with_the_timeout_message(env, payload):
+    row = env.approve()
+    env.box.result = json.dumps(payload)
+    out = run(env.build(), row.park_id)
+    assert out == {"status": "unknown", "park_id": row.park_id, "message": timeout_message(row)}
+    assert out["message"] != unknown_message(row)
+    after = env.ledger.get(row.park_id)
+    assert after.status == "unknown" and after.note.startswith("tool error: ")
+    assert json.loads(after.result_json) == payload
     assert len(env.dispatched) == 1
     assert run(env.build(), row.park_id)["status"] == "refused" and len(env.dispatched) == 1
 

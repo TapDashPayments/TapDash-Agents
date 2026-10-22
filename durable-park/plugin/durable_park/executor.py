@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -51,6 +52,8 @@ LOST_CAS_MESSAGE = "durable-park: {park_id} is already running or done"
 FAILED_MESSAGE = "durable-park: {park_id} failed: {note}"
 INTERNAL_MESSAGE = "durable-park: could not run {park_id}; see the gateway log"
 UNKNOWN_MESSAGE = "durable-park: {park_id} outcome UNKNOWN \u2014 check {tool} in the sandbox before retrying"
+TIMEOUT_UNKNOWN_MESSAGE = ("durable-park: {park_id} outcome UNKNOWN \u2014 {tool} did not finish in time. "
+                           "It may or may not have gone through. Check {tool} in the sandbox before trying again.")
 CHECK_FAILED_NOTE = "approval check failed; nothing ran"
 CRASH_EXIT_CODE = 70
 _NOTE_LIMIT = 200
@@ -117,6 +120,7 @@ def _decode(result: Any) -> Any:
 #   An unrecognised error text is ``failed``; only the prefixes above are ``unknown``.
 _UNKNOWN_ERROR_PREFIXES = ("MCP call failed", "MCP call interrupted", "Tool execution failed")
 _TOOL_ERROR_TAG = "[TOOL_ERROR] "
+_TIMEOUT_RE = re.compile(r"TimeoutError|timed out", re.IGNORECASE)
 
 
 def _tool_error(payload: Any) -> tuple[str, bool] | None:
@@ -156,11 +160,12 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
         log.warning("failed %s tool=%s: %s", row.park_id, row.tool, note)
         return _reply("failed", row.park_id, message=FAILED_MESSAGE.format(park_id=row.park_id, note=note))
 
-    def unknown(row: ParkRow, note: str, **fields: Any) -> str:
+    def unknown(row: ParkRow, note: str, *, timed_out: bool = False, **fields: Any) -> str:
         """The call may have run: never ``failed`` (the model would offer a retry), never retried automatically."""
         ledger.transition(row.park_id, "executing", "unknown", note=note, **fields)
         log.warning("outcome unknown %s tool=%s: %s", row.park_id, row.tool, note)
-        return _reply("unknown", row.park_id, message=UNKNOWN_MESSAGE.format(park_id=row.park_id, tool=row.tool))
+        message = TIMEOUT_UNKNOWN_MESSAGE if timed_out else UNKNOWN_MESSAGE
+        return _reply("unknown", row.park_id, message=message.format(park_id=row.park_id, tool=row.tool))
 
     def execute(park_id: str, state: dict[str, Any]) -> str:
         """``state`` is per call (the handler can run on several threads): the claimed row, and whether the
@@ -212,7 +217,8 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
         if classified is not None:
             error, outcome_unknown = classified
             if outcome_unknown:
-                return unknown(row, f"tool error: {error}", result_json=raw)
+                return unknown(row, f"tool error: {error}", timed_out=bool(_TIMEOUT_RE.search(error)),
+                               result_json=raw)
             ledger.transition(park_id, "executing", "failed", note=f"tool error: {error}", result_json=raw)
             log.warning("tool error for %s tool=%s", park_id, row.tool)
             return _reply("failed", park_id, message=FAILED_MESSAGE.format(

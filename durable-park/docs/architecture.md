@@ -448,6 +448,8 @@ stateDiagram-v2
   outcome (`executed`, `failed`, `unknown`) or a human decision (`denied`, `expired`) are kept.
 - `unknown` is final on purpose: the approval was already used, so the call is never retried automatically. A
   person checks QuickBooks (runbook: [UNKNOWN outcome](runbook.md#outcome-unknown)).
+  When the cause was a timeout, the executor's reply says the call "did not finish in time" and may or may not have
+  gone through; the state and the rule are the same.
 - `gateway_passed_at` is no longer written: the bridge does not open the ledger (it asks withHuman). The column
   stays; old rows may have it set and nothing reads it. `notified_at` is set when the chat was told about a decision.
 - `decided_by` (nullable, `"Name (channel)"`) is written in the same single update as the decision, only for
