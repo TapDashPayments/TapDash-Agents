@@ -163,8 +163,8 @@ class Ledger:
     @staticmethod
     def _add_missing_columns(con: sqlite3.Connection) -> None:
         """Add ``decided_by``, ``user_id`` and ``profile`` to a ledger created before they existed (old rows get
-        NULL). Idempotent; the gateway, the sweep and the bridge all open this file through this class, so another
-        process may add a column first: that ("duplicate column name") is fine."""
+        NULL). Idempotent; the gateway and the sweep open this file through this class, so another process may add a
+        column first: that ("duplicate column name") is fine."""
         for name in ("decided_by", "user_id", "profile"):
             if name in Ledger._column_names(con):
                 continue
