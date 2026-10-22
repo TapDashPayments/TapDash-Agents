@@ -136,7 +136,7 @@ flowchart LR
 
 | Part | Code | What it does |
 |---|---|---|
-| Langfuse plugin (not ours) | Nous Research's `langfuse` plugin, in `~/.hermes/plugins/langfuse`, loaded by the gateway | Sends traces to Langfuse Cloud: one per turn, one generation per model call, one observation per tool call, full content ([runbook](runbook.md#tracing-langfuse)). Its `pre_tool_call` hook only observes and is listed in `observer_hooks`. A one-way arrow out: Langfuse sends nothing back and cannot change a call. Installed 2026-10-22; on only once its keys are in. |
+| Langfuse plugin (not ours) | Nous Research's `langfuse` plugin, in `~/.hermes/plugins/langfuse`, loaded by the gateway | Sends traces to Langfuse Cloud: one per turn, one generation per model call, one observation per tool call, full content ([runbook](runbook.md#tracing-langfuse)). Its `pre_tool_call` hook only observes and is listed in `observer_hooks`. A one-way arrow out: Langfuse sends nothing back and cannot change a call. Live since 2026-10-22 04:37 UTC. |
 | plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook and middleware registries on every call for other plugins' `pre_tool_call` hooks and `tool_request` / `tool_execution` middleware (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
 | park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); checks the form (form-checked tools only), saves the call, and asks withHuman once. An instant approval lets the tool run (row `allowed`); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
@@ -515,7 +515,7 @@ replay store is not tied to the withHuman request id.
 | tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` | outbound only | Docker, container `wh-tunnel` |
 | Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
 
-- Outside services the gateway talks to: withHuman (approvals and the MCP gateway), Telegram, Teams and, once the Langfuse plugin is on, Langfuse Cloud (traces out only).
+- Outside services the gateway talks to: withHuman (approvals and the MCP gateway), Telegram, Teams and, since 2026-10-22, Langfuse Cloud (traces out only).
 - The git clone is `/home/hermes/tapdash-agents`; `/home/hermes/durable-park` is a link to its `durable-park/`
   folder, so older paths keep working.
 - The receiver and bridge run from **root-owned copies** in `/opt/durable-park`, so the agent's user could not change

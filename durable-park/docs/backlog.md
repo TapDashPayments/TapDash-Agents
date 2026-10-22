@@ -13,8 +13,34 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 | 4 | Decide which QuickBooks write tools need approval (Important #4) | Today only the 12 money types ask a person. The non-money writes (customers, vendors, items, accounts...) are approved by pipeline rules `pa-gateway-other` and `pa-park-quickbooks-other`. |
 | 5 | Tie the bridge's stored answers to the withHuman request id (Important #5) | Defence in depth; today it relies on withHuman never reusing a delivery key (answers are already bound to tool name, arguments and agent). Also prune stored answers older than ~30 days. **Deferred by Yaakov 2026-10-21: not an issue now.** |
 | 7 | A separate owner for the ledger ([design](receiver-setup.md#v2-separate-ledger-owner-design-only-not-built)); planned as spec §4.5 (§8 item 10), required before file, terminal or code tools open | The lockdown is the only thing keeping the agent from writing the ledger. A separate owner is **not enough on its own**: while the agent's user has passwordless sudo, no file permission is a boundary, so do item 0 first; after that this is the route to a real boundary around the ledger. |
-| 8 | Langfuse retention: the Hobby plan keeps 30 days and the retention cannot be changed, against the 365-day policy. Decide a paid plan or self-hosting ([Tracing](runbook.md#tracing-langfuse)) | Traces older than 30 days are gone. Fine for the test VM; not for real books. |
+| 8 | Langfuse retention: the Hobby plan gives 30 days of data access and the retention cannot be changed, against the 365-day retention policy (TapDash Agents security decisions, 2026-10-15). Decide a paid plan or self-hosting ([Tracing](runbook.md#tracing-langfuse)) | After 30 days the traces can no longer be read. Fine for the test VM; not for real books. |
 | 9 | Langfuse is another outside company that holds full conversations (capture mode `full`: chat text, model inputs and outputs, tool arguments and results). Decide whether that is acceptable for production, and which capture mode to use | With real books those would include real customer and money data. |
+| 10 | **Critical (found 2026-10-22, not caused by tracing):** the Telegram bot token is written in plain text to the `hermes-gateway` journal (the `httpx` INFO request lines). Rotate the token in BotFather and update `TELEGRAM_BOT_TOKEN` in `~/.hermes/.env` (typed in with `read -rs`, never in chat), then set the `httpx` logger to WARNING for the gateway so it is not logged again | Anyone who can read the journal can control the bot. Until it is rotated, treat the old token as exposed. |
+
+## Langfuse tracing gaps (from the 2026-10-22 audit)
+
+Found by auditing the live traces ([acceptance-2026-10-22-langfuse.md](acceptance-2026-10-22-langfuse.md)). Tracing is
+live and works; these need plugin or durable-park code, so each is a recommendation for Yaakov to decide. No code was
+changed in the tracing work.
+
+1. **No `userId` on any trace.** The Nous plugin never sets one. Recommend an upstream PR to pass the chat user id, or a
+   small durable-park-side tag. Worth it once there is more than one user.
+2. **Every trace is named `Hermes turn` and every model call `LLM call N`.** Recommend upstream: name by platform and
+   purpose (for example `telegram-chat-turn`).
+3. **Park, approval and resume are separate traces,** joined only by the park id in the text; the inner `create_payment`
+   is not a child of `parked_action_execute`. Recommend a durable-park follow-up: add the park id and the withHuman
+   request id as trace metadata or tags (for example `park:P-...`), and an event or span for the approval decision. It
+   touches the park, wake and executor code, so it needs **its own plan, tests and independent review** (AGENTS.md Rule 2).
+4. **The root `CHAIN` has a parent observation id that points at a span that is never exported.** Cosmetic; upstream.
+5. **The Langfuse public key is in every span's metadata** (`scope.attributes.public_key`, an SDK default). An
+   identifier, not a secret; nothing to do unless the SDK adds an option to leave it out.
+
+Also found on the way:
+
+- The QuickBooks server answers "withhuman_context was IGNORED": the agent sends a parameter that is dropped.
+  Investigate where it comes from and whether anything relied on it.
+- `hermes plugins enable langfuse` created a new Hermes environment directory; the old ones remain. Clean up the old
+  environments later, when disk space matters.
 
 ## Later
 
