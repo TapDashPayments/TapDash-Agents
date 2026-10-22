@@ -63,7 +63,6 @@ Also found on the way:
 - Name the human decider in the refusal note (withHuman management API lookup; in progress).
 - The second agent (content) and one Hermes profile per person.
 - `bridge_check.py` and bridge-unit minors, deferred from the bridge-own-user change ([plan](plans/2026-10-22-bridge-own-user.md)): check 4 (no other process runs `bridge.app`) is a heuristic that scans `/proc/*/cmdline` and can false-alarm (any process with `bridge.app` or `bridge/app.py` among its arguments, such as an editor, fails it); an edit to `durable-park-bridge.socket` takes effect only after `sudo systemctl restart durable-park-bridge.socket` (the deploy script does not restart a running socket); the check does not look at the permissions of the `/etc/durable-park` directory (it does check the running bridge's supplementary groups, since the final review).
-- Bridge: also require a human decider for the park (audit `approval.decided` actor), so a future pipeline edit that auto-approves money parks cannot make the bridge approve without a person. Today the bridge checks that the park request is `approved` and consumed in withHuman, whoever or whatever decided it.
 - Minor review findings listed in [acceptance-2026-10-20.md](acceptance-2026-10-20.md#minor-selected).
 
 ## Done since v1
