@@ -641,6 +641,48 @@ def _trace_tags(platform: str) -> list[str]:
             f"trigger:{'cron' if platform == 'cron' else 'interactive'}", *([f"cron-job:{cron.job_id}"] if cron else [])]
 
 
+def _trace_name(platform: str) -> str:
+    """TapDash: per-platform root/trace name (``telegram-turn``, ``cron-run``, ``hermes-turn``) so traces
+    from different chats are told apart in the Langfuse list. The platform is cut down to ``[a-z0-9_-]``."""
+    clean = re.sub(r"[^a-z0-9_-]", "", (platform or "").strip().lower())
+    if clean == "cron":
+        return "cron-run"
+    return f"{clean}-turn" if clean else "hermes-turn"
+
+
+def _ascii_attr(value: Any) -> Optional[str]:
+    """TapDash: the stripped string when it is US-ASCII and 1-200 chars (Langfuse's userId limit), else None."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 200 or not value.isascii():
+        return None
+    return value
+
+
+# TapDash: the chat sender arrives on the turn-scoped pre_llm_call, but the root trace is opened later by the
+# request-scoped pre_api_request, which carries no sender. Bridge the two by turn key. Own lock: the root is
+# opened while _STATE_LOCK is held, and that lock is not re-entrant.
+_SENDER_LOCK = threading.Lock()
+_TURN_SENDERS: dict[str, tuple[str, str]] = {}
+_MAX_TURN_SENDERS = 256
+
+
+def _remember_sender(turn_key: str, sender_id: str, user_name: str) -> None:
+    if not turn_key or not (sender_id or user_name):
+        return
+    with _SENDER_LOCK:
+        _TURN_SENDERS.pop(turn_key, None)
+        _TURN_SENDERS[turn_key] = (sender_id or "", user_name or "")
+        while len(_TURN_SENDERS) > _MAX_TURN_SENDERS:
+            _TURN_SENDERS.pop(next(iter(_TURN_SENDERS)), None)
+
+
+def _pop_sender(turn_key: str) -> tuple[str, str]:
+    with _SENDER_LOCK:
+        return _TURN_SENDERS.pop(turn_key, ("", "")) if turn_key else ("", "")
+
+
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "") -> TraceState:
@@ -660,10 +702,14 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     # be joined back to the card without guessing from session names. Omitted outside kanban.
     kanban = {k: v for k, v in (("kanban_task_id", _env("HERMES_KANBAN_TASK")),
                                 ("kanban_run_id", _env("HERMES_KANBAN_RUN_ID"))) if v}
+    sender_id, user_name = _pop_sender(turn_id or task_id)
+    user_id = _ascii_attr(sender_id)
+    trace_name = _trace_name(platform)
     metadata = {
         "source": "hermes", "task_id": task_id, "turn_id": turn_id, "api_request_id": api_request_id,
         "platform": platform, "provider": provider, "model": model, "api_mode": api_mode,
         "capture_mode": _capture_mode(), "profile": profile, **kanban,
+        **({"user_name": user_name[:200]} if user_name else {}),
     }
     # session_id must be in trace_context for Langfuse session grouping.
     trace_ctx: dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}
@@ -673,11 +719,13 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     # a later hook on another worker thread, so every turn logged "Failed to detach context" (hermes-agent#95057). A span
     # created inside propagate_attributes still carries its session / trace name / tags.
     def open_root():
-        return client.start_observation(trace_context=trace_ctx, name="Hermes turn", as_type="chain",
+        return client.start_observation(trace_context=trace_ctx, name=trace_name, as_type="chain",
                                         input=trace_input, metadata=metadata)
 
     root_span = None
-    propagated = {"session_id": session_id or task_key, "trace_name": "Hermes turn", "tags": _trace_tags(platform)}
+    propagated = {"session_id": session_id or task_key, "trace_name": trace_name, "tags": _trace_tags(platform)}
+    if user_id:
+        propagated["user_id"] = user_id
     if profile or kanban:
         propagated["metadata"] = {**({"profile": profile} if profile else {}), **kanban}
     if propagate_attributes is not None:
@@ -844,7 +892,15 @@ def _get_or_start_state_locked(task_key: str, **root_kwargs: Any) -> TraceState:
 
 def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = "", model: str = "",
                     provider: str = "", api_mode: str = "", messages: Any = None,
-                    turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
+                    turn_id: str = "", api_request_id: str = "", sender_id: str = "", **_: Any) -> None:
+    # TapDash: remember who sent this turn (before the early return below: the turn-scoped call is the only
+    # one that carries sender_id) so _start_root_trace can set the trace userId.
+    with _failsafe("remember sender"):
+        user_name = ""
+        if sender_id:
+            from gateway.session_context import get_session_env
+            user_name = get_session_env("HERMES_SESSION_USER_NAME") or ""
+        _remember_sender(turn_id or task_id, sender_id or "", user_name)
     # Only legacy request-shaped calls carry an API ``messages`` list; the
     # turn-scoped pre_llm_call would otherwise open an orphan root trace.
     if not isinstance(messages, list):

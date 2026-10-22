@@ -21,7 +21,21 @@ Keep this list complete: every difference from upstream goes here, in the commit
 3. `tests/test_langfuse_plugin.py` line 39: the discovery test looks the plugin up under its new registry key,
    `tapdash-langfuse` (it was `langfuse`). Without this, that one test fails only because of the rename.
 
-Nothing under `__init__.py` is changed yet.
+4. `__init__.py`: trace userId and per-platform trace names (spec D2, D3).
+   - New helpers `_trace_name`, `_ascii_attr`, `_remember_sender`, `_pop_sender`, the dict `_TURN_SENDERS`
+     (max 256 entries, oldest dropped) and its own lock `_SENDER_LOCK`. It is not `_STATE_LOCK`: the root trace
+     is opened while `_STATE_LOCK` is held, and that lock is not re-entrant.
+   - `on_pre_llm_call` takes `sender_id` and, before its early return, remembers it with the chat user's name
+     (`get_session_env("HERMES_SESSION_USER_NAME")`, imported inside the function so the plugin still loads
+     without the gateway), keyed by `turn_id or task_id`.
+   - `_start_root_trace` pops that sender, names the root observation and the propagated `trace_name`
+     `<platform>-turn` / `cron-run` / `hermes-turn` (it was always `Hermes turn`), adds `user_id` to the
+     propagated attributes only when the sender is US-ASCII and 1-200 chars, and adds `user_name` (cut to 200)
+     to the root metadata.
+   - No upstream test asserted the old name `Hermes turn`, so no upstream test assertion changed.
+   - New tests: `tests/test_tapdash_patches.py`.
+
+`on_pre_tool_call` is unchanged from upstream.
 
 ## Running the tests
 
@@ -30,7 +44,7 @@ bash tracing/run_tests.sh            # as the hermes user on the test VM
 bash tracing/run_tests.sh -k attribution
 ```
 
-Expected today: `139 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
+Expected today: `147 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
 through Hermes's dependency installer, which drops the test path, so they cannot run from a checkout.
 
 ## Update procedure (taking a newer upstream)
