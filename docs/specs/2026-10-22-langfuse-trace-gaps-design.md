@@ -1,6 +1,6 @@
 # Langfuse trace gaps — design
 
-Status: approved by Yaakov 2026-10-22 (chat). Linear: TAP2-125 follow-up.
+Status: approved by Yaakov 2026-10-22 (chat); **implemented 2026-10-22**. Linear: TAP2-125 follow-up.
 
 ## Problem
 

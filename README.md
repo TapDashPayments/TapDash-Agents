@@ -4,7 +4,7 @@ Code for TapDash's AI agents and the safety layer around them.
 
 ## In plain English
 
-TapDash is building AI assistants that work inside chat (Telegram today, Microsoft Teams next). Some of what they
+TapDash is building AI assistants that work inside chat (Telegram and Microsoft Teams). Some of what they
 do touches money, like recording a payment or creating a bill in QuickBooks. **Before any of that happens, a
 person has to approve it.**
 
@@ -13,11 +13,12 @@ saved. An approver gets an approval request and can take minutes or days to deci
 request runs once, and the assistant reports back in the same chat. If they deny it, nothing happens. Restarts and crashes
 can't lose a request or make it run twice. If anything is unclear, it stops and asks a person instead of guessing.
 
+If something goes wrong, an alert goes to Telegram and to Teams.
+
 Every chat message, model call and tool call (with its full content) is also copied to Langfuse Cloud (US), a third
 company, so people can review what the assistant did; on the free plan it can be read there for 30 days. TapDash's own patched
-copy of the tracing plugin (built and tested, **not deployed yet**) will name each trace by platform, record who sent
-the message, and tag every trace that mentions an approval id, so everything about one approval can be found with
-one filter.
+copy of the tracing plugin (live since 2026-10-22) names each trace by platform, records who sent the message, and
+tags every trace that mentions an approval id, so everything about one approval can be found with one filter.
 
 **Where it stands:** working and tested on a test server with a QuickBooks **sandbox** (fake books) since
 October 2026. It is not connected to real books yet. First the secrets need rotating, and a short list of
@@ -62,7 +63,8 @@ running on the test VM.
 | Tailscale (+ Funnel) | Admin access to the VM; Funnel gives withHuman a public HTTPS address for the receiver and bridge | system | client BSD-3-Clause; service is Tailscale's | [site](https://tailscale.com) |
 | Docker | Runs the tunnel container | system | Apache-2.0 | [site](https://www.docker.com) |
 | systemd | Runs the gateway, receiver, bridge and their restarts | system | LGPL-2.1 | [site](https://systemd.io) |
-| Telegram | Where people chat with the test bot, and where alerts go today (Teams next) | - | Telegram's service | [site](https://telegram.org) |
+| Telegram | Where people chat with the test bot, and where alerts go (they also go to Teams) | - | Telegram's service | [site](https://telegram.org) |
+| Microsoft Teams + Dev Tunnels (`devtunnel`) | Where people chat with the "TapDash Agent" bot, served by the same Hermes gateway. The devtunnel `proto-agents-bot` (runs as the user `hermes`) forwards Teams to the gateway. Alerts also arrive here as an Adaptive Card, through a Power Automate flow | - | Microsoft's services | [dev tunnels](https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview) |
 | GitHub CLI (`gh`) | Opens pull requests from the VM; installed with apt and signed in as the admin user `ubuntu` only, not as `hermes` ([runbook](durable-park/docs/runbook.md#open-a-pull-request-from-the-vm)) | 2.46.0 | MIT | [github](https://github.com/cli/cli) |
 | pytest; Mermaid + jsdom | Tests; diagram check in CI | 9.1.1; 11.17.2 + 25.0.1 | MIT | [pytest](https://pytest.org) · [mermaid](https://mermaid.js.org) |
 
@@ -82,6 +84,7 @@ running on the test VM.
 | Path | What it is |
 |---|---|
 | [`durable-park/`](durable-park/) | The approval layer: a Hermes plugin plus two small services ([README](durable-park/README.md)) |
+| [`docs/`](docs/README.md) | Every spec and plan of the repo, with its status |
 | [`tools/docs_check/`](tools/docs_check/) | The check that keeps docs and diagrams in step with the code |
 | [`.github/`](.github/) | CI (tests, docs check, diagram check), the Docs Keeper trigger (asks Kilo to check each new pull request's docs), pull request template, the docs map |
 | [`AGENTS.md`](AGENTS.md) | Rules for AI coding agents (and people) working in this repo |
@@ -89,14 +92,67 @@ running on the test VM.
 
 ## How it fits together
 
+The map below shows who does what. Plain version: people chat with the agent in Telegram or Teams. The agent's
+durable-park plugin stops every risky request and asks withHuman. An approver says yes or no in the withHuman app.
+After a yes, the saved request runs once, through withHuman's gateway and a small tunnel container, into the
+QuickBooks sandbox.
+
 ```mermaid
 flowchart LR
-  person(["Person in chat"]) -->|"asks"| hermes["Hermes agent<br/>+ durable-park plugin"]
-  hermes -->|"risky action: ask first"| withhuman["withHuman<br/>approvals + gateway"]
-  approver(["Approver"]) -->|"approve / deny"| withhuman
-  withhuman -->|"approved call, once"| qbo[("QuickBooks")]
-  bridge["durable-park bridge"] -->|"asks withHuman: was this call approved?"| withhuman
+  person(["People<br/>chat in Telegram and Teams"])
+  approver(["Approver<br/>decides in the withHuman app"])
+  tg["Telegram"]
+  teams["Microsoft Teams"]
+
+  subgraph VM["Test VM proto-agents"]
+    dt["devtunnel<br/>(user hermes)"]
+    subgraph HG["Hermes gateway (user hermes)"]
+      agent["Hermes agent"]
+      dp["durable-park plugin<br/>stops risky calls and saves them,<br/>runs the approved call once"]
+      lfp["Langfuse tracing plugin"]
+    end
+    recv["Wake receiver<br/>(user aaprecv)"]
+    bridge["Bridge<br/>(user dpbridge)"]
+    sweep["Sweep<br/>every 5 minutes"]
+    tun["wh-tunnel container<br/>(QuickBooks tool server)"]
+  end
+
+  wh["withHuman<br/>approvals + gateway"]
+  qbo[("QuickBooks sandbox")]
+  lf[("Langfuse cloud")]
+
+  person -->|"messages"| tg
+  person -->|"messages"| teams
+  tg <-->|"messages and replies"| agent
+  teams <-->|"messages and replies"| dt
+  dt <-->|"forwards to port 3978"| agent
+  agent -->|"every tool call"| dp
+  dp -->|"asks, then replays the approved call once"| wh
+  approver -->|"approve or deny"| wh
+  wh -->|"decision, signed"| recv
+  recv -->|"wake the chat, signed"| dp
+  wh -->|"is this exact call approved?"| bridge
+  bridge -->|"checks withHuman, read-only"| wh
+  wh -->|"approved call, over the tunnel"| tun
+  tun -->|"QuickBooks API"| qbo
+  agent -->|"every turn and tool call"| lfp
+  lfp -->|"traces out, one way"| lf
+  sweep -->|"re-wakes missed decisions"| dp
+  sweep -->|"alert message"| tg
+  sweep -->|"alert Adaptive Card"| teams
 ```
+
+What does what:
+
+- **Hermes agent** (Linux user `hermes`): the AI. It talks to people and tries to use tools.
+- **durable-park plugin**: sits between the agent and every tool. Risky calls are stopped, saved and sent to withHuman.
+- **withHuman**: a hosted service. It holds the approval requests, the rules, and the gateway to QuickBooks.
+- **Wake receiver**: hears withHuman's "decided" message and wakes the chat so the agent can finish the job.
+- **Bridge** (own Linux user `dpbridge`): answers withHuman's question "was this exact call approved?" It checks withHuman itself and keeps no records.
+- **wh-tunnel**: a container that holds the QuickBooks tool server and dials out to withHuman. The agent never holds QuickBooks keys.
+- **Sweep**: every 5 minutes it catches anything missed and sends alerts to Telegram and Teams.
+- **devtunnel**: gives Teams a way in to the agent on the VM.
+- **Langfuse**: a hosted service that stores a copy of every chat, model call and tool call so people can review them.
 
 Full detail, with every arrow labeled: [durable-park/docs/architecture.md](durable-park/docs/architecture.md).
 

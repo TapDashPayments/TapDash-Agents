@@ -11,6 +11,8 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
 
 # Secrets (they live in /etc/durable-park on the VM, entered by hand)
 *.env
@@ -23,6 +25,11 @@ id_ed25519*
 !**/*secret*.py
 !**/*secret*.sh
 !**/*secret*.md
+*token*
+!**/*token*.py
+!**/*token*.sh
+!**/*token*.md
+credentials*
 
 # Local working notes
 .superpowers/

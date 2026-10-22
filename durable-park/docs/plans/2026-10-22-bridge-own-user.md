@@ -1,6 +1,6 @@
 # Plan: the gateway bridge runs as its own user, with systemd holding its port
 
-Date: 2026-10-22. Approved by Yaakov 2026-10-22. Spec: `docs/specs/2026-10-22-bridge-verifies-withhuman.md`
+Date: 2026-10-22. Approved by Yaakov 2026-10-22. **Status: implemented 2026-10-22.** Spec: `docs/specs/2026-10-22-bridge-verifies-withhuman.md`
 (this plan adds the isolation that spec assumed). Branch: `feat/bridge-verifies-withhuman`.
 
 ## Why

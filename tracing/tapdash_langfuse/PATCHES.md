@@ -80,7 +80,8 @@ Keep this list complete: every difference from upstream goes here, in the commit
    update or remove steps, never reload plugins with the gateway running); upstream's `hermes update` migration
    paragraph and `hermes plugins remove langfuse` are marked as not applying here; the stale "Hermes turn" text
    now names the per-platform trace names; the tuning section documents `HERMES_LANGFUSE_TAG_PATTERNS`, marked as a
-   TapDash patch (with its JSON-escape limit).
+   TapDash patch (with its JSON-escape limit); the `[Hermes Official Plugins](../README.md)` link, which only works inside
+   upstream's repository, now points at upstream's repository on GitHub.
 7. `__init__.py`: every "LLM call N" generation records which tools were offered to the model (TAP2-125, design D9). Not in
    upstream.
    - `on_pre_llm_request` reads `request["body"]["tools"]` (only when `request` and its `body` are dicts) through the

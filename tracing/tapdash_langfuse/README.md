@@ -12,7 +12,7 @@
 
 # Langfuse for Hermes Agent
 
-> Part of the [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly bundled with Hermes core as `observability/langfuse`.
+> Part of the [Hermes Official Plugins](https://github.com/NousResearch/hermes-official-plugins), Nous Research's official plugins for Hermes Agent. Formerly bundled with Hermes core as `observability/langfuse`.
 
 Official [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin that traces Hermes turns,
 LLM calls and tool invocations to [Langfuse](https://langfuse.com), the open-source LLM observability

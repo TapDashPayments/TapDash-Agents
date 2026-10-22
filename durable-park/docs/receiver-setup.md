@@ -1,5 +1,10 @@
 # durable-park receiver, provisioning and deploy (proto VM)
 
+In plain English: when a person approves or denies something in withHuman, withHuman sends a signed note to a small
+service on our server (the receiver). The receiver wakes the AI agent in the same chat so it can report back. This
+page covers setting up that service, the one-time setup with withHuman, how alerts reach people, and the agent's tool
+lockdown.
+
 How withHuman's decision gets back into the Hermes chat:
 
 ```
@@ -162,12 +167,21 @@ The plugin reads `instance_token` lazily on each risky call, so no Hermes restar
 ## Alerts from the sweep
 
 The cron job delivers to Telegram's **home channel**, set to the admin's DM with `@TapDashAgentsBot` (`/sethome`
-in that DM changes it). Moving alerts to Microsoft Teams is planned: Hermes's Teams platform is already connected
-in the same gateway (since 2026-10-21), so only the `durable-park-sweep` cron job's delivery target has to change.
+in that DM changes it). The sweep also posts every alert to Microsoft Teams as an Adaptive Card when
+`TEAMS_ALERT_WEBHOOK_URL` is set; it is set on proto-agents and was verified with a test card on 2026-10-22 at 16:57 ET
+([runbook](runbook.md#live-hermes-settings-on-proto-agents)). So alerts go to Telegram **plus** Teams. The cron job's own
+delivery is still Telegram; stopping it, so alerts go only to Teams, is an optional decision
+([backlog](backlog.md#later)).
 
 ## Agent tool policy (v1 lockdown, re-applied on proto-agents)
 
-> **Status:** the v1 lockdown is applied on proto-agents since 2026-10-21 03:16 UTC, as a stopgap. It had been lifted by hand (decided 2026-10-20) and was re-applied 2026-10-21 03:16 UTC. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC; [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1): `hermes` has no sudo. The ledger is still owned by `hermes` (Phase 2 not done), so the lockdown is still a configuration guard for the ledger, not a permission boundary (see [architecture](architecture.md#the-three-guarantees)). Hermes approvals stay off. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing row" rule applies. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes. The text below says what the lockdown does and why.
+> **Status:** the v1 lockdown is applied on proto-agents (re-applied 2026-10-21 03:16 UTC as a stopgap). It is a
+> configuration guard, not a permission boundary: how strong it is, and what is left, is in
+> [architecture section 0](architecture.md#0-how-strong-is-it-today). Tools open again only through the
+> [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4. Re-running `configure_hermes.sh` or
+> `hermes_tool_policy.py` re-applies the current state and restarts the gateway: follow
+> [Before you run the configure script](runbook.md#before-you-run-the-configure-script). The text below says what the
+> lockdown does and why.
 
 The agent's tools run as the `hermes` user. That user owns the ledger and can read `instance_token`. So
 an agent with a terminal or file tool, for example one hijacked by a prompt injection, could write ledger rows
@@ -180,7 +194,7 @@ v1 closes this by giving the model no local file, command, code, browser or sche
 and after the gateway restart; a failed pre-restart check aborts without restarting anything) sets:
 
 - `platform_toolsets.<key>` = `[durable_park, clarify, wh]` (until the `wh` MCP server exists: `no_mcp`)
-  for every platform key an agent can run under in Hermes v0.22.2, derived from the source at deploy
+  for every platform key an agent can run under in the Hermes version that `compat.py` names (v0.22.3 today), derived from the source at deploy
   time: the built-in table (incl. `cron`), every gateway `Platform` (incl. `local`→`cli`,
   `msgraph_webhook`, `relay`, `sms`), every bundled platform plugin and its manifest alias (e.g. `teams`,
   `google_chat`, `irc`, `teams-platform`), every runtime-registered platform, `acp`, `tui`, `desktop`, and
