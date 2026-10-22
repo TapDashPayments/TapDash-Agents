@@ -61,4 +61,4 @@
 - [x] Fetch the traces on the VM as hermes with the v2 observations API (Langfuse Cloud answers 410 for v1; `npx langfuse-cli` is the alternative), credentials loaded from `~/.hermes/.env` into the process only (never printed).
 - [x] Fix every gap that config can fix (`HERMES_LANGFUSE_*` settings); list gaps that need plugin or durable-park code, with a recommendation, for Yaakov to decide. No durable-park code change in this plan.
 - [x] Write `durable-park/docs/acceptance-2026-10-22-langfuse.md` (what was audited, trace ids, gaps, decisions), update the runbook "Check it works" strings to the exact ones seen, commit.
-- [ ] Push the branch and open the PR (the controller does this after review; Yaakov merges).
+- [x] Push the branch and open the PR (the controller does this after review; Yaakov merges).

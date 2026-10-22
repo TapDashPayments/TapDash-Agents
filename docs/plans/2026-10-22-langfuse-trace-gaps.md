@@ -1,5 +1,9 @@
 # Langfuse trace gaps Implementation Plan
 
+> **Status: implemented 2026-10-22.** The patched plugin is in `tracing/tapdash_langfuse`, and every change against
+> upstream is listed in its `PATCHES.md`. The checkboxes below were not ticked while the work ran, so they do not show
+> progress: the code, the tests and `PATCHES.md` are the record.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Every trace on proto-agents carries the sender's chat user id, a name that says where it came from, and a `park:P-…` tag that ties a parked payment, its approval turn and its run together.

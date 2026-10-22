@@ -1,8 +1,6 @@
 # One agent on proto-agents — merge design
 
-> **Superseded 2026-10-21:** the v1 lockdown was re-applied on 2026-10-21 at 03:16 UTC, so the full toolset is no longer live. See [the all-tools spec](2026-10-21-all-tools-withhuman-design.md).
-
-Date: 2026-10-20 · Status: Implemented 2026-10-21 · Author: Claude (with Yaakov)
+Date: 2026-10-20 · Status: Implemented 2026-10-21, then superseded the same day: the v1 lockdown was re-applied on 2026-10-21 at 03:16 UTC, so the full toolset is no longer live (see [the all-tools spec](2026-10-21-all-tools-withhuman-design.md)); the `ubuntu` install it retires was deleted on 2026-10-22 (TAP2-112) · Author: Claude (with Yaakov)
 
 ## 1. Intent (in Yaakov's words, written back)
 

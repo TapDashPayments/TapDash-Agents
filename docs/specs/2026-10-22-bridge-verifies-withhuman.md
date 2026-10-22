@@ -1,6 +1,6 @@
 # Bridge verifies approvals in withHuman (small Phase 2, slimmed)
 
-Date: 2026-10-22. Approved by Yaakov 2026-10-22. Replaces the "dpledger ledger service" design
+Date: 2026-10-22. Approved by Yaakov 2026-10-22. **Status: implemented 2026-10-22.** Replaces the "dpledger ledger service" design
 (docs/specs/2026-10-21-all-tools-withhuman-design.md §4.5) and backlog item 7 for the bridge.
 
 ## Problem

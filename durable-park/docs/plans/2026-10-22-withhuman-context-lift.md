@@ -1,5 +1,7 @@
 # withhuman_context lift — plan (2026-10-22)
 
+**Status: implemented 2026-10-22 via PRs #35, #40, #43.**
+
 **Goal:** when the model puts the gateway's `withhuman_context` note inside a tool argument object (seen live:
 `{"params": {"criteria": ..., "withhuman_context": "Find customer ..."}}`), move it to the top level where the
 withHuman gateway expects it, so QuickBooks no longer gets an unknown parameter (its "WARNING: ... does not support

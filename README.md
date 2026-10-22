@@ -85,6 +85,7 @@ running on the test VM.
 | Path | What it is |
 |---|---|
 | [`durable-park/`](durable-park/) | The approval layer: a Hermes plugin plus two small services ([README](durable-park/README.md)) |
+| [`docs/`](docs/README.md) | Every spec and plan of the repo, with its status |
 | [`tools/docs_check/`](tools/docs_check/) | The check that keeps docs and diagrams in step with the code |
 | [`.github/`](.github/) | CI (tests, docs check, diagram check), the Docs Keeper trigger (asks Kilo to check each new pull request's docs), pull request template, the docs map |
 | [`AGENTS.md`](AGENTS.md) | Rules for AI coding agents (and people) working in this repo |
