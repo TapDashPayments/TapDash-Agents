@@ -396,18 +396,23 @@ Argument values and the key are never logged.
 | `ambiguous-park` | Two park requests matched the same call | Look in withHuman for a duplicate park of the same call; nothing runs twice, a person decides |
 | `unsafe-name` | The gateway server or tool name is not plain: `__`, a leading or trailing `-`/`_`, a character outside letters, digits, `-`, `_`, or a Hermes name over 64 characters (Hermes would hash it) | Rename the tool at the source, or add the case to the bridge with a test; until then a person approves each call (a second ask) |
 | `redacted-args` | The approver saw `[redacted]` in the park's arguments, or the call carries a secret-looking key (`password`, `token`, `secret`, `authorization`, `api_key`) or arguments too large to show whole | Expected for such calls: look at the real values and decide |
-| `already-reported` | The park's consumption already has an outcome: it ran (or failed) before this gateway call arrived | Expected for a replay; for a first run, look at the park request's history in withHuman |
+| `already-reported` | withHuman's record already holds an outcome for this approval. The plugin never reports outcomes (`report_outcomes=False`), so something else used the approval | Investigate: read the park request's history in withHuman to see what reported an outcome, and find the earlier call that used the approval |
 | `gateway-request-not-listed` | withHuman's list of the agent's requests did not hold the gateway request the webhook was about (not yet visible, or id mismatch) | Ask again; if it repeats, check the key's `request.read.unrouted` permission and withHuman's status |
 | `gateway-request-before-release` | The gateway request was created more than 5 s before the park was consumed: it is not the call the approval released | Expected for an old call someone re-ran; a person decides |
 | `gateway-request-mismatch` | The listed gateway request differs from the webhook's call (agent, server, tool or arguments) | Should not happen; compare the request in withHuman with the call and tell the developer |
 | `neighbours-truncated` | The 200 newest requests of the agent all came after the park was consumed, so a second use could be hidden | Expected only under heavy traffic; a person decides. Nothing is lost |
+| `neighbours-unsorted` | withHuman's listing of the agent's requests was not newest-first, so the bridge cannot tell whether a second use came after the park was consumed. Fails closed | A person decides. This should not happen with withHuman's listing as documented: tell the developer, and check whether withHuman changed the order |
 | `already-used` | Another gateway request for the same call (or for the same tool with `-` and `_` swapped) was created after the approval was consumed (a retry, or a replay) | Expected for a replay; for a first run, find the earlier gateway request |
 | `no-request-id` | The delivery carried no gateway request id (only real deliveries have one; a preview or test does not) | Nothing for a test; for a real call, tell the developer |
+| `body-not-object`, `type`, `preview`, `malformed`, `arguments-not-object`, `agent`, `no-idempotency-key`, `idempotency-mismatch` | Checks on the webhook delivery itself, before any listing: the body is not a JSON object (`body-not-object`); it is not the gateway-call block (`type`); it is a preview or test (`preview`); it lacks the request or agent objects, or the server or tool names (`malformed`); the arguments are not an object (`arguments-not-object`); the agent is not `proto-agents` (`agent`); it has no `WithHuman-Idempotency-Key` header (`no-idempotency-key`); or the body's key differs from the header (`idempotency-mismatch`) | A test or preview: nothing to do. For a real call: check the webhook endpoint's block and agent in withHuman, then tell the developer. The call went to a person |
+| `error:<ExcClass>` | A bug raised an exception in the bridge or in the verdict code. Only the class name is logged, e.g. `error:KeyError` | The call went to a person, so nothing ran unapproved. Tell the developer the class name and the journal time, and fix it with a test |
 | `no-key` | `/etc/durable-park/audit_key` is missing, empty or unreadable | [Store the key](#the-gateway-bridge) |
-| `http-403` | The key lacks `request.read` or `request.read.unrouted` | Mint a key with the three permissions |
+| `http-<status>` | withHuman answered the listing with a non-200 status. `http-403`: the key lacks `request.read` or `request.read.unrouted`. `http-401`: the key is revoked | 403: mint a key with the three permissions and store it (see [the key](#the-gateway-bridge)). 401: store a new key. Other statuses: check withHuman's status. The call went to a person |
 | `deadline`, `transport`, `shape`, `too-large` | withHuman was slow (the bridge gives up after 3.5 s), unreachable, or answered something unexpected (or over 4 MiB) | Check withHuman's status; the call went to a person, so nothing is lost |
 
-(The tags are those of `bridge/app.py` and `bridge/whapi.py`; if `journalctl` shows another tag, trust the code.)
+(The tags come from `bridge/app.py`, `bridge/verify.py` and `bridge/whapi.py`; if `journalctl` shows another tag, trust the code.) An approval logs `why=park-request=<id>`, naming the approved park request.
+
+A webhook delivery over 1 MiB gets HTTP 413 (no `why=` tag; the log says `bridge rejected: body too large (413)`), and withHuman then asks a person. Nothing runs unapproved.
 
 - **Name differs** (e.g. `create-bill` vs `create_bill`): the bridge must build names the way Hermes does
   (`bridge/verify.py: hermes_tool_name`). Was the bridge's `/opt` copy updated?
@@ -583,21 +588,34 @@ second ask for the action. Nothing runs unapproved and nothing runs twice. The o
 
 #### Roll back a bridge change
 
-Before the change, keep the old code and unit:
+Before the change, keep the old code and unit. Each backup first removes the older copy, so `cp -a` does not nest:
 
 ```sh
-sudo cp -a /opt/durable-park/bridge /opt/durable-park/bridge.rollback
-sudo cp -a /opt/durable-park/plugin /opt/durable-park/plugin.rollback
-sudo cp -a /etc/systemd/system/durable-park-bridge.service /root/durable-park-bridge.service.rollback
+sudo rm -rf /opt/durable-park/bridge.rollback && sudo cp -a /opt/durable-park/bridge /opt/durable-park/bridge.rollback
+sudo rm -rf /opt/durable-park/plugin.rollback && sudo cp -a /opt/durable-park/plugin /opt/durable-park/plugin.rollback
+sudo rm -f /root/durable-park-bridge.service.rollback && sudo cp -a /etc/systemd/system/durable-park-bridge.service /root/durable-park-bridge.service.rollback
 ```
 
-To go back: confirm no ledger row is `parked`, `approved` or `executing` (the query under
-[Health check](#health-check)); then restore the three copies (`sudo rm -r /opt/durable-park/bridge` first, then
-`sudo cp -a /opt/durable-park/bridge.rollback /opt/durable-park/bridge`; the same for `plugin`; copy the unit file
-back), `sudo systemctl daemon-reload && sudo systemctl restart durable-park-bridge`, and check `401` as above. The
-old bridge needs the ledger path and `ReadWritePaths` from the old unit, which the restored file has. Do not run
-`configure_hermes.sh` for a rollback: it copies the clone's current code over the restored files. After the
-rollback, `git revert` the change as in [Code](#rollback).
+To go back:
+
+1. Confirm no ledger row is `parked`, `approved` or `executing` (the query under [Health check](#health-check)). If one is, stop.
+2. Restore the three copies. Each `rm -rf` runs first, so the restore does not nest:
+
+```sh
+sudo rm -rf /opt/durable-park/bridge && sudo cp -a /opt/durable-park/bridge.rollback /opt/durable-park/bridge
+sudo rm -rf /opt/durable-park/plugin && sudo cp -a /opt/durable-park/plugin.rollback /opt/durable-park/plugin
+sudo cp -a /root/durable-park-bridge.service.rollback /etc/systemd/system/durable-park-bridge.service
+```
+
+3. Reload the unit, restart the bridge, and check it:
+
+```sh
+sudo systemctl daemon-reload && sudo systemctl restart durable-park-bridge
+systemctl is-active durable-park-bridge                                              # active
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8791/wh/bridge     # 401 (unsigned)
+```
+
+The old bridge needs the ledger path and `ReadWritePaths` from the old unit, which the restored file has. Do not run `configure_hermes.sh` for a rollback: it copies the clone's current code over the restored files. After the rollback, `git revert` the change as in [Code](#rollback).
 
 ### Allow another hook (`observer_hooks`)
 
