@@ -128,7 +128,7 @@ or `~/.hermes/.env`: they hold secrets).
 | Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *`; delivery is still Telegram | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). Alerts reach Teams through `TEAMS_ALERT_WEBHOOK_URL` (row above), so a Telegram copy is now optional; stopping the Telegram delivery is an open decision ([backlog](backlog.md#later)). |
 | Teams tunnel (`devtunnel-hermes`) | systemd **user unit of `hermes`**, enabled (moved from `ubuntu` on 2026-10-22). Program `/usr/local/bin/devtunnel` (root-owned). Login cache `/home/hermes/.local/share/DevTunnels` (mode 600), logged in as Yaakov@TapDash.co. Tunnel `proto-agents-bot` forwards to `127.0.0.1:3978` | The Teams bot's public address needs a tunnel to the gateway. Never print or copy the login cache. Manage it with `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user <status\|restart> devtunnel-hermes`. It no longer exists under `ubuntu`. |
 | `hermes-dashboard` unit | `RestartPreventExitStatus=78` in the main unit file | See [Dashboard over HTTPS](#dashboard-over-https). |
-| Langfuse tracing: plugin `langfuse` (Nous Research's unpatched catalog plugin) enabled, `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | on since 2026-10-22 04:37 UTC; settings last changed 13:42 UTC. The patched `tapdash-langfuse` is built and tested but **not deployed**: this row changes when it is ([deploy](#switch-to-the-patched-plugin-deploy)) | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
+| Langfuse tracing: plugin `tapdash-langfuse` (TapDash's patched copy, a symlink `~/.hermes/plugins/tapdash-langfuse` into the live clone's `tracing/tapdash_langfuse`) enabled; the unpatched catalog `langfuse` is no longer enabled (its folder is still in `~/.hermes/plugins`). `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | tracing on since 2026-10-22 04:37 UTC (unpatched); patched plugin enabled by 19:52 UTC the same day ([how it was switched](#switch-to-the-patched-plugin-deploy)) | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
 
 If `hermes-gateway` reports `DEGRADED` after a Hermes update, read `~/.hermes/logs/gateway.log` for the platform
 that failed to start before changing anything. To use `api_server` later, an admin sets `API_SERVER_KEY` in the
@@ -905,11 +905,11 @@ at 04:37:45 and the gateway restarted; the Langfuse keys were typed in by Yaakov
 13:42 UTC the same day (`HERMES_LANGFUSE_MAX_DEPTH` 16). What was checked, and the audit of what Langfuse shows:
 [acceptance-2026-10-22-langfuse.md](acceptance-2026-10-22-langfuse.md).
 
-**Patched plugin: built and tested, NOT deployed yet.** The three gaps in that audit (no `userId`, every trace named
+**Patched plugin: live since 2026-10-22 (enabled by 19:52 UTC).** The three gaps in that audit (no `userId`, every trace named
 `Hermes turn`, no way to find the traces of one approval) are fixed in TapDash's patched copy,
 [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse) ([The patched plugin](#the-patched-plugin-tapdash-langfuse)).
-It goes live in [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy), after its pull requests are
-merged. **Until then, what is live is still the unpatched catalog plugin `langfuse`.** The rest of this section names
+It was switched on with [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy); the unpatched catalog
+plugin `langfuse` is no longer enabled. The rest of this section names
 the plugin `tapdash-langfuse` and its hook `hermes_plugins.tapdash_langfuse.on_pre_tool_call`, as they are after the
 deploy; before it, read `langfuse` and `hermes_plugins.langfuse.on_pre_tool_call`.
 
@@ -964,7 +964,7 @@ match, so the patterns must only match non-secret ids (such as park ids), and mu
 
 ### The patched plugin (`tapdash-langfuse`)
 
-**Status: built and tested, not deployed.** A copy of the Nous Research `langfuse` plugin (v2.0.0 @ commit `c2a9596`,
+**Status: live on `proto-agents` since 2026-10-22 (enabled by 19:52 UTC).** A copy of the Nous Research `langfuse` plugin (v2.0.0 @ commit `c2a9596`,
 MIT) lives in this repo at [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse), with TapDash's changes. Every
 change against upstream is listed in [`PATCHES.md`](../../tracing/tapdash_langfuse/PATCHES.md). Decisions and reasons:
 [design](../../docs/specs/2026-10-22-langfuse-trace-gaps-design.md) (D1 to D8). At the deploy it is installed on the VM as a symlink (there is none before then),

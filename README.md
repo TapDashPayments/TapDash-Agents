@@ -17,9 +17,8 @@ If something goes wrong, an alert goes to Telegram and to Teams.
 
 Every chat message, model call and tool call (with its full content) is also copied to Langfuse Cloud (US), a third
 company, so people can review what the assistant did; on the free plan it can be read there for 30 days. TapDash's own patched
-copy of the tracing plugin (built and tested, **not deployed yet**) will name each trace by platform, record who sent
-the message, and tag every trace that mentions an approval id, so everything about one approval can be found with
-one filter.
+copy of the tracing plugin (live since 2026-10-22) names each trace by platform, records who sent the message, and
+tags every trace that mentions an approval id, so everything about one approval can be found with one filter.
 
 **Where it stands:** working and tested on a test server with a QuickBooks **sandbox** (fake books) since
 October 2026. It is not connected to real books yet. First the secrets need rotating, and a short list of
