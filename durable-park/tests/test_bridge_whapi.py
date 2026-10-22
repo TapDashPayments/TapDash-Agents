@@ -1,5 +1,8 @@
 """bridge.whapi: the bridge's read-only lister of withHuman approval requests (org key, no network in tests)."""
 
+import threading
+import time
+
 import httpx
 import pytest
 
@@ -423,6 +426,45 @@ def test_fast_body_inside_the_deadline_is_accepted(key_file):
     drip = Drip([body[:50], body[50:]], on_chunk=tick)
     rec = Recorder(lambda request: httpx.Response(200, stream=drip))
     assert make(key_file, rec, clock=clock).list(agent_slug="a", q="t", deadline=1001.0) == []
+
+
+class StallThenLate(httpx.SyncByteStream):
+    """A body whose first chunk arrives just inside the deadline and whose second read then stalls.
+
+    A server that stops sending mid-body keeps ``__iter__`` blocked on ``release`` (a real wait, as a socket read
+    would be). If the wait ends, the fake clock jumps past the deadline, as it would after a stalled read.
+    """
+
+    def __init__(self, clock, *, first_at, late_at, release):
+        self._clock, self._first_at, self._late_at, self._release = clock, first_at, late_at, release
+
+    def __iter__(self):
+        self._clock.now = self._first_at
+        yield b"x" * 10
+        self._release.wait(5)
+        self._clock.now = self._late_at
+        yield b"x" * 10
+
+    def close(self):
+        pass
+
+
+def test_a_body_that_stalls_just_before_the_deadline_is_cut_at_the_deadline_not_one_read_timeout_later(key_file):
+    """After the first chunk (1000.29, deadline 1000.3) the next read could wait a whole read timeout (3 s) more:
+    the caller must get ``deadline`` when its budget is spent, whatever the server is doing."""
+    clock = FakeClock(1000.0)
+    release = threading.Event()
+    stall = StallThenLate(clock, first_at=1000.29, late_at=1003.3, release=release)
+    rec = Recorder(lambda request: httpx.Response(200, stream=stall))
+    started = time.monotonic()
+    try:
+        with pytest.raises(ListError) as exc:
+            make(key_file, rec, per_call_timeout=3.0, clock=clock).list(agent_slug="a", q="t", deadline=1000.3)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()  # let the abandoned reader go
+    assert code_of(exc) == "deadline"
+    assert elapsed < 2.0, f"waited {elapsed:.1f} s for a budget of 0.3 s"
 
 
 # --- no environment trust --------------------------------------------------------------------------------------

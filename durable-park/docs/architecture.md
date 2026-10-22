@@ -654,7 +654,7 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | 2 | Bad sweeps in a row before a form-checker alert | `durable_park_sweep.py` |
 | 300 s | Allowed clock difference on the bridge signature | `bridge/app.py` |
 | 120 s | A park approval can approve one gateway call only if it was consumed this recently (5 s of clock skew allowed) | `bridge/verify.py` |
-| 3.5 s | The bridge's total budget for its two withHuman lists (withHuman's webhook block gives up at 5 s; 3 s per call) | `bridge/app.py`, `bridge/whapi.py` |
+| 3.5 s | The bridge's total budget for its two withHuman lists (withHuman's webhook block gives up at 5 s; 3 s per call). A hard limit: each list runs in a worker thread and the caller stops waiting for it when the budget is spent (`deadline`), even if withHuman stalls mid-response; an abandoned worker ends at its own 3 s httpx timeout | `bridge/app.py`, `bridge/whapi.py` |
 | 60 s | Hermes waits this long for the park hook | `plugins.hook_callback_timeout` |
 | 3 failures / 60 s | Hermes pauses an MCP server after 3 failed calls (blocked calls never reach it) | Hermes `tools/mcp_tool.py` |
 
