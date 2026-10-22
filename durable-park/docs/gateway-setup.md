@@ -297,7 +297,8 @@ answer "approve" to every gateway call. So, since 2026-10-22:
   secret. Rotating either key needs `sudo systemctl restart durable-park-bridge`.
 - `deploy/bridge_check.py` checks all of this, read-only, and prints `ok:` or `FAIL:` per check (exit 0 only if every
   check passes): (1) the socket unit is active and listens on exactly `127.0.0.1:8791`; (2) the service is active and
-  its main process runs as `dpbridge`; (3) only systemd and that process hold the port; (4) no other process runs
+  its main process runs as `dpbridge` with no supplementary group but `dpbridge`'s own (the `Groups:` line of
+  `/proc/<pid>/status`); (3) only systemd and that process hold the port; (4) no other process runs
   `bridge.app` (a scan of `/proc/*/cmdline`: a heuristic, so a process that merely has `bridge.app` or
   `bridge/app.py` among its arguments, such as an editor, also fails it); (5) no user-level `durable-park-bridge*` unit
   exists for any user; (6) `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; (7) `bridge_secret`

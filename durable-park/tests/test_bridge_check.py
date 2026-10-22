@@ -36,6 +36,7 @@ class World:
         self.users = {"root": (0, "/bin/bash"), "dpbridge": (990, "/usr/sbin/nologin"),
                       "hermes": (1001, "/bin/bash"), "ubuntu": (1000, "/bin/bash")}
         self.groups = {"dpbridge": ["dpbridge"]}
+        self.gids = {990: "dpbridge", 1001: "hermes", 1002: "dpwake"}
         self.socket_show = "ActiveState=active\nListen=127.0.0.1:8791 (Stream)\n"
         self.service_show = "ActiveState=active\nMainPID=4242\n"
         self.ss = HEALTHY_SS
@@ -47,11 +48,13 @@ class World:
         # a shell whose command line merely mentions bridge.app must not count as a bridge
         self.add_process(77, ["bash", "-lc", "pgrep -f bridge.app"], 1000)
 
-    def add_process(self, pid, argv, uid):
+    def add_process(self, pid, argv, uid, groups=()):
+        """``groups`` are the supplementary gids shown on the ``Groups:`` line of /proc/<pid>/status (None: no line)."""
         d = self.root / "proc" / str(pid)
         d.mkdir(parents=True, exist_ok=True)
         (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
-        (d / "status").write_text(f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+        groups_line = "" if groups is None else "Groups:\t" + " ".join(map(str, groups)) + " \n"
+        (d / "status").write_text(f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{uid}\t{uid}\t{uid}\t{uid}\n{groups_line}")
 
     def add_unit_file(self, relative):
         p = self.root / relative
@@ -74,6 +77,11 @@ class World:
                 if key in (name, str(uid)):
                     return f"{name}:x:{uid}:{uid}::/nonexistent:{shell}\n"
             raise bc.RunError(f"getent passwd {key}: not found")
+        if cmd[0] == "getent" and cmd[1] == "group":
+            gid = int(cmd[2])
+            if gid not in self.gids:
+                raise bc.RunError(f"getent group {gid}: not found")
+            return f"{self.gids[gid]}:x:{gid}:\n"
         if cmd[0] == "id" and cmd[1] == "-nG":
             if cmd[2] not in self.groups:
                 raise bc.RunError("id: no such user")
@@ -190,6 +198,38 @@ def test_check2_unknown_uid_is_named_by_number(world):
     results = world.results()
     assert 2 in failing(results)
     assert "5555" in results[1].text
+
+
+def test_check2_main_process_with_only_dpbridges_own_group_passes(world):
+    world.add_process(4242, BRIDGE_ARGV, 990, groups=(990,))
+    assert world.results()[1].ok
+
+
+def test_check2_main_process_in_the_hermes_group_fails_and_names_it(world):
+    world.add_process(4242, BRIDGE_ARGV, 990, groups=(990, 1001))
+    results = world.results()
+    assert 2 in failing(results)
+    assert "hermes" in results[1].text and "1001" in results[1].text and "4242" in results[1].text
+
+
+def test_check2_main_process_in_dpwake_fails_and_names_it(world):
+    world.add_process(4242, BRIDGE_ARGV, 990, groups=(1002,))
+    results = world.results()
+    assert 2 in failing(results)
+    assert "dpwake" in results[1].text
+
+
+def test_check2_every_extra_group_is_named_and_an_unknown_gid_by_number(world):
+    world.add_process(4242, BRIDGE_ARGV, 990, groups=(1001, 5555))
+    text = world.results()[1].text
+    assert "hermes" in text and "5555" in text
+
+
+def test_check2_main_process_without_a_groups_line_fails_closed(world):
+    world.add_process(4242, BRIDGE_ARGV, 990, groups=None)
+    results = world.results()
+    assert 2 in failing(results)
+    assert "Groups" in results[1].text
 
 
 def test_check2_main_process_that_vanished_fails(world):
