@@ -43,9 +43,15 @@ When in doubt, fail closed (block, or ask a person). Never auto-approve.
 - Root steps (copying into `/opt`, restarting system units) no longer need the admin at a terminal, but the admin
   confirms anything risky first. Give them the exact one-line command, and wait for a yes before anything destructive,
   hard to undo, or touching secrets, sudoers, sshd or Tailscale.
+- **Run `hermes` commands only as the `hermes` user** (`sudo -u hermes -H ...`). Running `hermes` as `ubuntu` or any
+  other user can create a second Hermes install or gateway, with none of the guards. That happened on 2026-10-21 (an
+  old install under `ubuntu` ran an unguarded agent until it was deleted on 2026-10-22; see
+  [architecture section 0](durable-park/docs/architecture.md#0-how-strong-is-it-today)).
 - Before restarting the gateway or the bridge, make sure no row is `parked`, `approved` or `executing`
   ([runbook](durable-park/docs/runbook.md#health-check)).
-- Work on a git worktree or branch, not in the live clone's working tree. The gateway and the 5-minute sweep load
+- Work on a git worktree under `/home/hermes/tapdash-agents-wt/<name>` (one path everywhere), not in the live clone's
+  working tree. The only thing done in the live clone is the deliberate fast-forward (`git merge --ff-only`) that deploys
+  reviewed code ([runbook](durable-park/docs/runbook.md#deploy-a-change)). The gateway and the 5-minute sweep load
   code straight from it.
 
 ## Rule 4: tests

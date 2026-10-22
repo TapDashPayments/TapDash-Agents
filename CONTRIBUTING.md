@@ -9,8 +9,8 @@ cd durable-park && python3 -m venv .venv && .venv/bin/pip install -r requirement
 
 ## Making a change
 
-1. Work on a branch. On the VM, use a git worktree, never the live clone's working tree: the gateway and the
-   sweep load code from it ([runbook](durable-park/docs/runbook.md#deploy-a-change)).
+1. Work on a branch. On the VM, use a git worktree under `/home/hermes/tapdash-agents-wt/<name>`, never the live
+   clone's working tree: the gateway and the sweep load code from it ([runbook](durable-park/docs/runbook.md#deploy-a-change)).
 2. Change the code **and the docs it affects** (next section).
 3. Run the tests: `cd durable-park && .venv/bin/pytest -q -W error`. New behaviour needs a test.
    For a change under `tracing/` (the patched Langfuse plugin), run `bash tracing/run_tests.sh` as `hermes` on the test
@@ -46,7 +46,7 @@ update every doc that is affected, and you check that what it now says is true.
 | Where | What runs |
 |---|---|
 | `git push` | `.githooks/pre-push` refuses the push |
-| CI on every push and pull request | the `Docs updated with code` job fails |
+| CI on every pull request and on every push to `main` | the `Docs updated with code` job fails |
 | CI | every tracked file must be covered by the map, so new files get mapped (`--verify-map`) |
 | CI | every Mermaid diagram must parse (`tools/diagrams`), so a broken diagram cannot land |
 | Every new or reopened pull request | the `Docs Keeper` workflow asks Kilo's Docs Keeper agent to check the docs (see [Docs Keeper](#docs-keeper-automatic)) |
