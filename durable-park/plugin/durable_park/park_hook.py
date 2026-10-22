@@ -21,6 +21,7 @@ from . import formcheck
 from .formcheck import FormChecker, FormCheckUnavailable
 from .gatecall import (
     CONTEXT_FIELD, LiftStatus, build_call, declares_context, find_leftover_notes, gateway_slug, is_note_key,
+    note_is_cut,
     lift_gateway_context, server_label, text_form_note_keys)
 from .ledger import Ledger, args_digest, call_key
 from .wake import one_line
@@ -312,6 +313,14 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
             original_args = args
             lift_problems: list[tuple[str, str, str]] = []
             args = lift_nested_context(tool, args, lift_problems)
+            if isinstance(args, dict) and CONTEXT_FIELD in args:
+                # What the approver will see as the reason (``build_call`` shows it, cut): said when it is no
+                # reason at all or is shortened, so the approver never silently sees less. Kinds only, no text.
+                top_note = args[CONTEXT_FIELD]
+                if not isinstance(top_note, str) or not top_note.strip():
+                    lift_problems.append(("note_not_text", "", ""))
+                elif note_is_cut(top_note):
+                    lift_problems.append(("note_cut", "", ""))
 
             # Step 4: never ask about a call the server would reject: check the form first (form-checked
             # tools only). A replay of a call that is already recorded passed this check then and is not

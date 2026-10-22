@@ -2229,3 +2229,71 @@ def test_a_report_nobody_can_write_leaves_the_marker_and_never_stops_the_call(en
     assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None
     assert len(env.ledger.list_by_status("allowed")) == 1
     assert (env.tmp_path / "lift_status.unwritable").exists()
+
+
+# ---- note_cut and note_not_text: the approver silently seeing less is reported too -------------------------
+
+SECRET_NOTE = "pay-the-secret-vendor-4242 "
+
+
+def test_a_note_cut_for_the_approver_is_recorded_and_never_stored(env, caplog):
+    hook = status_hook(env)
+    nested = {"params": {"customer_ref": "58", "withhuman_context": SECRET_NOTE + "\U0001F600" * 1500}}
+    with caplog.at_level("DEBUG", logger="durable_park"):
+        assert call(hook, GW_TOOL, args=nested)["message"].startswith("PARKED P-")
+    assert recorded(env) == {(GW_TOOL, "note_cut", "")}
+    assert "secret-vendor" not in (env.tmp_path / "lift_status.json").read_text()
+    assert "secret-vendor" not in caplog.text
+
+
+@pytest.mark.parametrize("note, cut", [
+    ("x" * 2000, False), ("x" * 2001, True), ("\U0001F600" * 1000, False), ("\U0001F600" * 1000 + "x", True),
+    ("x" * 1999 + "\U0001F600", True)],
+    ids=["2000-chars-ok", "2001-chars-cut", "1000-emoji-ok", "1000-emoji-plus-1-cut", "pair-straddles-the-limit-cut"])
+def test_the_cut_is_judged_in_utf16_units_like_build_call(env, note, cut):
+    hook = status_hook(env)
+    assert call(hook, GW_TOOL, args={"params": {"customer_ref": "58"}, "withhuman_context": note}
+                )["message"].startswith("PARKED P-")
+    assert (recorded(env) == {(GW_TOOL, "note_cut", "")}) is cut
+    assert (len(env.provider.only().body["agent_reasoning"]) < len(note)) == cut
+
+
+@pytest.mark.parametrize("top", ["", "   \n", 5, None, {"a": 1}, ["x"], True],
+                         ids=["empty", "blank", "number", "null", "object", "list", "bool"])
+def test_a_top_level_note_that_is_not_a_non_empty_text_is_recorded(env, top):
+    hook = status_hook(env)
+    args = {"params": {"customer_ref": "58"}, "withhuman_context": top}
+    assert call(hook, GW_TOOL, args=args)["message"].startswith("PARKED P-")
+    assert recorded(env) == {(GW_TOOL, "note_not_text", "")}
+
+
+def test_a_proper_or_absent_note_records_neither(env):
+    env.provider.auto = "approved"
+    hook = status_hook(env)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) == {"action": "modify", "args": LIFTED}
+    assert call(hook, GW_TOOL, args={"params": {"customer_ref": "59"}}, tool_call_id="call-2") is None
+    assert recorded(env) == set()
+
+
+def test_an_empty_top_level_note_over_a_nested_one_records_both_problems(env):
+    hook = status_hook(env)
+    args = {"params": {"customer_ref": "58", "withhuman_context": "the real reason"}, "withhuman_context": ""}
+    assert call(hook, GW_TOOL, args=args)["message"].startswith("PARKED P-")
+    assert recorded(env) == {(GW_TOOL, "note_not_text", ""), (GW_TOOL, "note_dropped", "params")}
+
+
+def test_note_cut_and_note_not_text_are_not_recorded_for_a_refused_call(env):
+    hook = make_hook(env, form_checker=FormChecker(lambda tool: PAYS), schema_fn=lambda tool: PAYS,
+                     lift_status_path=str(env.tmp_path / "lift_status.json"))
+    bad = {"params": {"customer_ref": "58"}, "withhuman_context": ""}
+    assert call(hook, GW_TOOL, args=bad)["message"].startswith(f'durable-park: "{GW_TOOL}" was NOT run')
+    assert recorded(env) == set()
+
+
+def test_build_call_stays_pure_when_the_note_is_cut(env):
+    """Recording belongs to the hook: build_call twice on the same row gives the same call and never writes."""
+    from durable_park.gatecall import build_call
+    row = env.ledger.park(session_key=SESSION_KEY, session_id="s", tool_call_id="c", tool=GW_TOOL,
+                          args={"params": {}, "withhuman_context": "x" * 3000}, call_key="k" * 64, server="park:quickbooks")
+    assert build_call(row).reasoning == build_call(row).reasoning == "x" * 2000
+    assert not (env.tmp_path / "lift_status.json").exists()

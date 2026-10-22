@@ -99,6 +99,11 @@ def cut_utf16(text: str, limit: int = MAX_REASONING_UNITS) -> str:
     return text
 
 
+def note_is_cut(text: str, limit: int = MAX_REASONING_UNITS) -> bool:
+    """Would ``cut_utf16`` shorten ``text``? (The hook reports it; ``build_call`` itself records nothing.)"""
+    return cut_utf16(text, limit) != text
+
+
 class _BoundedTransport(httpx.BaseTransport):
     """Clamps every request's timeouts. The SDK passes its own per-request timeout (40s, or wait+10s for
     polls), which overrides the httpx client default, so only a transport can enforce an upper bound."""
@@ -365,7 +370,7 @@ LIFT_REWRITE_SECONDS = 60.0  # a repeat of a known problem rewrites the file at 
 LIFT_LOCK_WAIT_SECONDS = 0.2  # the most a tool call ever waits for the report's lock (retries every 20 ms)
 LIFT_LOCK_RETRY_SECONDS = 0.02
 LIFT_KINDS = ("declared", "note_dropped", "schema_unavailable", "args_unreadable", "lift_error",
-              "note_left_inside", "check_incomplete", "report_reset")
+              "note_left_inside", "check_incomplete", "report_reset", "note_cut", "note_not_text")
 LIFT_OVERFLOW_TOOL = "*"  # problems beyond 200 waiting ones are counted here (per kind), never dropped
 LIFT_OVERFLOW_KEY = "(more than 200 problems waiting)"
 LIFT_RESET_TOOL = LIFT_STATUS_FILENAME  # ``report_reset``: the report was unreadable and was replaced

@@ -65,12 +65,10 @@ Also found on the way:
   approved request when the executor replays it.
   **When adding tools from a new provider,** lift problems arrive as chat alerts (`durable-park ALERT: ... the agent's
   note ...`, [runbook](runbook.md#the-agents-note-could-not-be-moved)); nothing needs to be checked in the journal.
-  **Known gaps of the note lift (not fixed, all safe):** (a) a top-level note that is empty or not text, and a note
-  longer than 2000 UTF-16 code units (the approver sees it cut), are not alerted: nothing is moved or lost by the
-  lift, the approver just sees less. (b) A note in text that is neither JSON nor mentions the field name, or inside a
-  deeply nested JSON text that fails to decode, is not found. (c) The form self-check thread retries a lift report
-  that could not be written only where it runs (a gateway with a form-checked tool); the next problem retries too.
-  (d) Arguments that are not JSON text are digested by the hook before Hermes's own dispatch coercion (`"5"` to `5`,
+  **Known gaps of the note lift (not fixed, all safe):** (a) A note in text that is neither JSON nor mentions the field
+  name, or inside a deeply nested JSON text that fails to decode, is not found. (b) The form self-check thread
+  retries a lift report that could not be written only where it runs (a gateway with a form-checked tool); the next
+  problem retries too. (c) Arguments that are not JSON text are digested by the hook before Hermes's own dispatch coercion (`"5"` to `5`,
   `arg_coercion.py`) runs, so the bridge can see a mismatch and a person is asked a second time (safe, noisy; older
   than the lift).
 - `hermes plugins enable langfuse` created a new Hermes environment directory; the old ones remain. Clean up the old

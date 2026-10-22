@@ -19,7 +19,7 @@
                                                        -> print one alert line per (tool, kind) with new places
   (a (tool, kind, key, detail) not alerted before; state in ``lift_alert_state.json``; the line names the first
   place and says "+N more places, e.g. ..." for others), again once per 24 h while a count keeps growing (never for
-  ``declared``, which is intentional), one when the report itself is unreadable (until it reads again), and one
+  ``declared``, ``note_cut`` and ``note_not_text``, which are said once per tool), one when the report itself is unreadable (until it reads again), and one
   when the check itself fails (``lift_check_alert_state.json``; a recovery line follows)
 * the marker ``lift_status.unwritable`` (the hook could not write ``lift_status.json``)
                                                        -> print one alert line per outage (and one when the marker
@@ -69,7 +69,7 @@ LIFT_CHECK_STATE = "lift_check_alert_state.json"  # the lift check itself failed
 LIFT_UNWRITABLE = "lift_status.unwritable"  # exists while the hook cannot write the lift report
 LIFT_UNWRITABLE_STATE = "lift_unwritable_alert_state.json"
 LIFT_REALERT = timedelta(hours=24)  # a problem that keeps happening is said again this often
-LIFT_NO_REPEAT = frozenset({"declared"})  # intentional: said once, never again
+LIFT_NO_REPEAT = frozenset({"declared", "note_cut", "note_not_text"})  # said once per tool, never again
 LIFT_EXAMPLES = 3  # at most this many other places are named in an aggregated line
 LIFT_TEXTS = {
     "declared": ("durable-park ALERT: {tool} has its own withhuman_context field inside {key}; the agent's note is "
@@ -85,6 +85,10 @@ LIFT_TEXTS = {
                      "approver ({reason})."),
     "check_incomplete": ("durable-park ALERT: could not finish checking {tool}'s arguments for the agent's note "
                          "(they are too large or nested too deep); it may reach the server."),
+    "note_cut": ("durable-park ALERT: the agent's note for {tool} was longer than 2000 characters and was shortened "
+                 "for the approver."),
+    "note_not_text": ("durable-park ALERT: the agent's note for {tool} was empty or not text, so the approver saw "
+                      "no reason."),
     "report_reset": ("durable-park ALERT: {tool} was unreadable and was replaced; the earlier lift problems are kept "
                      "in {tool}.corrupt."),
 }
