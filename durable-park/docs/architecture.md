@@ -336,30 +336,40 @@ twice, within a total budget of 3.5 s (withHuman's webhook block gives up at 5 s
 Hermes tool name (`q` = that name, 50 items), once for **every** recent request of the agent (no `q`, 200 items:
 Hermes folds `-` into `_`, so a filter on the tool name could miss a second use under the other spelling). Then:
 
-1. **Plain names only** (`unsafe-name`, before anything else): the gateway server must be ASCII words joined by
-   single `-` or `_` (so no `__`, no leading or trailing separator), the tool must use only letters, digits, `_`
-   and `-`, and the unhashed Hermes name `mcp__wh__<server>__<tool>` must be at most 64 characters (so Hermes never
-   adds a hash suffix). Hermes' name sanitisation then only folds `-` into `_`, and the bridge can name the park
-   exactly.
+1. **Plain names only** (`unsafe-name`, before anything else): the gateway server and the tool must each be ASCII
+   words joined by single `-` or `_` (the server's own tool-name shape: no `__`, no leading or trailing separator),
+   and the unhashed Hermes name `mcp__wh__<server>__<tool>` must be at most 64 characters (so Hermes never adds a
+   hash suffix). Hermes' name sanitisation then only folds `-` into `_`, and the bridge can name the park exactly.
+   A `__` in the tool is refused because the gateway pipeline's money regex allows an optional `quickbooks__`
+   prefix that the park regex lacks: `quickbooks__create-bill` must never pair with a park for `create-bill`.
 2. A park request P **matches** only if all hold: same agent, tool = the Hermes tool name, server = `park:<slug>`,
-   status and decision `approved`, `consumed_at` present and within the last **120 s** (5 s of clock skew allowed),
+   status and decision `approved`, `consumed_at` present and within the last **120 s** (5 s of clock skew allowed
+   against this host's clock),
    consumed before the approval expired, no truncated arguments, and the digest of P's arguments equals G's.
 3. No match: ask a person (`no-approved-park`). Two matches: ask a person (`ambiguous-park`).
 4. On the single match P: arguments the approver could not read go to a person (`redacted-args`: P's arguments hold
    the `[redacted]` placeholder anywhere, or G's arguments would be redacted or cut short by the park hook's own
    redaction); a park whose consumption already has an `outcome` was used and goes to a person
    (`already-reported`).
-5. **G itself must be in the listing**, created no earlier than 5 s before P was consumed, with the same agent,
-   server, tool and argument digest (`gateway-request-not-listed`, `gateway-request-before-release`,
-   `gateway-request-mismatch`).
-6. **A cut-off listing is not trusted:** a full page (200 items) whose oldest item was created at or after P was
-   consumed (an item with no usable time counts as not old enough) may hide later requests: ask a person
-   (`neighbours-truncated`).
+5. **The listing is checked, not trusted** (neither its page size nor its order): every item needs a readable
+   `created_at` and the list must run newest first (`neighbours-unsorted`); and it must contain an item created
+   more than 5 s before P was consumed, normally the park itself (`neighbours-truncated`), otherwise a later request
+   could be hidden beyond the page boundary. Both checks run first, so a doubtful listing never reaches the next two
+   steps.
+6. **G itself must be in the listing**, created **at or after** P was consumed (both stamps come from withHuman's
+   clock, so no skew is allowed), with the same agent, server, tool and argument digest
+   (`gateway-request-not-listed`, `gateway-request-before-release`, `gateway-request-mismatch`).
 7. **Single use, collision-aware:** any other request (not G) of the same agent, not itself a park request, that
    Hermes would map to the **same** park (the same Hermes tool name, so `create-bill` and `create_bill` count as
-   one), with the same arguments (or arguments that are not an object), created at or after P was consumed - in any
-   state, pending, denied or expired too - means the approval is used: ask a person (`already-used`).
+   one), with the same arguments (or arguments that are not an object), created at or after 5 s before P was
+   consumed - in any state, pending, denied or expired too - means the approval is used: ask a person
+   (`already-used`). The window is wider than G's on purpose: the model's own call made 3 s before the release
+   cannot ride on the executor's call made 2 s after it (the earlier one is refused as before-release, the later as
+   already-used).
 8. Otherwise approve, naming P's id.
+
+The webhook-level payload checks in `bridge/app.py` (signature, block type, preview flag, agent slug, shapes,
+idempotency key, `request.id`) run **before** this rule; the rule only sees a delivery that passed them.
 
 Anything unexpected - withHuman slow or down, a missing or too-weak key, a bad answer - asks a person. That is a
 second ask for the same action (safe, only noisy). The bridge never raises to withHuman and never auto-approves on

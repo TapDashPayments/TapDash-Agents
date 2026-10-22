@@ -56,17 +56,18 @@ WINDOW_SECONDS = 120
 SKEW_SECONDS = 5
 
 # Names the bridge can map to a Hermes tool name without ambiguity (rule 1): Hermes sanitisation then only
-# folds "-" into "_" and never hashes. A server is words joined by single "-" or "_"; "__" would split the
-# park slug (``gateway_slug``) in the wrong place.
-_SAFE_SERVER = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*")
-_SAFE_TOOL = re.compile(r"[A-Za-z0-9_-]+")
+# folds "-" into "_" and never hashes. A server and a tool are each words joined by single "-" or "_" (the
+# server's own tool-name shape): "__" would split the park slug (``gateway_slug``) in the wrong place, and the
+# gateway pipeline's money rule accepts an optional ``quickbooks__`` prefix that the park rule lacks, so
+# ``quickbooks__create-bill`` must never pair with a park for ``create-bill``.
+_SAFE_NAME = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*")
 
 
 def _names_are_safe(server, tool) -> bool:
     """Rule 1: plain-ASCII names whose unhashed Hermes tool name fits in 64 characters."""
     if not isinstance(server, str) or not isinstance(tool, str):
         return False
-    if _SAFE_SERVER.fullmatch(server) is None or _SAFE_TOOL.fullmatch(tool) is None:
+    if _SAFE_NAME.fullmatch(server) is None or _SAFE_NAME.fullmatch(tool) is None:
         return False
     unhashed = f"mcp__{HERMES_MCP_SERVER}__{server.replace('-', '_')}__{tool.replace('-', '_')}"
     return len(unhashed) <= _HERMES_NAME_MAX
@@ -112,7 +113,10 @@ def _is_match(park: dict, call: GatewayCall, park_tool: str, park_server: str, d
 
 
 def _is_conflict(other: dict, call: GatewayCall, digest: str, consumed: datetime) -> bool:
-    """Rule 4: ``other`` may be a second use of the park approval consumed at ``consumed``."""
+    """Rule 4: ``other`` may be a second use of the park approval consumed at ``consumed``.
+
+    A request without a readable ``created_at``, or created less than ``SKEW_SECONDS`` before the release, counts.
+    """
     if other.get("id") == call.request_id:
         return False
     if other.get("agent_slug") != call.agent_slug:
@@ -126,8 +130,8 @@ def _is_conflict(other: dict, call: GatewayCall, digest: str, consumed: datetime
     except Exception:  # noqa: BLE001 - a name we cannot map cannot be the same park
         return False
     created = parse_time(other.get("created_at"))
-    if created is not None and created < consumed:
-        return False
+    if created is not None and created < consumed - timedelta(seconds=SKEW_SECONDS):
+        return False  # clearly older than the release (both stamps come from withHuman's clock)
     arguments = other.get("arguments")
     return not isinstance(arguments, dict) or args_digest(arguments) == digest
 
@@ -147,12 +151,15 @@ def _was_not_fully_visible(park: dict, call: GatewayCall) -> bool:
 
 
 def _own_request_verdict(call: GatewayCall, digest: str, neighbours: list, consumed: datetime) -> Verdict | None:
-    """Rule 2: the gateway request itself must be listed, created after the release, and be exactly the call."""
+    """Rule 2: the gateway request itself must be listed, created at or after the release, and be exactly the call.
+
+    ``created_at`` and ``consumed_at`` both come from withHuman's own clock, so there is no skew to allow for.
+    """
     listed = next((o for o in neighbours if isinstance(o, dict) and o.get("id") == call.request_id), None)
     if listed is None:
         return Verdict(False, "gateway-request-not-listed")
     created = parse_time(listed.get("created_at"))
-    if created is None or created < consumed - timedelta(seconds=SKEW_SECONDS):
+    if created is None or created < consumed:
         return Verdict(False, "gateway-request-before-release")
     arguments = listed.get("arguments")
     if ((listed.get("agent_slug"), listed.get("server"), listed.get("tool")) !=
@@ -162,31 +169,39 @@ def _own_request_verdict(call: GatewayCall, digest: str, neighbours: list, consu
     return None
 
 
-def _listing_is_truncated(neighbours: list, limit: int | None, consumed: datetime) -> bool:
-    """Rule 3: a full listing whose oldest item is not older than the consumption may hide later requests."""
-    if limit is None or len(neighbours) < limit:
-        return False
+def _listing_is_unsorted(neighbours: list) -> bool:
+    """Rule 3a: every item needs a readable ``created_at`` and the list must run newest first (ties allowed)."""
     stamps = [parse_time(o.get("created_at")) if isinstance(o, dict) else None for o in neighbours]
-    return any(t is None for t in stamps) or min(stamps) >= consumed
+    if any(t is None for t in stamps):
+        return True
+    return any(newer > older for older, newer in zip(stamps, stamps[1:]))
 
 
-def decide(call: GatewayCall, parks: list, neighbours: list, now: datetime, *,
-           neighbours_limit: int | None = None) -> Verdict:
+def _listing_is_truncated(neighbours: list, consumed: datetime) -> bool:
+    """Rule 3b: the listing must reach back to a request created before ``consumed - SKEW_SECONDS``.
+
+    That is normally the park itself (the same agent's request). Without one, a request made after the release
+    could sit beyond a page boundary that we cannot see. Call after ``_listing_is_unsorted`` (all stamps readable).
+    """
+    cutoff = consumed - timedelta(seconds=SKEW_SECONDS)
+    return not any(parse_time(o.get("created_at")) < cutoff for o in neighbours)
+
+
+def decide(call: GatewayCall, parks: list, neighbours: list, now: datetime) -> Verdict:
     """Approve only when exactly one approved, consumed park backs ``call`` and nothing else used it.
 
-    ``neighbours`` is the newest-first listing of the agent's requests; ``neighbours_limit`` is the page size it
-    was asked with (a full page may be cut off). Pure and total: any unexpected exception becomes
-    ``Verdict(False, "error:<ExcClass>")`` (the class name only, never the message, which could carry argument
-    values).
+    ``neighbours`` is the agent's requests as withHuman listed them; the rule does not trust the page size or the
+    order, it checks that the list is newest first and reaches back before the release. Pure and total: any
+    unexpected exception becomes ``Verdict(False, "error:<ExcClass>")`` (the class name only, never the message,
+    which could carry argument values).
     """
     try:
-        return _decide(call, parks, neighbours, now, neighbours_limit)
+        return _decide(call, parks, neighbours, now)
     except Exception as exc:  # noqa: BLE001 - any bug must fall back to a human, never an approval
         return Verdict(False, f"error:{type(exc).__name__}")
 
 
-def _decide(call: GatewayCall, parks: list, neighbours: list, now: datetime,
-            neighbours_limit: int | None) -> Verdict:
+def _decide(call: GatewayCall, parks: list, neighbours: list, now: datetime) -> Verdict:
     if not _names_are_safe(call.server, call.tool):
         return Verdict(False, "unsafe-name")
     park_tool, park_server = expected_park(call.server, call.tool)
@@ -205,11 +220,13 @@ def _decide(call: GatewayCall, parks: list, neighbours: list, now: datetime,
     if matched["consumption"].get("outcome") is not None:  # the executor already reported a result for it
         return Verdict(False, "already-reported")
     consumed = parse_time(matched["consumption"]["consumed_at"])
+    if _listing_is_unsorted(neighbours):
+        return Verdict(False, "neighbours-unsorted")
+    if _listing_is_truncated(neighbours, consumed):
+        return Verdict(False, "neighbours-truncated")
     refusal = _own_request_verdict(call, digest, neighbours, consumed)
     if refusal is not None:
         return refusal
-    if _listing_is_truncated(neighbours, neighbours_limit, consumed):
-        return Verdict(False, "neighbours-truncated")
     if any(_is_conflict(o, call, digest, consumed) for o in neighbours if isinstance(o, dict)):
         return Verdict(False, "already-used")
     return Verdict(True, "park-request=" + matched["id"], matched["id"])
