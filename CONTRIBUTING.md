@@ -58,6 +58,9 @@ rule: change either, update the runbook's "Tool policy check failed" and "Open a
 The gateway-start load check (`durable-park/deploy/plugin_load_check.sh`, run by the same drop-in as `ExecStartPost`)
 is covered by the same rule (`deploy/*.sh`): change it, update the runbook's "Gateway will not start: the plugin did
 not load" section.
+The vendored Langfuse plugin (`tracing/tapdash_langfuse/` and `tracing/run_tests.sh`) is mapped to the runbook and to
+`tracing/tapdash_langfuse/PATCHES.md` in the "Tracing plugin (tapdash-langfuse)" rule: every difference from upstream
+goes into `PATCHES.md` in the same commit. Its tests run with `bash tracing/run_tests.sh`, not the durable-park pytest.
 The withHuman entry pipeline kept as a reviewed file (`durable-park/deploy/withhuman/entry-pipeline.json`) is mapped to
 `architecture.md`: change the file, change the pipeline table there in the same commit.
 

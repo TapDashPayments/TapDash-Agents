@@ -44,6 +44,14 @@
       "docs": ["durable-park/plugin/durable_park/_vendor/README.md"]
     },
     {
+      "name": "Tracing plugin (tapdash-langfuse)",
+      "code": ["tracing/**"],
+      "docs": [
+        "durable-park/docs/runbook.md",
+        "tracing/tapdash_langfuse/PATCHES.md"
+      ]
+    },
+    {
       "name": "Gateway bridge",
       "code": ["durable-park/bridge/**"],
       "docs": [
