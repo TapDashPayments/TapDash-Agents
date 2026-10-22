@@ -330,7 +330,15 @@ if ! systemctl is-active --quiet "$BRIDGE_UNIT.socket"; then
     systemctl stop "$BRIDGE_UNIT"
     log "stopped $BRIDGE_UNIT so that the socket unit can take over its port"
 fi
-systemctl enable --now "$BRIDGE_UNIT.socket" || die "could not start $BRIDGE_UNIT.socket (is something else bound to 127.0.0.1:8791?)"
+# The socket could not take 127.0.0.1:8791. The old bridge was stopped just above, so whatever holds the port now is
+# not ours: with the bot's user that is something answering withHuman's webhook in the bridge's place. Show who holds
+# it (ss prints process names and pids, never a secret) and stop.
+bridge_socket_failed() {
+    printf 'configure_hermes: holders of 127.0.0.1:8791 (ss -ltnp "sport = :8791"):\n' >&2
+    ss -ltnp 'sport = :8791' >&2 || true
+    die "could not start $BRIDGE_UNIT.socket: something else may hold 127.0.0.1:8791. This may be a SECURITY INCIDENT (a process answering withHuman's webhook in the bridge's place): tell the admin, look at the ss output above, do not continue and do not re-run this script until the holder is explained and stopped (docs/runbook.md, Health check)"
+}
+systemctl enable --now "$BRIDGE_UNIT.socket" || bridge_socket_failed
 # The service reads both keys only at start (LoadCredential): restart it by hand after storing or rotating one.
 # The socket keeps the port meanwhile.
 restart_if_needed "$BRIDGE_UNIT"

@@ -642,12 +642,18 @@ neither is created by any script:
 1. Store both keys as above. `configure_hermes.sh` refuses to start, changing nothing, if either file is missing or
    empty, because the service cannot start without them (`LoadCredential`).
 2. Only for the first move from the old bridge that ran as `hermes`: that bridge held `127.0.0.1:8791` itself, so the
-   script stops it before systemd's socket can take the port, and for a moment nothing listens. First check that no
-   ledger row is `parked`, `approved` or `executing` ([waiting rows](#health-check)); a gateway call in that moment
-   goes to a person, never an auto-approve.
+   script stops it before systemd's socket can take the port, and for a moment nothing listens. **Keep the gateway
+   idle for the whole first migration**: check that no ledger row is `parked`, `approved` or `executing`
+   ([waiting rows](#health-check)), and do not start a new tool call in the chat until `bridge_check.py` has passed
+   (step 3). A gateway call in that moment goes to a person, never an auto-approve, but a parked or approved row
+   would be left waiting on a bridge that is not answering.
 3. Run `sudo bash deploy/configure_hermes.sh` ([deploy table](#deploy-a-change)). It creates `dpbridge`, sets
    `bridge_secret` to `root:root 0600`, installs both units, starts the socket and the service, and runs
-   `bridge_check.py`.
+   `bridge_check.py`. If it stops with `could not start durable-park-bridge.socket: something else may hold
+   127.0.0.1:8791`, **treat it as a possible security incident**: the old bridge was stopped just before, so another
+   process holds the port and may be answering withHuman's webhook. Read the `ss` output the script printed (process
+   names and pids, no secrets), tell the admin, and do not continue and do not re-run the script until the holder is
+   explained and stopped.
 4. Run the [check](#the-gateway-bridge) below and the [live acceptance](#the-gateway-bridge).
 
 **Rotate a key.** The service copies `bridge_secret` and `audit_key` only when it starts (`LoadCredential`), so after
