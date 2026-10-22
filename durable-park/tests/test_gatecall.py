@@ -8,7 +8,7 @@ from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
 from agentapprovalprotocol._gate import submission
 from durable_park.gatecall import (
-    GateHolder, build_call, make_gate, platform_of, redact_arguments, server_label)
+    GateHolder, build_call, lift_gateway_context, make_gate, platform_of, redact_arguments, server_label)
 from durable_park.ledger import Ledger
 
 
@@ -178,3 +178,115 @@ def test_gate_denied(tmp_path):
     provider.decide(pending.request_id, "denied", note="no")
     verdict = gate.check(build_call(row))
     assert isinstance(verdict, Deny) and verdict.status == "denied"
+
+
+# ---- lifting a nested withhuman_context ------------------------------------------------------------
+
+GW_SCHEMA = {"type": "object", "properties": {
+    "params": {"type": "object", "properties": {"criteria": {"type": "string"}}},
+    "withhuman_context": {"type": "string"}}}
+
+
+def test_lift_moves_nested_note_to_top():
+    args = {"params": {"criteria": "x", "withhuman_context": "Find customer 58"}}
+    assert lift_gateway_context(args, GW_SCHEMA) == {
+        "params": {"criteria": "x"}, "withhuman_context": "Find customer 58"}
+
+
+def test_lift_existing_top_level_note_wins_and_nested_is_dropped():
+    args = {"params": {"criteria": "x", "withhuman_context": "nested"}, "withhuman_context": "top"}
+    assert lift_gateway_context(args, GW_SCHEMA) == {"params": {"criteria": "x"}, "withhuman_context": "top"}
+
+
+def test_lift_non_string_nested_is_dropped_not_moved():
+    for value in (5, None, {"a": 1}, ["x"], True, ""):
+        args = {"params": {"criteria": "x", "withhuman_context": value}}
+        assert lift_gateway_context(args, GW_SCHEMA) == {"params": {"criteria": "x"}}, value
+
+
+@pytest.mark.parametrize("schema", [
+    None, "nope", [], {}, {"properties": None}, {"properties": []},
+    {"properties": {"params": {"type": "object"}}},  # the tool does not advertise withhuman_context
+])
+def test_lift_leaves_other_tools_untouched(schema):
+    args = {"params": {"withhuman_context": "note"}}
+    assert lift_gateway_context(args, schema) == {"params": {"withhuman_context": "note"}}
+
+
+def test_lift_skips_a_key_whose_own_schema_declares_the_field():
+    schema = {"properties": {
+        "params": {"type": "object", "properties": {"withhuman_context": {"type": "string"}}},
+        "other": {"type": "object"},
+        "withhuman_context": {"type": "string"}}}
+    args = {"params": {"withhuman_context": "the server wants this"}, "other": {"withhuman_context": "lift me"}}
+    assert lift_gateway_context(args, schema) == {
+        "params": {"withhuman_context": "the server wants this"}, "other": {}, "withhuman_context": "lift me"}
+
+
+def test_lift_two_nested_dicts_sorted_first_string_wins_both_removed():
+    args = {"zeta": {"withhuman_context": "from zeta", "k": 1}, "alpha": {"withhuman_context": "from alpha"}}
+    assert lift_gateway_context(args, GW_SCHEMA) == {
+        "zeta": {"k": 1}, "alpha": {}, "withhuman_context": "from alpha"}
+
+
+def test_lift_sorted_first_non_string_is_dropped_and_next_string_wins():
+    args = {"alpha": {"withhuman_context": 7}, "beta": {"withhuman_context": "from beta"}}
+    assert lift_gateway_context(args, GW_SCHEMA) == {"alpha": {}, "beta": {}, "withhuman_context": "from beta"}
+
+
+@pytest.mark.parametrize("args", [None, "text", 5, ["params"], ({"withhuman_context": "x"},)])
+def test_lift_non_dict_args_unchanged(args):
+    assert lift_gateway_context(args, GW_SCHEMA) == args
+
+
+def test_lift_leaves_json_string_values_and_deeper_levels_alone():
+    string_valued = {"params": '{"criteria": "x", "withhuman_context": "note"}'}
+    assert lift_gateway_context(string_valued, GW_SCHEMA) == string_valued
+    deeper = {"params": {"inner": {"withhuman_context": "too deep"}}}
+    assert lift_gateway_context(deeper, GW_SCHEMA) == deeper
+
+
+def test_lift_is_idempotent_and_does_not_mutate_its_input():
+    args = {"params": {"criteria": "x", "withhuman_context": "note"}, "other": {"withhuman_context": 1}}
+    before = copy.deepcopy(args)
+    once = lift_gateway_context(args, GW_SCHEMA)
+    assert args == before
+    assert once == {"params": {"criteria": "x"}, "other": {}, "withhuman_context": "note"}
+    assert lift_gateway_context(once, GW_SCHEMA) == once
+
+
+def park_with_args(tmp_path, args):
+    ledger = Ledger(str(tmp_path / "ledger.db"))
+    return ledger.park(session_key="agent:main:telegram:dm:42", session_id="s", tool_call_id="c",
+                       tool="mcp__wh__quickbooks__create_payment", args=args, call_key="r" * 64,
+                       server="park:quickbooks")
+
+
+def test_build_call_passes_the_note_as_reasoning(tmp_path):
+    row = park_with_args(tmp_path, {"params": {"criteria": "x"}, "withhuman_context": "Find customer 58"})
+    call = build_call(row)
+    assert call.reasoning == "Find customer 58"
+    assert dict(call.arguments)["withhuman_context"] == "Find customer 58"
+
+
+def test_build_call_cuts_reasoning_at_2000_characters(tmp_path):
+    row = park_with_args(tmp_path, {"withhuman_context": "n" * 2500})
+    assert build_call(row).reasoning == "n" * 2000
+
+
+@pytest.mark.parametrize("args", [
+    {"params": {"criteria": "x"}},
+    {"withhuman_context": ""},
+    {"withhuman_context": 5},
+    {"params": {"withhuman_context": "nested only"}},
+])
+def test_build_call_without_a_top_level_note_has_no_reasoning(tmp_path, args):
+    assert build_call(park_with_args(tmp_path, args)).reasoning is None
+
+
+def test_build_call_with_a_note_is_still_a_pure_function_of_the_row(tmp_path):
+    row = park_with_args(tmp_path, {"withhuman_context": "Find customer 58"})
+    gate = make_gate(BASE_URL, TOKEN, client=FakeProvider(auto=None).client())
+    bodies = [submission(build_call(row), gate.timeout, gate.context) for _ in range(2)]
+    assert bodies[0] == bodies[1]
+    assert bodies[0]["agent_reasoning"] == "Find customer 58"

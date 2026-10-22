@@ -25,6 +25,8 @@ HTTP_TIMEOUT_SECONDS = 10.0
 # request whose canonical JSON is over 16 KiB gets every string cut to 1 KiB.
 MAX_ARGS_BYTES = 16384
 MAX_STRING_CHARS = 1024
+MAX_REASONING_CHARS = 2000  # the agent's own note shown to the approver (``Call.reasoning``)
+CONTEXT_FIELD = "withhuman_context"  # the gateway's top-level note field
 REDACTED = "[redacted]"
 _SECRET_KEY = re.compile(r"password|token|secret|authorization|api[_-]?key", re.IGNORECASE)
 _GATEWAY_SLUG = re.compile(r"mcp__wh__(.+?)__")
@@ -105,11 +107,46 @@ def bounded_http(inner: httpx.BaseTransport | None = None) -> httpx.Client:
         timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False)
 
 
+def _declares_context(schema: Any) -> bool:
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    return isinstance(props, dict) and CONTEXT_FIELD in props
+
+
+def lift_gateway_context(args: Any, schema: dict | None) -> Any:
+    """Move a ``withhuman_context`` note the model nested inside an argument object up to the top level.
+
+    The withHuman gateway's schema has ``withhuman_context`` as a sibling of the tool's own fields and strips only
+    the top-level one before forwarding, so a nested copy would reach the server as an unknown parameter. Only
+    tools whose ``schema`` advertises the field at the top level are touched, one level deep, in sorted key order;
+    a nested object whose own schema declares the field is left alone. The first removed non-empty string becomes
+    the top-level note unless the top level already has the key (it always wins); other removed values are dropped.
+    A JSON-string value is not parsed. Pure and idempotent: the input is never mutated (a deep copy is returned
+    when anything is touched, the same object otherwise)."""
+    if not isinstance(args, dict) or not _declares_context(schema):
+        return args
+    props = schema["properties"]
+    out = copy.deepcopy(args)
+    note: str | None = None
+    for key in sorted(out, key=str):
+        value = out[key]
+        if not isinstance(value, dict) or CONTEXT_FIELD not in value or _declares_context(props.get(key)):
+            continue
+        removed = value.pop(CONTEXT_FIELD)
+        if note is None and isinstance(removed, str) and removed:
+            note = removed
+    if note is not None and CONTEXT_FIELD not in out:
+        out[CONTEXT_FIELD] = note
+    return out
+
+
 def build_call(row: ParkRow) -> Call:
     """The AAP call for a ledger row: a pure function of the row (the executor replays it and must send the
     identical body). Raises ``ValueError`` for arguments that are not strict JSON (e.g. NaN)."""
-    arguments, truncated = redact_arguments(json.loads(row.args_json))
+    stored = json.loads(row.args_json)
+    arguments, truncated = redact_arguments(stored)
     json.dumps(arguments, allow_nan=False)
+    note = stored.get(CONTEXT_FIELD) if isinstance(stored, dict) else None
+    reasoning = note[:MAX_REASONING_CHARS] if isinstance(note, str) and note else None
     context: dict[str, Any] = {
         "args_sha256": row.args_digest, "platform": platform_of(row.session_key), "session_key": row.session_key}
     if truncated:
@@ -119,6 +156,7 @@ def build_call(row: ParkRow) -> Call:
         tool=row.tool,
         arguments=arguments,
         server=row.server,
+        reasoning=reasoning,
         context=context,
         resume={"framework": "hermes", "park_id": row.park_id, "session_key": row.session_key},
     )

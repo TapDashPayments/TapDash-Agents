@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import os
 import re
@@ -1645,3 +1646,88 @@ def test_no_load_proof_when_only_a_foreign_hook_is_registered(tmp_path, with_ses
     ctx.hook_lists["pre_tool_call"] = [foreign_hook]  # someone else's hook is there, ours is not
     register(ctx)
     assert not (data / "plugin_load.json").exists()
+
+
+# ---- lifting a nested withhuman_context --------------------------------------------------------------
+
+GW_TOOL = "mcp__wh__quickbooks__create_payment"
+GW_SCHEMA = {"type": "object", "properties": {"params": {"type": "object"}, "withhuman_context": {"type": "string"}}}
+NESTED = {"params": {"customer_ref": "58", "withhuman_context": "Find customer 58"}}
+LIFTED = {"params": {"customer_ref": "58"}, "withhuman_context": "Find customer 58"}
+
+
+def lifting_hook(env, schema_fn=lambda tool: GW_SCHEMA, **kw):
+    return make_hook(env, schema_fn=schema_fn, **kw)
+
+
+def test_allowed_gateway_call_with_nested_note_is_modified_to_the_lifted_args(env):
+    env.provider.auto = "approved"
+    hook = lifting_hook(env)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) == {"action": "modify", "args": LIFTED}
+    assert env.provider.only().body["arguments"] == LIFTED  # withHuman was asked about what will run
+    (row,) = env.ledger.list_by_status("allowed")
+    assert json.loads(row.args_json) == LIFTED
+
+
+def test_allowed_call_with_nothing_to_lift_returns_none(env):
+    env.provider.auto = "approved"
+    hook = lifting_hook(env, schema_fn=lambda tool: GW_SCHEMA if tool == GW_TOOL else {"type": "object"})
+    assert call(hook, GW_TOOL, args={"params": {"customer_ref": "58"}, "withhuman_context": "top"}) is None
+    assert call(hook, "web_search", args={"q": {"withhuman_context": "x"}}, tool_call_id="call-2") is None
+    assert env.provider.requests and len(env.ledger.list_by_status("allowed")) == 2
+
+
+def test_parked_call_stores_the_lifted_args_and_shows_the_note_to_the_approver(env):
+    hook = lifting_hook(env)
+    result = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    (row,) = env.ledger.list_by_status("parked")
+    assert result == {"action": "block", "message": park_message(row.park_id, GW_TOOL)}
+    stored_args = json.loads(row.args_json)
+    assert stored_args == LIFTED and "withhuman_context" not in stored_args["params"]
+    body = env.provider.only().body
+    assert body["agent_reasoning"] == "Find customer 58"
+    assert body["arguments"] == LIFTED
+    assert build_call(row).reasoning == "Find customer 58"  # the executor replays the same body
+
+
+def test_replay_of_the_same_nested_call_is_the_same_call(env):
+    hook = lifting_hook(env)
+    first = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    second = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    assert first == second and first["message"].startswith("PARKED P-")
+    assert len(env.ledger.list_by_status("parked")) == 1 and len(env.provider.requests) == 1
+
+
+def test_a_different_call_on_the_same_id_is_still_refused_after_a_lift(env):
+    hook = lifting_hook(env)
+    call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    other = {"params": {"customer_ref": "99", "withhuman_context": "Find customer 58"}}
+    assert call(hook, GW_TOOL, args=other)["message"].startswith("durable-park: this tool call id was already used")
+
+
+def test_failing_schema_lookup_uses_the_original_args(env):
+    def broken(tool):
+        raise RuntimeError("registry gone")
+
+    hook = lifting_hook(env, schema_fn=broken)
+    result = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    (row,) = env.ledger.list_by_status("parked")
+    assert result == {"action": "block", "message": park_message(row.park_id, GW_TOOL)}
+    assert json.loads(row.args_json) == NESTED
+    assert env.provider.only().body["arguments"] == NESTED
+
+
+def test_failing_schema_lookup_on_an_allowed_call_changes_nothing(env):
+    env.provider.auto = "approved"
+
+    def broken(tool):
+        raise RuntimeError("registry gone")
+
+    assert call(lifting_hook(env, schema_fn=broken), GW_TOOL, args=copy.deepcopy(NESTED)) is None
+
+
+def test_lift_never_runs_for_exempt_tools(env):
+    seen = []
+    hook = lifting_hook(env, schema_fn=lambda tool: seen.append(tool) or GW_SCHEMA)
+    assert call(hook, "clarify", args=copy.deepcopy(NESTED)) is None
+    assert seen == [] and env.provider.requests == {}

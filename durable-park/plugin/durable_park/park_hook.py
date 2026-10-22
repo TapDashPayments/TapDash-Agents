@@ -15,8 +15,8 @@ from typing import Any, Callable, Iterable
 from agentapprovalprotocol import Allow, Deny, Pending
 
 from .breaker import Breaker
-from .formcheck import FormChecker, FormCheckUnavailable
-from .gatecall import build_call, server_label
+from .formcheck import FormChecker, FormCheckUnavailable, registry_schema
+from .gatecall import build_call, lift_gateway_context, server_label
 from .ledger import Ledger, args_digest, call_key
 from .wake import one_line
 
@@ -131,19 +131,32 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                        exempt: Iterable[str] = DEFAULT_EXEMPT_TOOLS, breaker: Breaker | None = None,
                        foreign_hooks_fn: Callable[[], list[str]] | None = None,
                        session_key_fn: Callable[[], str] | None = None,
-                       form_checker: FormChecker | None = None) -> Callable[..., dict | None]:
+                       form_checker: FormChecker | None = None,
+                       schema_fn: Callable[[str], dict | None] = registry_schema) -> Callable[..., dict | None]:
     """Build the hook. ``gate_factory`` is called per call (e.g. ``GateHolder.get``). ``form_checker``
     validates a form-checked call's arguments against the tool's rules before anything is recorded or asked
     (default: the rules Hermes registered for the tool). ``breaker`` (optional) stops asking withHuman while
     it is unreachable. ``foreign_hooks_fn`` (optional) names other plugins' ``pre_tool_call`` hooks that could
-    change arguments after approval; while it names any, every non-exempt call is refused."""
+    change arguments after approval; while it names any, every non-exempt call is refused. ``schema_fn`` looks up
+    a tool's registered input rules (default: Hermes's registry); it decides whether a nested ``withhuman_context``
+    note is lifted to the top level (see ``lift_gateway_context``), and a lookup error means no lift."""
     checker = form_checker if form_checker is not None else FormChecker()
     exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
+
+    def lift_nested_context(tool_name: str, args: Any) -> Any:
+        """``lift_gateway_context`` with the tool's registered rules; any error means the original arguments."""
+        if not isinstance(args, dict):
+            return args
+        try:
+            return lift_gateway_context(args, schema_fn(tool_name))
+        except Exception as exc:  # noqa: BLE001 - the lift is a cleanup, never a gate
+            log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)
+            return args
 
     def is_form_checked(tool_name: str) -> bool:
         return any(p.fullmatch(tool_name) for p in form_checked)
 
-    def pre_tool_call(**kw: Any) -> dict[str, str] | None:
+    def pre_tool_call(**kw: Any) -> dict[str, Any] | None:
         tool = str(kw.get("tool_name") or "")
         # Step 0: Hermes unwraps a valid single-entry ``tool_call`` before this hook runs, so the hook judges the
         # real tool. A ``tool_call`` that still arrives here is a wrapper Hermes could not resolve (a batch, bad
@@ -177,6 +190,10 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 return _block(NO_CALL_ID_MESSAGE)
             raw_args = kw.get("args")
             args = {} if raw_args is None else raw_args
+            # From here on the lifted arguments are THE arguments: what the form check sees, what the ledger digests
+            # and stores, what withHuman is asked about, and (via ``modify`` below) what Hermes dispatches.
+            original_args = args
+            args = lift_nested_context(tool, args)
 
             # Step 4: never ask about a call the server would reject: check the form first (form-checked
             # tools only). A replay of a call that is already recorded passed this check then and is not
@@ -237,7 +254,8 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                     return _block(COULD_NOT_OPEN_MESSAGE)
                 park_id = None
                 log.info("allowed %s tool=%s", row.park_id, tool)
-                return None
+                # Hermes shallow-merges ``args`` into the call: the lifted note is added, ``params`` is replaced.
+                return {"action": "modify", "args": args} if args != original_args else None
 
             # Step 9: instant refusal (policy) or an error reaching withHuman.
             if isinstance(verdict, Deny):

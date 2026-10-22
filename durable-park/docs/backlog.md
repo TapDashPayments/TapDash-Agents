@@ -37,8 +37,10 @@ is only noted. No code was changed in the tracing work.
 
 Also found on the way:
 
-- The QuickBooks server answers "withhuman_context was IGNORED": the agent sends a parameter that is dropped.
-  Investigate where it comes from and whether anything relied on it.
+- The QuickBooks server answers "withhuman_context was IGNORED": the model nests the gateway's note inside `params`.
+  Fixed on branch `fix/withhuman-context-lift` (2026-10-22, not deployed yet): the park hook lifts it to the top
+  level and shows it to the approver ([architecture section 4](architecture.md#4-tool-call-form-check-then-one-question-to-withhuman)).
+  After deploy, confirm in Langfuse that the warning is gone.
 - `hermes plugins enable langfuse` created a new Hermes environment directory; the old ones remain. Clean up the old
   environments later, when disk space matters.
 

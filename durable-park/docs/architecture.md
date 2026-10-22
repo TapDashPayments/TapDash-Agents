@@ -145,7 +145,7 @@ flowchart LR
 |---|---|---|
 | Langfuse plugin (not ours) | Nous Research's `langfuse` plugin, in `~/.hermes/plugins/langfuse`, loaded by the gateway | Sends traces to Langfuse Cloud: one per turn, one generation per model call, one observation per tool call, full content ([runbook](runbook.md#tracing-langfuse)). Its `pre_tool_call` hook only observes and is listed in `observer_hooks`. A one-way arrow out: Langfuse sends nothing back and cannot change a call. Live since 2026-10-22 04:37 UTC. |
 | plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook and middleware registries on every call for other plugins' `pre_tool_call` hooks and `tool_request` / `tool_execution` middleware (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
-| park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); checks the form (form-checked tools only), saves the call, and asks withHuman once. An instant approval lets the tool run (row `allowed`); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
+| park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); lifts a `withhuman_context` note the model nested inside an argument object to the top level (gateway tools only, [section 4](#4-tool-call-form-check-then-one-question-to-withhuman)); checks the form (form-checked tools only), saves the call, and asks withHuman once, with the note as the approver's reason. An instant approval lets the tool run (row `allowed`; Hermes gets the lifted arguments when the note was moved); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
 | ledger | `plugin/durable_park/ledger.py` | SQLite record of every tool call that was asked about and its state. The single source of truth. |
 | wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. |
@@ -400,7 +400,8 @@ flowchart TD
   foreign -->|"yes"| bforeign["Block: foreign hook<br/>(no row, nobody asked)"]
   foreign -->|"no"| ids{"Chat session and<br/>tool call id?"}
   ids -->|"no"| bids["Block: no chat session<br/>or no tool call id"]
-  ids -->|"yes"| fc{"Form-checked tool,<br/>call id not seen before?"}
+  ids -->|"yes"| lift["Lift a nested withhuman_context<br/>to the top level (gateway tools only)<br/>from here on: the lifted args"]
+  lift --> fc{"Form-checked tool,<br/>call id not seen before?"}
   fc -->|"yes"| rules{"Rules for this tool<br/>found and usable?"}
   rules -->|"no"| closed["Block: could not be checked<br/>(no row, nobody asked)"]
   rules -->|"yes"| valid{"Args follow the rules?<br/>after Hermes type fixing,<br/>withhuman_* dropped"}
@@ -417,7 +418,7 @@ flowchart TD
   obj -->|"yes"| breaker{"Breaker open?"}
   breaker -->|"yes"| down["Row refused<br/>Block: withHuman unreachable"]
   breaker -->|"no"| ask["Ask withHuman once<br/>AAP check, can pause"]
-  ask -->|"Allow, consumed"| runs["Row allowed<br/>tool runs"]
+  ask -->|"Allow, consumed"| runs["Row allowed<br/>tool runs (modify: lifted args<br/>when the note was moved)"]
   ask -->|"Deny, error"| down
   ask -->|"Deny, policy"| refused["Row refused<br/>Block: refused by withHuman policy"]
   ask -->|"Pending"| busy{"Chat already waiting?<br/>another row approved, executing,<br/>or parked with a request"}
@@ -425,6 +426,19 @@ flowchart TD
   busy -->|"no"| parked["Attach request id<br/>Block: PARKED, a person decides"]
 ```
 
+- **Lifting the note.** The withHuman gateway's tool schema is `{params: {...}, withhuman_context: string}`, and the
+  gateway strips only the top-level `withhuman_context` before forwarding. When the model nests the note inside an
+  argument object (`{"params": {..., "withhuman_context": "..."}}`), the QuickBooks server would get an unknown
+  parameter and answer with an "IGNORED" warning that wastes tokens, and the approver would not see the reason.
+  `gatecall.lift_gateway_context` moves it up one level for tools whose registered rules (`schema_fn`, default the
+  Hermes registry) list `withhuman_context` at the top level: sorted key order, the first non-empty string wins, an
+  existing top-level note always wins, other values are dropped, a nested object whose own rules declare the field
+  is left alone, JSON strings are not parsed. Any error means the original arguments. The lifted arguments are the
+  only arguments from then on: the form check, the row (digest and stored args, so the executor later dispatches the
+  lifted call), the request to withHuman, and, for an instant `Allow`, the `{"action": "modify", "args": ...}` the
+  hook returns (Hermes shallow-merges it into the call; nothing is returned when nothing was lifted). The top-level
+  note goes to the approver as the request's reasoning (`gatecall.build_call`, cut to 2000 characters, a pure
+  function of the row).
 - **Allow** means the SDK already consumed the approval. If the row cannot move to `allowed` (the sweep cancelled
   it meanwhile), the call is blocked and the spent approval is not used again.
 - **Deny** with status `error` (withHuman unreachable, credential refused, bad answer) counts as a breaker failure;
