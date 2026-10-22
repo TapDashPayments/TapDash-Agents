@@ -32,11 +32,24 @@ def plugin(monkeypatch):
         def end(self, **kw): pass
         def start_observation(self, **kw): return _Span()
 
+    mod.otel_calls = []  # (root span, attribute name, value) for every root OTel set_attribute
+
+    class _Otel:
+        def __init__(self, root): self.root = root
+        def set_attribute(self, key, value): mod.otel_calls.append((self.root, key, value))
+
+    class _Root(_Span):
+        def __init__(self): self._otel_span = _Otel(self)
+
+    mod.root_spans = []
+
     class _Client:
         def create_trace_id(self, seed=None): return f"trace::{seed}"
         def start_observation(self, **kw):
             mod.root_calls.append(dict(kw))
-            return _Span()
+            root = _Root()
+            mod.root_spans.append(root)
+            return root
         def flush(self): pass
 
     monkeypatch.setattr(mod, "propagate_attributes", _propagate)
@@ -117,3 +130,151 @@ def test_ascii_attr(plugin):
     assert plugin._ascii_attr("é") is None
     assert plugin._ascii_attr("a" * 200) == "a" * 200
     assert plugin._ascii_attr("a" * 201) is None
+
+
+# ---- HERMES_LANGFUSE_TAG_PATTERNS (spec D4-D6) ----
+
+PARK = r"park=\bP-[0-9A-F]{8}\b"
+
+
+def _open(mod, text="hi", *, task="k", turn="t1", session="s", call=1):
+    mod.on_pre_llm_request(turn_id=turn, task_id=task, session_id=session, platform="telegram", api_call_count=call,
+                           request_messages=[{"role": "user", "content": text}])
+
+
+def _tool(mod, args, result, *, task="k", turn="t1", session="s", name="parked_action_execute", call_id="c1"):
+    kw = dict(tool_name=name, args=args, task_id=task, session_id=session, tool_call_id=call_id, turn_id=turn)
+    mod.on_pre_tool_call(**kw)
+    mod.on_post_tool_call(result=result, **kw)
+
+
+def _tag_values(mod, prefix="park:"):
+    return [t for t in mod.propagate_calls[0]["tags"] if t.startswith(prefix)]
+
+
+def test_patterns_parse_and_skip_bad_entries(plugin, monkeypatch, caplog):
+    raw = r"park=\bP-[0-9A-F]{8}\b;nolabel;Bad Label=x;broken=(;inv=invoice (\d+)"
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", raw)
+    with caplog.at_level("WARNING", logger="langfuse_plugin"):
+        parsed = plugin._tag_patterns()
+        assert [label for label, _ in parsed] == ["park", "inv"]
+        assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 3
+        caplog.clear()
+        assert [label for label, _ in plugin._tag_patterns()] == ["park", "inv"]
+        assert not caplog.records
+
+
+def test_patterns_unset_means_nothing(plugin, monkeypatch):
+    monkeypatch.delenv("HERMES_LANGFUSE_TAG_PATTERNS", raising=False)
+    assert plugin._tag_patterns() == []
+    assert plugin._pattern_tags(["P-420E1D2C"]) == []
+
+
+def test_root_tagged_from_user_message(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", PARK)
+    _open(plugin, "[durable-park] P-420E1D2C was APPROVED in withHuman.")
+    tags = plugin.propagate_calls[0]["tags"]
+    assert "park:P-420E1D2C" in tags
+    assert tags[:2] == ["hermes", "langfuse"] and "platform:telegram" in tags  # upstream tags first, unchanged
+
+
+def test_late_tag_from_tool_result_reaches_root_and_later_children(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", PARK)
+    _open(plugin, "pay the invoice")
+    assert _tag_values(plugin) == []
+    _tool(plugin, {"amount": 5}, 'PARKED P-0A9C15CE: "mcp__wh__quickbooks__create_payment" needs human approval in '
+                                 "withHuman and has NOT run.", name="mcp__wh__quickbooks__create_payment")
+    root = plugin.root_spans[0]
+    assert plugin.otel_calls, "root OTel span never got the tag"
+    owner, key, value = plugin.otel_calls[-1]
+    assert owner is root and key == "langfuse.trace.tags"
+    assert value[-1] == "park:P-0A9C15CE" and value[:2] == ["hermes", "langfuse"]
+    n = len(plugin.propagate_calls)
+    _open(plugin, "pay the invoice", call=2)  # next LLM call of the same turn: a child under the same root
+    assert len(plugin.root_spans) == 1
+    assert "park:P-0A9C15CE" in plugin.propagate_calls[n]["tags"]
+    assert _tag_values(plugin) == []  # the call recorded at root start was not rewritten after the fact
+
+
+def test_tool_args_are_scanned(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", PARK)
+    _open(plugin)
+    _tool(plugin, {"park_id": "P-420E1D2C"}, {"status": "executed", "park_id": "P-420E1D2C"})
+    values = [v for _, _, v in plugin.otel_calls]
+    assert values and all(v.count("park:P-420E1D2C") == 1 for v in values)
+    assert values[-1].count("park:P-420E1D2C") == 1
+    assert len(plugin.otel_calls) == 1  # the second sighting changes nothing, so no second write
+
+
+def test_group_capture(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", r"inv=invoice (\d+)")
+    _open(plugin, "pay invoice 1016")
+    assert plugin.propagate_calls[0]["tags"][-1] == "inv:1016"
+
+
+def test_tag_limits(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", r"n=\bn\d+\b;long=L\w+;u=u\S+")
+    _open(plugin, " ".join(f"n{i}" for i in range(15)))
+    assert len(_tag_values(plugin, "n:")) == 10
+    assert plugin._pattern_tags(["L" + "x" * 250]) == []  # tag would be > 200 chars
+    assert plugin._pattern_tags(["L" + "x" * 193]) == ["long:L" + "x" * 193]  # exactly 200 chars: kept
+    assert plugin._pattern_tags(["u\u00e9"]) == []  # non-ASCII value skipped
+
+
+def test_ten_tag_cap_holds_across_later_matches(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", r"n=\bn\d+\b")
+    _open(plugin, " ".join(f"n{i}" for i in range(8)))
+    _tool(plugin, {}, " ".join(f"n{i}" for i in range(8, 20)))
+    final = plugin.otel_calls[-1][2]
+    assert len([t for t in final if t.startswith("n:")]) == 10
+
+
+def test_scan_limit(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", PARK)
+    far = "x" * 250_000 + " P-0A9C15CE " + "x" * 50_000
+    near = "x" * 1_000 + " P-0A9C15CE " + "x" * 290_000
+    assert len(far) > 300_000
+    assert plugin._pattern_tags([far]) == []
+    assert plugin._pattern_tags([near]) == ["park:P-0A9C15CE"]
+    assert plugin._pattern_tags([{"k": far}]) == []  # structured values are cut the same way
+    assert plugin._pattern_tags([{"k": near}]) == ["park:P-0A9C15CE"]
+
+
+def test_metadata_capture_adds_no_tags(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", PARK)
+    monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "metadata")
+    _open(plugin, "P-420E1D2C")
+    assert _tag_values(plugin) == []
+    _tool(plugin, {"park_id": "P-0A9C15CE"}, "P-0A9C15CE")
+    assert plugin.otel_calls == []
+
+
+def test_two_chats_do_not_share_tags(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", PARK)
+    _open(plugin, "chat A", task="kA", turn="tA", session="sA")
+    _open(plugin, "chat B", task="kB", turn="tB", session="sB")
+    root_a, root_b = plugin.root_spans
+    before_b = list(plugin._TRACE_STATE[plugin._trace_key("kB", "sB", turn_id="tB")].propagated["tags"])
+    _tool(plugin, {}, "PARKED P-0A9C15CE: x", task="kA", turn="tA", session="sA")
+    assert [o for o, _, _ in plugin.otel_calls] == [root_a]
+    state_b = plugin._TRACE_STATE[plugin._trace_key("kB", "sB", turn_id="tB")]
+    assert state_b.propagated["tags"] == before_b
+    _open(plugin, "chat B", task="kB", turn="tB", session="sB", call=2)
+    assert all("park:P-0A9C15CE" not in c["tags"] for c in plugin.propagate_calls[1:] if c["session_id"] == "sB")
+
+
+def test_root_without_otel_span_is_fine(plugin, monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_TAG_PATTERNS", PARK)
+    _open(plugin)
+    del plugin.root_spans[0]._otel_span
+    _tool(plugin, {}, "PARKED P-0A9C15CE: x")
+    state = plugin._TRACE_STATE[plugin._trace_key("k", "s", turn_id="t1")]
+    assert "park:P-0A9C15CE" in state.propagated["tags"]
+
+
+def test_no_patterns_changes_nothing(plugin, monkeypatch):
+    monkeypatch.delenv("HERMES_LANGFUSE_TAG_PATTERNS", raising=False)
+    _open(plugin, "P-420E1D2C")
+    _tool(plugin, {}, "P-0A9C15CE")
+    assert plugin.propagate_calls[0]["tags"] == plugin._trace_tags("telegram")
+    assert plugin.otel_calls == []

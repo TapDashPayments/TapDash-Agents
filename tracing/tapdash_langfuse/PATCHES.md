@@ -35,6 +35,30 @@ Keep this list complete: every difference from upstream goes here, in the commit
    - No upstream test asserted the old name `Hermes turn`, so no upstream test assertion changed.
    - New tests: `tests/test_tapdash_patches.py`.
 
+5. `__init__.py`: `HERMES_LANGFUSE_TAG_PATTERNS` tags traces by pattern (spec D4-D6). Not in upstream.
+   - Setting: `label=regex;label=regex`. A match in the turn's user message, a tool call's arguments or a tool's
+     result adds the trace tag `label:value`; value = group 1 if the regex has a group, else the whole match.
+     Label `[a-z0-9_-]{1,40}`. A regex cannot contain `;`. A bad entry (no `=`, bad label, regex that does not
+     compile) logs one `logger.warning` per distinct raw setting value and is ignored; parsing is cached on the
+     raw string.
+   - Limits: at most 10 pattern tags per trace (`_MAX_PATTERN_TAGS`); a tag over 200 chars or not US-ASCII is
+     skipped; only the first 200 000 chars of each scanned text (`_MAX_SCAN_CHARS`); non-string values are scanned
+     as JSON (`json.dumps` semantics with `default=str`, but not ASCII-escaped, and stopped after 200 000 chars).
+   - `HERMES_LANGFUSE_CAPTURE=metadata`: no pattern tags (a tag would carry content).
+   - Where scanning happens: `_start_root_trace` scans the last user message (the raw content, not the captured
+     copy that `HERMES_LANGFUSE_MAX_CHARS` shortens) and puts the tags into the propagated tags before the root
+     opens; `on_post_tool_call` scans `[args, result]` outside `_STATE_LOCK`, then adds the tags under it, if the
+     trace is still the live one for its key. `on_pre_tool_call` does no scanning.
+   - A late tag joins `state.propagated["tags"]` (children opened later carry it) and is also written to the root
+     span with `root_span._otel_span.set_attribute("langfuse.trace.tags", ...)`, because Langfuse keeps tags per
+     observation and a trace counts only tags its root carries (spec D5). That uses a private SDK attribute: it is
+     wrapped in `_failsafe`, so a future SDK without it only loses late tags.
+   - New: helpers `_tag_patterns`, `_parse_tag_patterns`, `_scan_text`, `_pattern_tags`, `_add_trace_tags`, the
+     `TraceState.pattern_tags` field, and tests in `tests/test_tapdash_patches.py`.
+   - Value on proto-agents: `HERMES_LANGFUSE_TAG_PATTERNS=park=\bP-[0-9A-F]{8}\b` (durable-park park ids).
+6. `README.md`: the stale "Hermes turn" text now names the per-platform trace names; the tuning section documents
+   `HERMES_LANGFUSE_TAG_PATTERNS`, marked as a TapDash patch.
+
 `on_pre_tool_call` is unchanged from upstream.
 
 ## Running the tests
@@ -44,7 +68,7 @@ bash tracing/run_tests.sh            # as the hermes user on the test VM
 bash tracing/run_tests.sh -k attribution
 ```
 
-Expected today: `147 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
+Expected today: `160 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
 through Hermes's dependency installer, which drops the test path, so they cannot run from a checkout.
 
 ## Update procedure (taking a newer upstream)

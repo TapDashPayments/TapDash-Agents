@@ -48,7 +48,7 @@ Restart Hermes and the next turn ships a trace. Plugins are installed per profil
 
 ```bash
 hermes plugins list                 # langfuse should show "enabled"
-hermes chat -q "hello"              # then check Langfuse for a "Hermes turn" trace
+hermes chat -q "hello"              # then check Langfuse for a "hermes-turn" trace (TapDash: "<platform>-turn")
 ```
 
 Generation observations include the Hermes system prompt when the provider uses a separate `system`
@@ -64,7 +64,7 @@ runs and profiles sharing one project can be filtered apart. Kanban worker turns
 
 | Hook | Behaviour |
 |---|---|
-| `pre_api_request` / `pre_llm_call` | Open (or reuse) a per-turn root span "Hermes turn". Start a `generation` child observation for this API call with serialized recent messages as input. |
+| `pre_api_request` / `pre_llm_call` | Open (or reuse) a per-turn root span named `<platform>-turn` (`telegram-turn`, `cron-run` for cron, `hermes-turn` when the platform is unknown; TapDash patch). Start a `generation` child observation for this API call with serialized recent messages as input. |
 | `post_api_request` / `post_llm_call` | Close the generation, attach `usage_details`, `cost_details`, `finish_reason`, assistant output + tool calls. If no tool calls and non-empty content, close the turn. |
 | `api_request_error` | Close the failed generation with `level=ERROR`, status code, retry counters and a capture-mode-scrubbed error message. Non-retryable failures also finish the turn. |
 | `pre_tool_call` | Start a `tool` child observation with sanitized `args`. |
@@ -95,6 +95,7 @@ HERMES_LANGFUSE_MAX_DEPTH=4          # max payload depth (default: 4)
 HERMES_LANGFUSE_CAPTURE=sanitized    # content capture mode (see below)
 HERMES_LANGFUSE_DEBUG=true           # verbose plugin logging to agent.log
 OTEL_SERVICE_NAME=my-agent           # OTel service.name on traces (default: hermes-agent)
+HERMES_LANGFUSE_TAG_PATTERNS='park=\bP-[0-9A-F]{8}\b'   # TapDash patch: tag traces by pattern (see below)
 ```
 
 The standard SDK names (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`) are
@@ -108,6 +109,21 @@ to `4`; invalid or negative values log a warning and fall back to `4`. `0` keeps
 Increasing the depth exports more content and may produce larger traces; secret redaction,
 string-length limits and the 50-item collection limit remain unchanged. `metadata` mode still omits
 content.
+
+### Tag traces by pattern (TapDash patch)
+
+`HERMES_LANGFUSE_TAG_PATTERNS` is not in upstream. Its format is `label=regex;label=regex`. Whenever a regex
+matches the turn's user message, a tool call's arguments or a tool's result, the trace gets the tag
+`label:value`. The value is capture group 1 if the regex has a group, else the whole match. For example
+`inv=invoice (\d+)` on "pay invoice 1016" adds `inv:1016`.
+
+- A label is 1-40 characters of `a-z 0-9 _ -`. A regex cannot contain `;`.
+- An entry with no `=`, a bad label or a regex that does not compile logs one warning and is ignored; the
+  other entries still work.
+- At most 10 pattern tags per trace. A tag over 200 characters or not US-ASCII is skipped.
+- Only the first 200 000 characters of each scanned text are scanned.
+- With `HERMES_LANGFUSE_CAPTURE=metadata` no pattern tags are added (a tag would carry content).
+- A tag found in a tool result is added to the trace while the turn is still running.
 
 ## Capture modes
 

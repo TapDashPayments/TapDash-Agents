@@ -20,7 +20,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,8 @@ class TraceState:
     last_updated_at: float = field(default_factory=time.time)
     # propagate_attributes() kwargs the root was opened with, re-applied to every child.
     propagated: dict[str, Any] = field(default_factory=dict)
+    # TapDash: tags found by HERMES_LANGFUSE_TAG_PATTERNS (a subset of propagated["tags"]), capped per trace.
+    pattern_tags: list[str] = field(default_factory=list)
 
 
 _STATE_LOCK = threading.Lock()
@@ -683,6 +685,101 @@ def _pop_sender(turn_key: str) -> tuple[str, str]:
         return _TURN_SENDERS.pop(turn_key, ("", "")) if turn_key else ("", "")
 
 
+# TapDash: HERMES_LANGFUSE_TAG_PATTERNS="label=regex;label=regex". Every match in the turn's user message, a tool
+# call's arguments or a tool's result adds the trace tag "label:value" (value = group 1 if the regex has a group,
+# else the whole match). Nothing here knows what the patterns mean.
+_MAX_PATTERN_TAGS = 10
+_MAX_SCAN_CHARS = 200_000
+_MAX_TAG_CHARS = 200
+_LABEL_RE = re.compile(r"[a-z0-9_-]{1,40}")
+
+
+@functools.lru_cache(maxsize=16)
+def _parse_tag_patterns(raw: str) -> tuple:
+    """Parse the raw setting. Cached on the raw string, so each bad entry warns once per distinct value."""
+    parsed = []
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        label, sep, regex = entry.partition("=")
+        label = label.strip()
+        if not sep or not regex:
+            logger.warning("Langfuse plugin: ignoring HERMES_LANGFUSE_TAG_PATTERNS entry %r (expected label=regex)", entry)
+            continue
+        if not _LABEL_RE.fullmatch(label):
+            logger.warning("Langfuse plugin: ignoring HERMES_LANGFUSE_TAG_PATTERNS entry %r "
+                           "(label must be 1-40 characters of a-z 0-9 _ -)", entry)
+            continue
+        try:
+            parsed.append((label, re.compile(regex)))
+        except re.error as exc:
+            logger.warning("Langfuse plugin: ignoring HERMES_LANGFUSE_TAG_PATTERNS entry %r (bad regex: %s)", entry, exc)
+    return tuple(parsed)
+
+
+def _tag_patterns() -> list[tuple[str, "re.Pattern[str]"]]:
+    return list(_parse_tag_patterns(_env("HERMES_LANGFUSE_TAG_PATTERNS")))
+
+
+def _scan_text(value: Any) -> str:
+    """The first _MAX_SCAN_CHARS characters of a value: strings as-is, anything else as JSON (stopped early, so a
+    huge structure is not fully serialized)."""
+    if isinstance(value, str):
+        return value[:_MAX_SCAN_CHARS]
+    if value is None:
+        return ""
+    try:
+        parts, size = [], 0
+        for chunk in json.JSONEncoder(default=str, ensure_ascii=False).iterencode(value):
+            parts.append(chunk)
+            size += len(chunk)
+            if size >= _MAX_SCAN_CHARS:
+                break
+        return "".join(parts)[:_MAX_SCAN_CHARS]
+    except Exception:
+        return str(value)[:_MAX_SCAN_CHARS]
+
+
+def _pattern_tags(values: Iterable[Any]) -> list[str]:
+    """TapDash: tags (``label:value``) the configured patterns find in ``values``; [] in ``metadata`` capture mode
+    (a tag would carry content). Unique, in order of appearance, at most _MAX_PATTERN_TAGS; a tag over 200 chars or
+    not US-ASCII is skipped."""
+    patterns = _tag_patterns()
+    if not patterns or _capture_mode() == "metadata":
+        return []
+    found: list[str] = []
+    for value in values:
+        text = _scan_text(value)
+        if not text:
+            continue
+        for label, pattern in patterns:
+            for match in pattern.finditer(text):
+                matched = match.group(1) if pattern.groups else match.group(0)
+                matched = (matched or "").strip()
+                tag = f"{label}:{matched}"
+                if matched and len(tag) <= _MAX_TAG_CHARS and tag.isascii() and tag not in found:
+                    found.append(tag)
+                    if len(found) >= _MAX_PATTERN_TAGS:
+                        return found
+    return found
+
+
+def _add_trace_tags(state: TraceState, tags: list[str]) -> None:
+    """TapDash: add pattern tags to a live trace. Caller holds ``_STATE_LOCK`` (do not take it here). Tags join the
+    propagated set (children opened later carry them) and are written to the root's OTel span, because Langfuse
+    keeps tags per observation and a trace only counts a tag its root carries (spec D5)."""
+    with _failsafe("add trace tags"):
+        room = _MAX_PATTERN_TAGS - len(state.pattern_tags)
+        new = [t for t in dict.fromkeys(tags) if t not in state.pattern_tags][:max(room, 0)]
+        if not new:
+            return
+        state.pattern_tags.extend(new)
+        merged = [*state.propagated.get("tags", []), *new]
+        state.propagated["tags"] = merged  # a new list: propagate calls already made keep theirs
+        state.root_span._otel_span.set_attribute("langfuse.trace.tags", list(merged))
+
+
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "") -> TraceState:
@@ -723,7 +820,11 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                                         input=trace_input, metadata=metadata)
 
     root_span = None
-    propagated = {"session_id": session_id or task_key, "trace_name": trace_name, "tags": _trace_tags(platform)}
+    pattern_tags: list[str] = []
+    with _failsafe("pattern tags"):
+        pattern_tags = _pattern_tags([last_user.get("content")] if last_user is not None else [])
+    propagated = {"session_id": session_id or task_key, "trace_name": trace_name,
+                  "tags": [*_trace_tags(platform), *pattern_tags]}
     if user_id:
         propagated["user_id"] = user_id
     if profile or kanban:
@@ -743,7 +844,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         root_span.set_trace_io(input=trace_input)
 
     _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated)
+    return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated, pattern_tags=list(pattern_tags))
 
 
 def _start_child_observation(state: TraceState, *, name: str, as_type: str, input_value: Any,
@@ -1078,6 +1179,15 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
             observation = queue.pop(0)
             if not queue:
                 state.pending_tools_by_name.pop(tool_name, None)
+
+    # TapDash: tag the trace from the call's arguments and result. Scan outside the lock (a result can be large),
+    # then add under it, and only if this trace is still the live one for the key.
+    with _failsafe("pattern tags"):
+        found = _pattern_tags([args, result])
+        if found:
+            with _STATE_LOCK:
+                if _TRACE_STATE.get(task_key) is state:
+                    _add_trace_tags(state, found)
     if observation is None:
         return
 
