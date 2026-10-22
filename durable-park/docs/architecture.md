@@ -124,7 +124,7 @@ flowchart LR
   gw -->|"checks"| pipe
   pipe -->|"webhook block, signed"| funnelB
   funnelB --> bridge
-  bridge -->|"lists requests (read-only org key):<br/>one consumed approved park, not used before"| aap
+  bridge -->|"lists requests (read-only org key):<br/>one consumed approved park, not used before,<br/>and the gateway request itself"| aap
   bridge -->|"approve or human"| pipe
   gw -->|"forwards over the tunnel<br/>(tunnel dials out)"| tunnel
   tunnel -->|"QuickBooks API"| qbo
@@ -323,7 +323,7 @@ Notes:
   the replay is not parked again.
 - Step 18: the bridge matches on the Hermes tool name (built the way Hermes builds it, `bridge.verify.hermes_tool_name`)
   and a digest of the arguments (`ledger.normalize_args`: ignores `withhuman_context`, defaults `withhuman_scope`,
-  treats `2.0` as `2`). Anything that does not match goes to a person - never auto-approved. The bridge keeps no
+  treats `2.0` as `2`; names must be plain, see [the decision rule](#the-bridges-decision-rule)). Anything that does not match goes to a person - never auto-approved. The bridge keeps no
   record of its answers. A retried delivery of the **same** gateway request gets the same answer, because the
   request never counts against itself.
 
@@ -333,20 +333,42 @@ The bridge (`bridge/app.py` for the webhook, `bridge/verify.py` for the rule, `b
 call) holds no state and never opens the ledger. For each signed delivery of the gateway request G it asks withHuman
 (`GET /api/v1/requests`, agent `proto-agents`, newest first, with the organization key `/etc/durable-park/audit_key`)
 twice, within a total budget of 3.5 s (withHuman's webhook block gives up at 5 s): once for park requests of the
-Hermes tool name, once for gateway requests of the tool. Then:
+Hermes tool name (`q` = that name, 50 items), once for **every** recent request of the agent (no `q`, 200 items:
+Hermes folds `-` into `_`, so a filter on the tool name could miss a second use under the other spelling). Then:
 
-1. A park request P **matches** only if all hold: same agent, tool = the Hermes tool name, server = `park:<slug>`,
+1. **Plain names only** (`unsafe-name`, before anything else): the gateway server must be ASCII words joined by
+   single `-` or `_` (so no `__`, no leading or trailing separator), the tool must use only letters, digits, `_`
+   and `-`, and the unhashed Hermes name `mcp__wh__<server>__<tool>` must be at most 64 characters (so Hermes never
+   adds a hash suffix). Hermes' name sanitisation then only folds `-` into `_`, and the bridge can name the park
+   exactly.
+2. A park request P **matches** only if all hold: same agent, tool = the Hermes tool name, server = `park:<slug>`,
    status and decision `approved`, `consumed_at` present and within the last **120 s** (5 s of clock skew allowed),
    consumed before the approval expired, no truncated arguments, and the digest of P's arguments equals G's.
-2. No match: ask a person (`no-approved-park`). Two matches: ask a person (`ambiguous-park`).
-3. **Single use:** any other gateway request (not G) for the same agent, server, tool and arguments that was created
-   at or after P was consumed - in any state, pending, denied or expired too - means the approval is used: ask a
-   person (`already-used`).
-4. Otherwise approve, naming P's id.
+3. No match: ask a person (`no-approved-park`). Two matches: ask a person (`ambiguous-park`).
+4. On the single match P: arguments the approver could not read go to a person (`redacted-args`: P's arguments hold
+   the `[redacted]` placeholder anywhere, or G's arguments would be redacted or cut short by the park hook's own
+   redaction); a park whose consumption already has an `outcome` was used and goes to a person
+   (`already-reported`).
+5. **G itself must be in the listing**, created no earlier than 5 s before P was consumed, with the same agent,
+   server, tool and argument digest (`gateway-request-not-listed`, `gateway-request-before-release`,
+   `gateway-request-mismatch`).
+6. **A cut-off listing is not trusted:** a full page (200 items) whose oldest item was created at or after P was
+   consumed (an item with no usable time counts as not old enough) may hide later requests: ask a person
+   (`neighbours-truncated`).
+7. **Single use, collision-aware:** any other request (not G) of the same agent, not itself a park request, that
+   Hermes would map to the **same** park (the same Hermes tool name, so `create-bill` and `create_bill` count as
+   one), with the same arguments (or arguments that are not an object), created at or after P was consumed - in any
+   state, pending, denied or expired too - means the approval is used: ask a person (`already-used`).
+8. Otherwise approve, naming P's id.
 
 Anything unexpected - withHuman slow or down, a missing or too-weak key, a bad answer - asks a person. That is a
 second ask for the same action (safe, only noisy). The bridge never raises to withHuman and never auto-approves on
 error. Spec: [bridge verifies approvals in withHuman](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md).
+
+**Limit, check when adding a gateway server:** if a server ever offers two tools that differ only by `-` versus `_`
+(for example `create-bill` and `create_bill`), the bridge cannot tell them apart: they share one park tool name, so
+an approval for one is also an approval for the other, and a use of either uses it. Check the server's tool
+catalogue first (`list_gateway_server_tools`). Today quickbooks has `create-bill` but no `create_bill`.
 
 ## 3. Ledger states
 

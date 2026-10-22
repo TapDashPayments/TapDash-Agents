@@ -394,7 +394,14 @@ Argument values and the key are never logged.
 |---|---|---|
 | `no-approved-park` | No park request matched: wrong tool name or arguments, not approved, not consumed yet, or consumed more than 120 s before the gateway call | See the two causes below; if the call was simply slow, ask again |
 | `ambiguous-park` | Two park requests matched the same call | Look in withHuman for a duplicate park of the same call; nothing runs twice, a person decides |
-| `already-used` | Another gateway request for the same call was created after the approval was consumed (a retry, or a replay) | Expected for a replay; for a first run, find the earlier gateway request |
+| `unsafe-name` | The gateway server or tool name is not plain: `__`, a leading or trailing `-`/`_`, a character outside letters, digits, `-`, `_`, or a Hermes name over 64 characters (Hermes would hash it) | Rename the tool at the source, or add the case to the bridge with a test; until then a person approves each call (a second ask) |
+| `redacted-args` | The approver saw `[redacted]` in the park's arguments, or the call carries a secret-looking key (`password`, `token`, `secret`, `authorization`, `api_key`) or arguments too large to show whole | Expected for such calls: look at the real values and decide |
+| `already-reported` | The park's consumption already has an outcome: it ran (or failed) before this gateway call arrived | Expected for a replay; for a first run, look at the park request's history in withHuman |
+| `gateway-request-not-listed` | withHuman's list of the agent's requests did not hold the gateway request the webhook was about (not yet visible, or id mismatch) | Ask again; if it repeats, check the key's `request.read.unrouted` permission and withHuman's status |
+| `gateway-request-before-release` | The gateway request was created more than 5 s before the park was consumed: it is not the call the approval released | Expected for an old call someone re-ran; a person decides |
+| `gateway-request-mismatch` | The listed gateway request differs from the webhook's call (agent, server, tool or arguments) | Should not happen; compare the request in withHuman with the call and tell the developer |
+| `neighbours-truncated` | The 200 newest requests of the agent all came after the park was consumed, so a second use could be hidden | Expected only under heavy traffic; a person decides. Nothing is lost |
+| `already-used` | Another gateway request for the same call (or for the same tool with `-` and `_` swapped) was created after the approval was consumed (a retry, or a replay) | Expected for a replay; for a first run, find the earlier gateway request |
 | `no-request-id` | The delivery carried no gateway request id (only real deliveries have one; a preview or test does not) | Nothing for a test; for a real call, tell the developer |
 | `no-key` | `/etc/durable-park/audit_key` is missing, empty or unreadable | [Store the key](#the-gateway-bridge) |
 | `http-403` | The key lacks `request.read` or `request.read.unrouted` | Mint a key with the three permissions |
@@ -404,6 +411,10 @@ Argument values and the key are never logged.
 
 - **Name differs** (e.g. `create-bill` vs `create_bill`): the bridge must build names the way Hermes does
   (`bridge/verify.py: hermes_tool_name`). Was the bridge's `/opt` copy updated?
+- **Two tools that differ only by `-` versus `_`** (e.g. `create-bill` and `create_bill` on one gateway server): the
+  bridge cannot tell them apart, because Hermes gives both the same name, so one park approves either and a use of
+  either uses it. Check the server's tool catalogue (`list_gateway_server_tools`) whenever you add a gateway server
+  or it gains tools. Today quickbooks has `create-bill` but no `create_bill`.
 - **Digest differs**: the gateway rewrote the arguments (seen so far: added `withhuman_scope`, `2.0` sent as `2`).
   Extend `ledger.normalize_args` for the new rewrite, add a test, deploy to the plugin and the bridge copy.
 

@@ -66,7 +66,7 @@ def iso(offset: float) -> str:
 
 
 def park_item(*, id="park_req_1", args=None, consumed=-10, tool=PARK_TOOL, server=PARK_SERVER,
-              slug="proto-agents"):
+              slug="proto-agents", outcome=None):
     """The park request withHuman holds after the model asked, a person approved and the executor consumed it."""
     return {
         "id": id, "agent_slug": slug, "tool": tool, "server": server,
@@ -74,7 +74,7 @@ def park_item(*, id="park_req_1", args=None, consumed=-10, tool=PARK_TOOL, serve
         "status": "approved",
         "decision": {"status": "approved", "decided_at": iso(consumed - 60), "expires_at": iso(86400),
                      "note": None},
-        "consumption": {"consumed_at": iso(consumed), "outcome": None},
+        "consumption": {"consumed_at": iso(consumed), "outcome": outcome},
         "created_at": iso(consumed - 120), "deadline_at": iso(86400),
     }
 
@@ -115,10 +115,12 @@ def client(lister):
                                  clock=lambda: NOW))
 
 
-def arm(lister, *, tool=TOOL, park=None, neighbours=None, park_q=PARK_TOOL):
-    """Make withHuman hold one consumed park for the call, and the gateway request itself (req_1)."""
+def arm(lister, *, park=None, neighbours=None, park_q=PARK_TOOL):
+    """Make withHuman hold one consumed park for the call, and the gateway request itself (req_1).
+
+    The neighbour listing is asked for with ``q=None`` (every request of the agent, newest first)."""
     lister.by_q[park_q] = [park_item() if park is None else park]
-    lister.by_q[tool] = [gateway_item(id="req_1", created=-5)] if neighbours is None else neighbours
+    lister.by_q[None] = [gateway_item(id="req_1", created=-5)] if neighbours is None else neighbours
 
 
 def deliver(client, body_obj=None, *, key="idem-1", headers=None, raw=None, signature=True, t=NOW,
@@ -161,11 +163,11 @@ def test_bridge_approves_when_an_approved_consumed_park_matches(client, lister):
     assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
 
 
-def test_bridge_asks_withhuman_for_parks_then_for_gateway_requests(client, lister):
+def test_bridge_asks_withhuman_for_parks_by_tool_name_then_for_all_recent_requests_of_the_agent(client, lister):
     arm(lister)
     deliver(client)
     assert [(c["agent_slug"], c["q"], c["limit"]) for c in lister.calls] == [
-        ("proto-agents", PARK_TOOL, 50), ("proto-agents", TOOL, 50)]
+        ("proto-agents", PARK_TOOL, 50), ("proto-agents", None, 200)]
 
 
 def test_bridge_unmatched_goes_to_human(client, lister):
@@ -355,7 +357,7 @@ def test_load_secret(tmp_path, caplog):
 def test_one_log_line_per_delivery_without_values(client, lister, caplog):
     caplog.set_level(logging.INFO, logger="durable_park.bridge")
     args = {"Amount": 5, "Memo": PRIVATE_VALUE, "withhuman_scope": "default"}
-    arm(lister, park=park_item(args=args))
+    arm(lister, park=park_item(args=args), neighbours=[gateway_item(id="req_1", created=-5, args=args)])
     deliver(client, payload(arguments=args, delivery_id="del-77"))
     lines = bridge_lines(caplog)
     assert len(lines) == 1
@@ -392,27 +394,23 @@ def test_endpoint_test_delivery_without_request_logs_why_type(client, caplog):
 # ---- the tool name is built the way Hermes registers it ---------------------------------------
 # withHuman sends the downstream server's own tool name (e.g. "create-bill"); Hermes registers it as
 # mcp__<server>__<tool> with every char outside [A-Za-z0-9_] turned into "_" and names over 64 chars
-# clamped with an 8-hex sha256 suffix (hermes-agent tools/mcp_tool_schema.py, v0.22.2).
-
-def hermes_clamped(natural: str) -> str:
-    return natural[:64 - 9] + "_" + hashlib.sha256(natural.encode()).hexdigest()[:8]
-
+# clamped with an 8-hex sha256 suffix (hermes-agent tools/mcp_tool_schema.py, v0.22.2). The bridge only
+# approves names where that mapping is plain: ASCII words, single "-" or "_" separators, at most 64 chars.
 
 @pytest.mark.parametrize("wire_server, wire_tool, hermes_tool", [
     ("quickbooks", "create-bill", "mcp__wh__quickbooks__create_bill"),
     ("quickbooks", "update-bill", "mcp__wh__quickbooks__update_bill"),
     ("quickbooks", "delete-bill", "mcp__wh__quickbooks__delete_bill"),
-    ("quick-books", "create.pay ment-v2", "mcp__wh__quick_books__create_pay_ment_v2"),
-    ("quickbooks", "create-" + "x" * 70, hermes_clamped("mcp__wh__quickbooks__create_" + "x" * 70)),
+    ("quick-books", "create-pay-ment_v2", "mcp__wh__quick_books__create_pay_ment_v2"),
     ("quickbooks", "c-" + "x" * 41, "mcp__wh__quickbooks__c_" + "x" * 41),  # exactly 64 chars: no clamp
 ])
 def test_bridge_asks_for_parks_under_the_hermes_tool_name_and_matches_them(client, lister, wire_server,
                                                                           wire_tool, hermes_tool):
     assert len(hermes_tool) <= 64
     lister.by_q[hermes_tool] = [park_item(tool=hermes_tool, server="park:" + gateway_slug(hermes_tool))]
-    lister.by_q[wire_tool] = [gateway_item(id="req_1", created=-5, server=wire_server, tool=wire_tool)]
+    lister.by_q[None] = [gateway_item(id="req_1", created=-5, server=wire_server, tool=wire_tool)]
     resp = deliver(client, payload(server=wire_server, tool=wire_tool))
-    assert [c["q"] for c in lister.calls] == [hermes_tool, wire_tool]
+    assert [c["q"] for c in lister.calls] == [hermes_tool, None]
     assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
 
 
@@ -424,7 +422,8 @@ def test_bridge_hyphenated_bill_tool_without_park_goes_to_human(client, wire_too
 def test_model_args_park_matches_gateway_delivery_with_default_scope(client, lister):
     params = {"params": {"CustomerRef": {"value": "58"}, "TotalAmt": 12.5}}
     park = park_item(args={**params, "withhuman_context": "paying invoice 42"})  # what the model sent
-    arm(lister, park=park, neighbours=[gateway_item(id="req_1", created=-5)])
+    arm(lister, park=park, neighbours=[gateway_item(id="req_1", created=-5,
+                                                    args={**params, "withhuman_scope": "default"})])
     human(deliver(client, payload(arguments={**params, "withhuman_scope": "other"})))  # another scope: another call
     resp = deliver(client, payload(arguments={**params, "withhuman_scope": "default"}, idempotency_key="k-gw"))
     assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
@@ -439,9 +438,109 @@ def test_bridge_matches_when_gateway_rewrites_2_point_0_as_2(client, lister):
                     "withhuman_scope": "default"}
     bill_tool = "mcp__wh__quickbooks__create_bill"
     lister.by_q[bill_tool] = [park_item(tool=bill_tool, server="park:" + gateway_slug(bill_tool), args=model_args)]
-    lister.by_q["create-bill"] = [gateway_item(id="req_1", created=-5, tool="create-bill", args=gateway_args)]
+    lister.by_q[None] = [gateway_item(id="req_1", created=-5, tool="create-bill", args=gateway_args)]
     resp = deliver(client, payload(tool="create-bill", arguments=gateway_args))
     assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
+
+
+# ---- the hardened rule, end to end ---------------------------------------------------------------
+
+def last_why(caplog):
+    (line,) = bridge_lines(caplog)
+    return line.split("why=")[1].split()[0]
+
+
+@pytest.mark.parametrize("wire_server, wire_tool", [
+    ("quickbooks", "create-" + "x" * 70),  # Hermes would hash this name: the bridge cannot name the park for it
+    ("quick__books", "create-bill"), ("quickbooks", "create.bill"), ("quickbooks", "create bill"),
+    ("_quickbooks", "create-bill"),
+])
+def test_unsafe_names_go_to_human_with_why_unsafe_name(client, lister, caplog, wire_server, wire_tool):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    hermes_tool = bridge_app.hermes_tool_name(wire_server, wire_tool)
+    lister.by_q[hermes_tool] = [park_item(tool=hermes_tool, server="park:" + gateway_slug(hermes_tool))]
+    lister.by_q[None] = [gateway_item(id="req_1", created=-5, server=wire_server, tool=wire_tool)]
+    human(deliver(client, payload(server=wire_server, tool=wire_tool)))
+    assert last_why(caplog) == "unsafe-name"
+
+
+def test_a_gateway_request_missing_from_the_listing_goes_to_human(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister, neighbours=[gateway_item(id="req_0", created=-8)])
+    human(deliver(client))
+    assert last_why(caplog) == "gateway-request-not-listed"
+
+
+def test_a_gateway_request_created_long_before_the_release_goes_to_human(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister, neighbours=[gateway_item(id="req_1", created=-3600)])
+    human(deliver(client))
+    assert last_why(caplog) == "gateway-request-before-release"
+
+
+def test_a_listed_gateway_request_with_other_arguments_goes_to_human(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister, neighbours=[gateway_item(id="req_1", created=-5, args=dict(ARGS, Amount=6))])
+    human(deliver(client))
+    assert last_why(caplog) == "gateway-request-mismatch"
+
+
+def recent_others(count):
+    """``count`` gateway requests for another tool, all created after the park was consumed."""
+    return [gateway_item(id=f"other_{i}", created=-4, tool="create-bill") for i in range(count)]
+
+
+def test_a_full_neighbour_page_that_does_not_reach_back_to_the_consumption_goes_to_human(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister, neighbours=[gateway_item(id="req_1", created=-5)] + recent_others(199))
+    human(deliver(client))
+    assert last_why(caplog) == "neighbours-truncated"
+
+
+def test_a_full_neighbour_page_that_reaches_back_before_the_consumption_still_approves(client, lister):
+    old = gateway_item(id="old_0", created=-3600, tool="create-bill")
+    arm(lister, neighbours=[gateway_item(id="req_1", created=-5)] + recent_others(198) + [old])
+    assert len(lister.by_q[None]) == 200
+    approves(client)
+
+
+def test_a_page_one_short_of_the_limit_is_not_treated_as_cut_off(client, lister):
+    arm(lister, neighbours=[gateway_item(id="req_1", created=-5)] + recent_others(198))
+    assert len(lister.by_q[None]) == 199
+    approves(client)
+
+
+def test_a_later_request_for_the_other_spelling_of_the_tool_name_counts_as_a_second_use(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    # the park is for mcp__wh__quickbooks__create_payment: it covers create-payment and create_payment alike
+    arm(lister, neighbours=[gateway_item(id="req_1", created=-5, tool="create-payment"),
+                            gateway_item(id="req_2", created=-3, tool="create_payment")])
+    human(deliver(client, payload(tool="create-payment")))
+    assert last_why(caplog) == "already-used"
+
+
+def test_arguments_the_approver_saw_redacted_go_to_human(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    args = {"Amount": 5, "Memo": "[redacted]", "withhuman_scope": "default"}
+    arm(lister, park=park_item(args=args), neighbours=[gateway_item(id="req_1", created=-5, args=args)])
+    human(deliver(client, payload(arguments=args)))
+    assert last_why(caplog) == "redacted-args"
+
+
+def test_a_secret_looking_argument_goes_to_human_even_when_everything_else_matches(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    args = {"Amount": 5, "api_key": PRIVATE_VALUE, "withhuman_scope": "default"}
+    arm(lister, park=park_item(args=args), neighbours=[gateway_item(id="req_1", created=-5, args=args)])
+    human(deliver(client, payload(arguments=args)))
+    assert last_why(caplog) == "redacted-args"
+    assert PRIVATE_VALUE not in caplog.text
+
+
+def test_a_park_whose_outcome_was_already_reported_goes_to_human(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister, park=park_item(outcome="success"))
+    human(deliver(client))
+    assert last_why(caplog) == "already-reported"
 
 
 # ---- request.id -------------------------------------------------------------------------------
@@ -505,7 +604,7 @@ def test_list_error_on_the_first_call_goes_to_human_and_logs_its_code(client, li
 def test_list_error_on_the_second_call_goes_to_human_and_logs_its_code(client, lister, caplog, code):
     caplog.set_level(logging.INFO, logger="durable_park.bridge")
     arm(lister)
-    lister.raises[TOOL] = ListError(code)
+    lister.raises[None] = ListError(code)
     human(deliver(client))
     assert len(lister.calls) == 2
     (line,) = bridge_lines(caplog)
@@ -549,7 +648,7 @@ def test_human_line_names_no_approved_park(client, caplog):
 
 def test_responses_never_contain_argument_values(client, lister):
     args = {"Amount": 5, "Memo": PRIVATE_VALUE, "withhuman_scope": "default"}
-    arm(lister, park=park_item(args=args))
+    arm(lister, park=park_item(args=args), neighbours=[gateway_item(id="req_1", created=-5, args=args)])
     approved = deliver(client, payload(arguments=args))
     refused = deliver(client, payload(arguments=dict(args, Memo=PRIVATE_VALUE + "-x"), idempotency_key="k2"))
     assert approved.json()["outcome"] == "approve" and refused.json()["outcome"] == "human"
@@ -559,7 +658,7 @@ def test_responses_never_contain_argument_values(client, lister):
 def test_logs_never_contain_argument_values_or_keys_even_when_withhuman_fails(client, lister, caplog):
     caplog.set_level(logging.DEBUG)
     args = {"Amount": 5, "Memo": PRIVATE_VALUE, "withhuman_scope": "default"}
-    arm(lister, park=park_item(args=args))
+    arm(lister, park=park_item(args=args), neighbours=[gateway_item(id="req_1", created=-5, args=args)])
     deliver(client, payload(arguments=args))
     lister.raises[PARK_TOOL] = Exception(f"{PRIVATE_VALUE} {FAKE_KEY}")
     deliver(client, payload(arguments=args, idempotency_key="k2"))
