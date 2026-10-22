@@ -57,7 +57,7 @@ DEFAULT_PORT = 8791
 ROUTE = "/wh/bridge"
 NO_PARK_REASON = "No approved park for this exact call"
 PARK_LIST_LIMIT = 50
-NEIGHBOUR_LIST_LIMIT = 200  # withHuman's maximum page; ``decide`` refuses a full page that cuts off the recent past
+NEIGHBOUR_LIST_LIMIT = 200  # withHuman's maximum page; ``decide`` does not trust it: it wants an old item in the list
 LIST_BUDGET_SECONDS = 3.5  # both withHuman calls together; withHuman's webhook block gives up at 5 s
 
 _SIGNATURE_HEX = re.compile(r"[0-9a-fA-F]{64}")
@@ -175,7 +175,7 @@ class Bridge:
         except ListError as exc:  # withHuman slow, unreachable or unhappy: a person decides
             return "human", None, exc.code
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
-        verdict = decide(call, parks, neighbours, now, neighbours_limit=NEIGHBOUR_LIST_LIMIT)
+        verdict = decide(call, parks, neighbours, now)
         if verdict.approve:
             return "approve", verdict.park_request_id, verdict.why
         return "human", None, verdict.why

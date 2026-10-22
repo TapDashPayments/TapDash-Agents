@@ -34,11 +34,14 @@ Documented facts this relies on (withHuman docs / source, read 2026-10-22):
 Given the verified gateway call G = (request_id, server, tool, arguments, agent_slug). Every refusal is a
 human verdict; the `why` code is what the bridge's log says.
 
-0. **Unsafe names** (`unsafe-name`, checked before anything else). G.server must fullmatch
-   `[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*` (no `__`, no leading or trailing `-`/`_`), G.tool must fullmatch
-   `[A-Za-z0-9_-]+`, both must be strings, and the unhashed Hermes name `mcp__wh__<server>__<tool>` (after
-   `-` becomes `_`) must be at most 64 characters, so Hermes never adds a hash suffix. Then Hermes' name
-   sanitisation only folds `-` into `_`, and the bridge can build the park's tool name exactly.
+0. **Unsafe names** (`unsafe-name`, checked before anything else). G.server and G.tool must each fullmatch
+   `[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*` (the shape of the server's own tool names: no `__`, no leading or trailing
+   `-`/`_`), both must be strings, and the unhashed Hermes name `mcp__wh__<server>__<tool>` (after `-` becomes
+   `_`) must be at most 64 characters, so Hermes never adds a hash suffix. Then Hermes' name sanitisation only
+   folds `-` into `_`, and the bridge can build the park's tool name exactly. A `__` in the tool is refused because
+   the gateway pipeline's money regex allows an optional `quickbooks__` prefix that the park regex lacks, so
+   `quickbooks__create-bill` could otherwise pair with an auto-approved park for `create-bill`. All 142 real
+   quickbooks tools fit the rule (checked 2026-10-22).
 1. `park_tool = hermes_tool_name(G.server, G.tool)`; `park_server = "park:" + gateway_slug(park_tool)`;
    `digest = args_digest(G.arguments)` (ledger.args_digest: normalized, canonical JSON).
 2. A park candidate P (from listing `q=park_tool`) MATCHES only if ALL hold:
@@ -55,22 +58,36 @@ human verdict; the `why` code is what the bridge's log says.
      to be shown whole). The approver could not read those values, so a person must see the call again.
    * **Outcome** (`already-reported`): `P.consumption.outcome` must be absent or null. The executor reports an
      outcome after the call ran; a park that has one was used.
-5. **The gateway request itself must be listed.** The neighbour listing is every recent request of the agent
-   (`q` omitted, `limit=200`, newest first). Find the item with `id == G.request_id`:
-   not listed -> human (`gateway-request-not-listed`); its `created_at` must parse and be
-   `>= P.consumed_at - SKEW_SECONDS`, else `gateway-request-before-release`; its `agent_slug`, `server` and `tool`
-   must equal G's and `args_digest(its arguments) == digest` (arguments must be a dict), else
-   `gateway-request-mismatch`.
-6. **Truncated listing** (`neighbours-truncated`): when the listing has at least `neighbours_limit` items and its
-   oldest `created_at` (any item with a missing or unparseable one counts as not old enough) is
-   `>= P.consumed_at`, requests after the consumption may have been cut off: human.
+5. **The listing must be well formed and complete, without trusting its page size or order**. The neighbour
+   listing is every recent request of the agent (`q` omitted, `limit=200`, requested newest first). Two checks, in
+   this order:
+   * `neighbours-unsorted`: every item must be an object with a parseable `created_at`, and the list must be in
+     non-increasing `created_at` order (ties allowed).
+   * `neighbours-truncated`: the list must contain at least one item created strictly before
+     `P.consumed_at - SKEW_SECONDS`. Normally that is the park itself (the same agent's request, made before it
+     was approved and consumed). Without one, a request made after the release could sit beyond a page boundary.
+     The page size (`limit`) plays no part in the decision.
+6. **The gateway request itself must be listed.** Find the item with `id == G.request_id`:
+   not listed -> human (`gateway-request-not-listed`); its `created_at` must be `>= P.consumed_at`, with no skew
+   allowance (`created_at` and `consumed_at` both come from withHuman's own clock), else
+   `gateway-request-before-release`; its `agent_slug`, `server` and `tool` must equal G's and
+   `args_digest(its arguments) == digest` (arguments must be a dict), else `gateway-request-mismatch`.
 7. **Collision-aware single use** (`already-used`): any other request O (`O.id != G.request_id`) with
    `O.agent_slug == G.agent_slug`, `O.server` not starting with `park:`, string `server` and `tool`, and
    `expected_park(O.server, O.tool) == expected_park(G.server, G.tool)` (Hermes folds `-` into `_`, so
    `create-bill` and `create_bill` share one park), whose `created_at` is missing/unparseable or
-   `>= P.consumed_at`, and whose arguments are not a dict or have the same digest -> human. Any status counts
-   (pending, approved, denied, expired, cancelled). An O whose names cannot be mapped is skipped.
+   `>= P.consumed_at - SKEW_SECONDS`, and whose arguments are not a dict or have the same digest -> human. The
+   window is symmetric: a request created up to `SKEW_SECONDS` before the release still counts, so the model's own
+   call O made 3 s before the release cannot ride on the executor's G made 2 s after it (deciding O gives
+   `gateway-request-before-release`; deciding G with O listed gives `already-used`). Any status counts (pending,
+   approved, denied, expired, cancelled). An O whose names cannot be mapped is skipped.
 8. Otherwise approve, naming P.id.
+
+`SKEW_SECONDS` only allows for the clocks of this host and withHuman in the `now` versus `consumed_at` test
+(rule 2) and as the margin in the listing and single-use rules above.
+
+The webhook-level payload checks in `bridge/app.py` (signature, block type, preview flag, agent slug, shapes, idempotency key,
+`request.id`) run before this rule; the rule only sees a delivery that passed them.
 
 Anything unexpected (bad shapes, list failure, timeout, missing key) -> human. Never raise to the caller.
 A retried delivery of the same G gets the same answer (G excludes itself).
@@ -91,8 +108,7 @@ class GatewayCall: request_id: str; server: str; tool: str; arguments: dict; age
 class Verdict: approve: bool; why: str; park_request_id: str | None = None
 def expected_park(server: str, tool: str) -> tuple[str, str]   # (park_tool, park_server)
 def parse_time(value) -> datetime | None                       # aware datetimes only, else None
-def decide(call: GatewayCall, parks: list, neighbours: list, now: datetime, *,
-           neighbours_limit: int | None = None) -> Verdict
+def decide(call: GatewayCall, parks: list, neighbours: list, now: datetime) -> Verdict
 ```
 `hermes_tool_name` moves from app.py into verify.py (app.py re-exports it); `gateway_slug` is imported
 from `durable_park.gatecall`, `args_digest` from `durable_park.ledger` (both pure).
@@ -118,7 +134,8 @@ wall clock is checked after each chunk (`deadline`); `trust_env=False`; non-200 
   non-empty string; overall budget 3.5 s for both list calls; ListError/any exception -> human.
   The park listing is `lister.list(agent_slug=slug, q=park_tool, limit=50, ...)`; the neighbour listing is
   `lister.list(agent_slug=slug, q=None, limit=200, ...)` (`q=None` omits the `q` parameter, so every recent
-  request of the agent comes back, whatever its tool) and `decide(..., neighbours_limit=200)`.
+  request of the agent comes back, whatever its tool) and `decide(call, parks, neighbours, now)`. The page
+  size no longer reaches `decide`: it checks order and reach itself (rule 5).
 * Removed: ledger access, `_DeliveryStore`, `bridge_deliveries.db`, `LedgerMissing`, `--ledger`.
 * CLI: `--api-base` (env `DURABLE_PARK_WH_API_BASE`), `--key-file` (env `DURABLE_PARK_WH_KEY_FILE`),
   plus existing `--secret-file`, `--expected-agent`, `--host`, `--port`.
