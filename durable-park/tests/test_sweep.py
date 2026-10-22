@@ -657,3 +657,87 @@ def test_gateway_mainpid_sets_xdg_runtime_dir_when_unset(monkeypatch):
 def test_gateway_mainpid_keeps_an_existing_xdg_runtime_dir(monkeypatch):
     seen = _run_mainpid(monkeypatch, {"XDG_RUNTIME_DIR": "/run/user/77"})
     assert seen.get("env") is None  # inherit as is
+
+
+# ---- lift problems (lift_status.json) -----------------------------------------------------------------
+
+LIFT_TOOL = "mcp__wh__quickbooks__get_customer"
+LIFT_TEXTS = {
+    "declared": ("durable-park ALERT: {tool} has its own withhuman_context field inside {key}; the agent's note is "
+                 "left there and goes to the server, not to the approver."),
+    "schema_unavailable": ("durable-park ALERT: could not read {tool}'s tool rules, so the agent's note was not moved; "
+                           "it may reach the server."),
+    "args_unreadable": ("durable-park ALERT: could not read {tool}'s arguments, so the agent's note was not moved; "
+                        "it may reach the server."),
+    "lift_error": "durable-park ALERT: moving the agent's note failed for {tool}; it may reach the server.",
+    "note_left_inside": ("durable-park ALERT: the agent's note is still inside {key} for {tool} after the move; it may "
+                         "reach the server."),
+}
+
+
+def write_lift(tmp_path, *entries):
+    rows = [{"tool": t, "kind": k, "key": key, "first_seen": "2026-10-22T10:00:00Z",
+             "last_seen": "2026-10-22T10:00:00Z", "count": 1} for t, k, key in entries]
+    (tmp_path / "lift_status.json").write_text(json.dumps({"entries": rows, "updated_at": "2026-10-22T10:00:00Z"}))
+
+
+def test_lift_status_missing_is_silent(world, monkeypatch, capsys, tmp_path):
+    assert runs(world, monkeypatch, capsys, 2) == ["", ""]
+
+
+@pytest.mark.parametrize("kind", sorted(LIFT_TEXTS))
+def test_each_lift_problem_has_its_exact_alert_text_and_alerts_once(world, monkeypatch, capsys, tmp_path, kind):
+    write_lift(tmp_path, (LIFT_TOOL, kind, "params"))
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [LIFT_TEXTS[kind].format(tool=LIFT_TOOL, key="params")]
+    assert second == ""
+
+
+def test_a_new_problem_alerts_once_and_the_old_ones_stay_quiet(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"))
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), (LIFT_TOOL, "lift_error", ""),
+               ("mcp__wh__quickbooks__get_bill", "declared", "params"))
+    out, again = runs(world, monkeypatch, capsys, 2)
+    assert out.splitlines() == [LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key=""),
+                                LIFT_TEXTS["declared"].format(tool="mcp__wh__quickbooks__get_bill", key="params")]
+    assert again == ""
+
+
+def test_a_new_kind_for_the_same_tool_alerts(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"))
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), (LIFT_TOOL, "schema_unavailable", ""))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["schema_unavailable"].format(tool=LIFT_TOOL, key="")]
+
+
+def test_a_problem_that_goes_away_and_comes_back_alerts_again(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path)  # the gateway restarted and wrote an empty list
+    assert runs(world, monkeypatch, capsys, 1) == [""]
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="")]
+
+
+def test_a_corrupt_lift_status_alerts_once_then_recovers_quietly(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "lift_status.json").write_text("{not json")
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.startswith("durable-park ALERT: could not read lift_status.json (") and first.rstrip().endswith(").")
+    assert len(first.splitlines()) == 1 and second == ""
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="")]
+    (tmp_path / "lift_status.json").write_text("[1, 2]")  # readable JSON of the wrong shape: a problem again
+    again, quiet = runs(world, monkeypatch, capsys, 2)
+    assert again.startswith("durable-park ALERT: could not read lift_status.json (") and quiet == ""
+
+
+def test_lift_alert_state_and_garbage_entries_do_not_stop_the_sweep(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "lift_alert_state.json").write_text("[1")
+    (tmp_path / "lift_status.json").write_text(json.dumps({"entries": [5, {"tool": 1}, {"tool": LIFT_TOOL,
+                                                                                         "kind": "lift_error"}]}))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.count("durable-park ALERT:") >= 1

@@ -1776,35 +1776,173 @@ def test_lift_failure_warning_has_no_note_and_no_argument_values(env, caplog):
         assert secret not in everything
 
 
-def test_unknown_nested_rules_warn_once_per_tool_and_key_without_values(env, caplog):
-    """Rules the lift cannot judge (a remote ``$ref``) leave the note in place and log ONE warning per tool and key."""
+DECLARES = {"type": "object", "properties": {
+    "params": {"type": "object", "properties": {"withhuman_context": {"type": "string"}}},
+    "withhuman_context": {"type": "string"}}}
+TEXT_ARGS = {"params": '{"customer_ref": "58", "withhuman_context": "Find customer 58"}'}
+
+
+def status_hook(env, schema_fn=lambda tool: GW_SCHEMA, **kw):
+    return lifting_hook(env, schema_fn=schema_fn, lift_status_path=str(env.tmp_path / "lift_status.json"), **kw)
+
+
+def recorded(env):
+    path = env.tmp_path / "lift_status.json"
+    if not path.exists():
+        return set()
+    return {(e["tool"], e["kind"], e["key"]) for e in json.loads(path.read_text())["entries"]}
+
+
+def json_coerce(tool, args):
+    """Stands in for Hermes's type fixing: a JSON string where an object belongs becomes the object."""
+    return {k: json.loads(v) if isinstance(v, str) and v.startswith("{") else v for k, v in args.items()}
+
+
+@pytest.mark.parametrize("params_rules", [
+    {"$ref": "https://example.com/params.json"},
+    {"$ref": "#/nowhere"},
+    {"patternProperties": {"([": {"type": "string"}}},
+    {"allOf": "broken"},
+])
+def test_rules_the_lift_cannot_judge_still_lift_and_report_nothing(env, params_rules):
     env.provider.auto = "approved"
-    schema = {"type": "object", "properties": {"params": {"$ref": "https://example.com/params.json"},
-                                               "withhuman_context": {"type": "string"}}}
-    hook = lifting_hook(env, schema_fn=lambda tool: schema)
+    schema = {"type": "object", "properties": {"params": params_rules, "withhuman_context": {"type": "string"}}}
+    hook = status_hook(env, schema_fn=lambda tool: schema)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) == {"action": "modify", "args": LIFTED}
+    assert recorded(env) == set()
+
+
+def test_a_key_whose_rules_declare_the_field_is_left_alone_and_recorded(env):
+    env.provider.auto = "approved"
+    hook = status_hook(env, schema_fn=lambda tool: DECLARES)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None  # nothing lifted, the server owns that field
+    assert recorded(env) == {(GW_TOOL, "declared", "params")}
+    assert "Find customer 58" not in (env.tmp_path / "lift_status.json").read_text()
+    assert env.provider.only().body["arguments"] == NESTED
+
+
+def test_text_form_args_are_coerced_then_lifted_and_modify_carries_them(env):
+    env.provider.auto = "approved"
+    hook = status_hook(env, coerce_fn=json_coerce)
+    original = copy.deepcopy(TEXT_ARGS)
+    result = call(hook, GW_TOOL, args=original)
+    assert result == {"action": "modify", "args": LIFTED}
+    assert original == TEXT_ARGS  # the caller's arguments are untouched
+    assert env.provider.only().body["arguments"] == LIFTED
+    assert env.provider.only().body["agent_reasoning"] == "Find customer 58"
+    assert recorded(env) == set()
+    (row,) = env.ledger.list_by_status("allowed")
+    assert json.loads(row.args_json) == LIFTED
+
+
+def test_text_form_args_park_with_the_coerced_lifted_args(env):
+    hook = status_hook(env, coerce_fn=json_coerce)
+    first = call(hook, GW_TOOL, args=copy.deepcopy(TEXT_ARGS))
+    again = call(hook, GW_TOOL, args=copy.deepcopy(TEXT_ARGS))  # a replay is the same call
+    assert first == again and first["message"].startswith("PARKED P-")
+    (row,) = env.ledger.list_by_status("parked")
+    assert json.loads(row.args_json) == LIFTED
+    assert len(env.provider.requests) == 1
+
+
+def test_no_coercion_runs_when_no_string_holds_a_note(env):
+    env.provider.auto = "approved"
+    seen = []
+    hook = status_hook(env, coerce_fn=lambda tool, args: seen.append(tool) or args)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) == {"action": "modify", "args": LIFTED}
+    assert call(hook, GW_TOOL, args={"params": '{"a": 1}', "note": "withhuman_context"}, tool_call_id="call-2") is None
+    assert seen == []
+
+
+def test_coercion_that_raises_is_recorded_and_the_original_args_are_used(env):
+    def broken(tool, args):
+        raise RuntimeError("hermes moved")
+
+    hook = status_hook(env, coerce_fn=broken)
+    result = call(hook, GW_TOOL, args=copy.deepcopy(TEXT_ARGS))
+    (row,) = env.ledger.list_by_status("parked")
+    assert result == {"action": "block", "message": park_message(row.park_id, GW_TOOL)}
+    assert json.loads(row.args_json) == TEXT_ARGS
+    assert recorded(env) == {(GW_TOOL, "args_unreadable", "params")}
+
+
+def test_coercion_that_returns_a_non_object_counts_as_unreadable(env):
+    env.provider.auto = "approved"
+    hook = status_hook(env, coerce_fn=lambda tool, args: "nonsense")
+    assert call(hook, GW_TOOL, args=copy.deepcopy(TEXT_ARGS)) is None
+    assert recorded(env) == {(GW_TOOL, "args_unreadable", "params")}
+
+
+def test_schema_lookup_failure_is_recorded(env):
+    def broken(tool):
+        raise RuntimeError("registry gone")
+
+    hook = status_hook(env, schema_fn=broken)
+    result = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    assert result["message"].startswith("PARKED P-")
+    assert recorded(env) == {(GW_TOOL, "schema_unavailable", "")}
+
+
+def test_any_other_error_in_the_lift_step_is_recorded_and_the_original_args_are_used(env, monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr("durable_park.park_hook.lift_gateway_context", boom)
+    env.provider.auto = "approved"
+    assert call(status_hook(env), GW_TOOL, args=copy.deepcopy(NESTED)) is None
+    assert recorded(env) == {(GW_TOOL, "lift_error", "")}
+    assert env.provider.only().body["arguments"] == NESTED
+
+
+def test_a_note_still_inside_after_the_lift_is_recorded(env):
+    """``params`` declares its own field (left alone, recorded as declared); ``extra`` is a JSON string the type
+    fixing did not turn into an object, so its note is still inside: the self-check reports it."""
+    env.provider.auto = "approved"
+    schema = {"properties": {"params": DECLARES["properties"]["params"], "extra": {"type": "string"},
+                             "withhuman_context": {"type": "string"}}}
+    hook = status_hook(env, schema_fn=lambda tool: schema, coerce_fn=lambda tool, args: args)
+    args = {"params": {"withhuman_context": "owned by the server"}, "extra": '{"withhuman_context": "stuck"}'}
+    assert call(hook, GW_TOOL, args=args) is None
+    assert recorded(env) == {(GW_TOOL, "declared", "params"), (GW_TOOL, "note_left_inside", "extra")}
+    assert "stuck" not in (env.tmp_path / "lift_status.json").read_text()
+
+
+def test_a_declared_key_is_not_also_reported_as_left_inside(env):
+    env.provider.auto = "approved"
+    call(status_hook(env, schema_fn=lambda tool: DECLARES), GW_TOOL, args=copy.deepcopy(NESTED))
+    assert recorded(env) == {(GW_TOOL, "declared", "params")}
+
+
+def test_problems_never_log_values_and_repeat_calls_do_not_duplicate_entries(env, caplog):
+    env.provider.auto = "approved"
     caplog.set_level(logging.DEBUG, logger="durable_park")
+    hook = status_hook(env, schema_fn=lambda tool: DECLARES)
     args = {"params": {"customer_ref": "cust-ref-9911", "withhuman_context": "private note 4455"}}
-    assert call(hook, GW_TOOL, args=copy.deepcopy(args), tool_call_id="call-1") is None  # nothing lifted
-    assert call(hook, GW_TOOL, args=copy.deepcopy(args), tool_call_id="call-2") is None
-    other = call(hook, "mcp__wh__quickbooks__create_bill", args=copy.deepcopy(args), tool_call_id="call-3")
-    assert other is None
-    warnings = [r.getMessage() for r in caplog.records if "could not tell whether" in r.getMessage()]
-    assert warnings == [
-        f"could not tell whether {GW_TOOL}.params has its own withhuman_context; the note was left in place",
-        "could not tell whether mcp__wh__quickbooks__create_bill.params has its own withhuman_context; "
-        "the note was left in place"]
-    everything = "\n".join(r.getMessage() for r in caplog.records)
+    call(hook, GW_TOOL, args=copy.deepcopy(args), tool_call_id="call-1")
+    call(hook, GW_TOOL, args=copy.deepcopy(args), tool_call_id="call-2")
+    entries = json.loads((env.tmp_path / "lift_status.json").read_text())["entries"]
+    assert len(entries) == 1 and entries[0]["count"] == 2
+    everything = "\n".join(r.getMessage() for r in caplog.records) + (env.tmp_path / "lift_status.json").read_text()
     for secret in ("private note 4455", "cust-ref-9911"):
         assert secret not in everything
-    assert json.loads(env.ledger.get_by_call("sess-1", "call-1").args_json) == args  # sent unchanged
 
 
-def test_unknown_warning_memory_is_bounded(env, caplog):
+def test_a_failing_status_write_never_stops_the_call(env):
     env.provider.auto = "approved"
-    schema = {"properties": {"params": {"$ref": "https://example.com/p.json"}, "withhuman_context": {}}}
-    hook = lifting_hook(env, schema_fn=lambda tool: schema)
-    caplog.set_level(logging.WARNING, logger="durable_park")
-    for i in range(1005):
-        call(hook, f"tool_{i}", args={"params": {"withhuman_context": "n"}}, tool_call_id=f"c-{i}")
-    warnings = [r for r in caplog.records if "could not tell whether" in r.getMessage()]
-    assert len(warnings) == 1000
+    hook = lifting_hook(env, schema_fn=lambda tool: DECLARES,
+                        lift_status_path=str(env.tmp_path / "no-such-dir" / "lift_status.json"))
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None
+    assert len(env.ledger.list_by_status("allowed")) == 1
+
+
+def test_register_writes_the_lift_report_next_to_the_ledger(tmp_path, monkeypatch):
+    captured = {}
+
+    def spy(ledger, gate_factory, form_checked, **kw):
+        captured.update(kw)
+        return lambda **k: None
+
+    monkeypatch.setattr("durable_park.make_pre_tool_call", spy)
+    ctx = FakeCtx(tmp_path, {"ledger_path": str(tmp_path / "data" / "ledger.db")})
+    register(ctx)
+    assert captured["lift_status_path"] == str(tmp_path / "data" / "lift_status.json")
