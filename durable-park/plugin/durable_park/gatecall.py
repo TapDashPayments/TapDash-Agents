@@ -738,9 +738,19 @@ class LiftStatus:
             os.close(lock_fd)
 
 
-def build_call(row: ParkRow) -> Call:
-    """The AAP call for a ledger row: a pure function of the row (the executor replays it and must send the
-    identical body). Raises ``ValueError`` for arguments that are not strict JSON (e.g. NaN)."""
+def default_user_profile() -> tuple[str, str]:
+    """The Hermes user id and profile of the running turn; empty outside a chat."""
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return "", ""
+    return get_session_env("HERMES_SESSION_USER_ID", "") or "", get_session_env("HERMES_SESSION_PROFILE", "") or ""
+
+
+def build_call(row: ParkRow, user_id: str = "", profile: str = "") -> Call:
+    """The AAP call for a ledger row: a function of the row and of the turn's user and profile (taken from the
+    Hermes session unless given; the executor replays in the same chat session, so it sends the same body).
+    Raises ``ValueError`` for arguments that are not strict JSON (e.g. NaN)."""
     stored = json.loads(row.args_json)
     arguments, truncated = redact_arguments(stored)
     json.dumps(arguments, allow_nan=False)
@@ -748,6 +758,13 @@ def build_call(row: ParkRow) -> Call:
     reasoning = cut_utf16(note) if isinstance(note, str) and note else None
     context: dict[str, Any] = {
         "args_sha256": row.args_digest, "platform": platform_of(row.session_key), "session_key": row.session_key}
+    if not user_id or not profile:
+        session_user, session_profile = default_user_profile()
+        user_id, profile = user_id or session_user, profile or session_profile
+    if user_id:
+        context["user_id"] = user_id
+    if profile:
+        context["profile"] = profile
     if truncated:
         context["args_truncated"] = True
     return Call(

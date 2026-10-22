@@ -42,6 +42,7 @@ import stat
 import subprocess
 import tempfile
 import sys
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
@@ -134,6 +135,45 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def _err(message: str) -> None:
     print(f"durable-park sweep: {message}", file=sys.stderr)
+
+
+TEAMS_WEBHOOK_ENV = "TEAMS_ALERT_WEBHOOK_URL"  # a secret: read from the environment only, never printed
+TEAMS_TIMEOUT_SECONDS = 10
+
+
+class _Tee:
+    """stdout that also keeps what was printed, so the alert lines can be copied to Teams."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.lines: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.lines.append(text)
+        return self.inner.write(text)
+
+    def flush(self) -> None:
+        self.inner.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def _post_teams(webhook_url: str, text: str) -> bool:
+    """POST ``text`` to a Teams incoming webhook. Failures go to stderr (error type or HTTP code only: the URL
+    is a secret) and return False."""
+    try:
+        request = urllib.request.Request(webhook_url, data=json.dumps({"text": text}).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=TEAMS_TIMEOUT_SECONDS) as response:
+            code = response.status
+    except Exception as exc:  # noqa: BLE001 - a dead Teams webhook must not stop the sweep
+        _err(f"teams alert failed ({type(exc).__name__})")
+        return False
+    if not 200 <= code < 300:
+        _err(f"teams alert returned HTTP {code}")
+        return False
+    return True
 
 
 def _age_start(row) -> datetime | None:
@@ -570,6 +610,24 @@ def _load_proof_alert(ledger_path: str, now: datetime) -> None:
 
 
 def main(argv=None) -> int:
+    """Run the sweep. With ``TEAMS_ALERT_WEBHOOK_URL`` set, what the sweep printed to stdout (its alert lines,
+    which hold ids, tool names and reasons, never argument values) is also posted to Teams; a failed post exits 1."""
+    webhook = os.environ.get(TEAMS_WEBHOOK_ENV, "").strip()
+    if not webhook:
+        return _sweep(argv)
+    tee = _Tee(sys.stdout)
+    sys.stdout = tee
+    try:
+        status = _sweep(argv)
+    finally:
+        sys.stdout = tee.inner
+    text = "".join(tee.lines).strip()
+    if text and not _post_teams(webhook, text):
+        status = 1
+    return status
+
+
+def _sweep(argv=None) -> int:
     args = parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         try:

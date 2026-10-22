@@ -1151,3 +1151,32 @@ def test_an_unlisted_key_is_judged_the_same_whatever_the_order_of_the_listed_one
         "b": plain_rules, "a": complex_rules, "withhuman_context": {"type": "string"}}}
     args = {"zz": {"withhuman_context": "x"}}
     assert lift_report(args, first) == lift_report(args, second) == (args, [("declared", "zz", "")])
+
+
+def test_build_call_with_user_profile(tmp_path):
+    call = build_call(make_row(tmp_path), user_id="usr_123", profile="finance_admin")
+    assert call.context["user_id"] == "usr_123"
+    assert call.context["profile"] == "finance_admin"
+
+
+def _fake_session_env(monkeypatch, values):
+    import types
+    module = types.ModuleType("gateway.session_context")
+    module.get_session_env = lambda name, default="": values.get(name, default)
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.session_context", module)
+
+
+def test_build_call_reads_user_and_profile_from_the_hermes_session(tmp_path, monkeypatch):
+    _fake_session_env(monkeypatch, {"HERMES_SESSION_USER_ID": "42", "HERMES_SESSION_PROFILE": "finance"})
+    call = build_call(make_row(tmp_path))
+    assert call.context["user_id"] == "42" and call.context["profile"] == "finance"
+
+
+def test_build_call_leaves_user_and_profile_out_when_unknown(tmp_path, monkeypatch):
+    _fake_session_env(monkeypatch, {})
+    context = build_call(make_row(tmp_path)).context
+    assert "user_id" not in context and "profile" not in context
+    monkeypatch.setitem(sys.modules, "gateway.session_context", None)  # outside Hermes: import fails
+    context = build_call(make_row(tmp_path)).context
+    assert "user_id" not in context and "profile" not in context
