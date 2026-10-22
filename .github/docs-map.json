@@ -73,11 +73,24 @@
         "durable-park/deploy/*.sh",
         "durable-park/deploy/*.py",
         "durable-park/deploy/*.service",
+        "durable-park/deploy/*.socket",
         "durable-park/deploy/*.conf"
       ],
       "docs": [
         "durable-park/docs/runbook.md",
         "durable-park/docs/receiver-setup.md",
+        "durable-park/docs/gateway-setup.md"
+      ]
+    },
+    {
+      "name": "Gateway bridge isolation (socket unit, service unit, health check)",
+      "code": [
+        "durable-park/deploy/durable-park-bridge.service",
+        "durable-park/deploy/durable-park-bridge.socket",
+        "durable-park/deploy/bridge_check.py"
+      ],
+      "docs": [
+        "durable-park/docs/architecture.md",
         "durable-park/docs/gateway-setup.md"
       ]
     },

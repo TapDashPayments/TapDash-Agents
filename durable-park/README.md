@@ -24,8 +24,8 @@ row" rule applies.
 **Known risk, narrowed on 2026-10-22:** `hermes` no longer has sudo (Clean Setup Phase 1), so a hijacked agent that
 found a way to run code as that user can no longer read `/etc/durable-park/` (the QuickBooks credentials) through sudo,
 or change `/opt/durable-park`. What remains: the ledger and the plugin data are still owned by `hermes`, so such an agent
-could forge ledger rows; the secrets `hermes` reads by design (`instance_token`, `audit_key`, `wake_secret`, `bridge_secret`) stay
-readable; and an agent with a file or terminal tool could still reach everything `hermes` owns. durable-park
+could forge ledger rows; the secrets `hermes` reads by design (`instance_token`, `audit_key`, `wake_secret`) stay
+readable (`bridge_secret` is root-only since the bridge got its own user, `dpbridge`, on 2026-10-22); and an agent with a file or terminal tool could still reach everything `hermes` owns. durable-park
 therefore is not a full security boundary yet: the lockdown (no file, terminal or code tools) must stay in place until Clean
 Setup Phase 2 (a separate ledger owner, spec §4.5). Yaakov accepted the earlier, wider risk on 2026-10-20 for the QuickBooks
 sandbox exploration phase. The open items are in the [backlog](docs/backlog.md#before-real-books), before any real books.
@@ -40,6 +40,7 @@ flowchart LR
   plugin -->|"runs the saved call once"| gw["withHuman gateway"]
   gw -->|"is this the approved call?"| bridge["bridge"]
   bridge -->|"yes, once"| gw
+  bridge -->|"asks: was it approved<br/>and not used yet?"| wh
   gw --> qbo[("QuickBooks")]
 ```
 
@@ -48,7 +49,7 @@ flowchart LR
    The agent is told it is waiting.
 3. An approver approves in withHuman. A signed webhook wakes the plugin, which tells the original chat.
 4. The agent runs `parked_action_execute`; the plugin uses the approval once and replays the saved call.
-5. The withHuman gateway asks the bridge whether this exact call was approved; the bridge says yes once.
+5. The withHuman gateway asks the bridge whether this exact call was approved; the bridge checks in withHuman (not the ledger) and says yes once.
 6. QuickBooks gets the call. The ledger records the result.
 
 The full picture - every component, arrow, state and failure path: **[docs/architecture.md](docs/architecture.md)**.

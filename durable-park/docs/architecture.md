@@ -19,13 +19,20 @@ the root README's [Built on](../../README.md#built-on) table.
 ## The three guarantees
 
 1. **Nothing risky runs without one human approval.** The plugin blocks the call before Hermes sends it; the
-   withHuman gateway asks the bridge, and the bridge says "approve" only for a call that matches an approved park.
-2. **An approved call runs at most once, exactly as approved.** The approval is consumed once; the bridge's pass is
-   used once; arguments must match the saved ones.
+   withHuman gateway asks the bridge, and the bridge says "approve" only after it has checked **in withHuman** that
+   the call matches one approved, consumed park request that no other gateway request has used ([the decision
+   rule](#the-bridges-decision-rule)).
+2. **An approved call runs at most once, exactly as approved.** The approval is consumed once; the bridge approves one
+   gateway call per consumed approval (withHuman's own request list shows whether another gateway request already
+   used it); arguments must match the saved ones.
 3. **A crash never causes a silent retry.** If the outcome is unclear the row becomes `unknown` and a person checks.
 
-How strong is the first guarantee today? **On proto-agents it is not yet a full security boundary.** The plugin, the
-bridge and the ledger all trust the user `hermes`, which is also the user the agent runs as. The agent has **no file or
+How strong is the first guarantee today? **On proto-agents it is not yet a full security boundary.** The plugin and the
+ledger trust the user `hermes`, which is also the user the agent runs as. The bridge no longer trusts the ledger: it
+keeps no state and asks withHuman with a read-only organization key, so a forged ledger row cannot get a gateway
+call approved. It no longer runs as `hermes` either: it runs as its own system user `dpbridge`, from a root-owned copy
+that `hermes` cannot change (no sudo since Clean Setup Phase 1), and systemd holds its port, so nothing the bot runs can
+kill the bridge or answer "approve" in its place ([section 6](#6-where-everything-runs)). The agent has **no file or
 terminal tools** (the v1 tool lockdown, `deploy/hermes_tool_policy.py`); that holds the first guarantee against an
 agent that goes looking for a way round it. Since Clean Setup Phase 1 (2026-10-22 02:22 UTC) `hermes` has no sudo, so
 the root-owned parts (`/opt/durable-park`, `tunnel.env`, the other root-only secrets) are out of its reach. The ledger is
@@ -49,8 +56,18 @@ What that means today:
   `sudo -u hermes sudo -n true` is refused). If the agent ever got a terminal or file tool (a configuration change,
   a Hermes upgrade, a hijack), it still could **not** read the QuickBooks client secret, the refresh token or the
   withHuman tunnel token in `tunnel.env` (root-only), or change the code in `/opt/durable-park`. It **could** still read
-  the secrets `hermes` uses by design (`instance_token`, `audit_key`, `wake_secret`, `bridge_secret`), and, because the
-  ledger is still owned by `hermes` (Phase 2 not done), forge ledger rows. That is why file, terminal and code tools stay off until Phase 2.
+  the secrets `hermes` uses by design (`instance_token`, `audit_key`, `wake_secret`), and, because the
+  ledger is still owned by `hermes` (Phase 2 not done), forge ledger rows (they no longer get a gateway call approved:
+  the bridge checks withHuman). That is why file, terminal and code tools stay off until Phase 2.
+- The gateway bridge no longer shares the bot's user (since 2026-10-22). withHuman does not sign the bridge's
+  "approve" or "human" answers, so whoever answers on `127.0.0.1:8791` decides. The bridge runs as `dpbridge` (no login,
+  no home, no group but its own), so the bot cannot signal it or read its memory; the systemd socket unit
+  `durable-park-bridge.socket` holds the port for as long as that unit is neither stopped nor failed (both of
+  its failure limits are switched off, see the failure table), so the bot cannot bind it while the bridge restarts
+  (`Restart=always`); `bridge_secret` is `root:root 0600`, so the bot cannot read the key that signs withHuman's
+  deliveries. `audit_key` stays readable by `hermes` (the plugin names the decider with it); it is read-only, so it
+  lets a hijacked agent list requests, never approve one. `deploy/bridge_check.py` verifies all of this at every deploy
+  and the deploy stops if it fails.
 - Even so, durable-park asks withHuman about every tool call except `parked_action_execute`, `clarify` and the two
   read-only Tool Search catalog tools (`tool_search`, `tool_describe`, [section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)), and
   withHuman's pipeline decides which need a person; with the lockdown the only non-QuickBooks tool the agent reaches
@@ -97,7 +114,7 @@ flowchart LR
     bstatus[("breaker_status.json")]
     route["Hermes webhook route<br/>127.0.0.1:8644"]
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
-    bridge["bridge<br/>127.0.0.1:8791 - user hermes"]
+    bridge["bridge<br/>127.0.0.1:8791 (held by systemd) - user dpbridge<br/>keeps no state"]
     sweep["sweep<br/>cron every 5 min"]
     tunnel["wh-tunnel container<br/>QuickBooks MCP server"]
     funnelA{{"Funnel /aap/events"}}
@@ -129,7 +146,7 @@ flowchart LR
   gw -->|"checks"| pipe
   pipe -->|"webhook block, signed"| funnelB
   funnelB --> bridge
-  bridge -->|"finds matching executing park,<br/>uses its pass once"| ledger
+  bridge -->|"lists requests (read-only org key):<br/>one consumed approved park, not used before,<br/>and the gateway request itself"| aap
   bridge -->|"approve or human"| pipe
   gw -->|"forwards over the tunnel<br/>(tunnel dials out)"| tunnel
   tunnel -->|"QuickBooks API"| qbo
@@ -153,7 +170,8 @@ flowchart LR
 | approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key), and one shared gate that is rebuilt when the token file changes (the replaced gate's HTTP client is closed one rebuild later, as a call may still be using it). |
 | breaker | `plugin/durable_park/breaker.py` | Circuit breaker for withHuman outages: after 3 consecutive errors it stays open for 30 s (calls are refused without asking), then lets calls through again until an outcome is recorded; a failure re-opens, a success closes. It records open/close in `breaker_status.json` next to the ledger (written only on a change); it never calls withHuman itself. Started with a status file that still says open (a restart during an outage), it starts open but lets calls through at once, so the first success writes the close. |
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
-| bridge | `bridge/app.py` | Answers withHuman's pipeline: "is this exact gateway call an approved park?" |
+| bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). |
+| bridge check | `deploy/bridge_check.py` | Read-only isolation check, run as root by `configure_hermes.sh` right after the bridge answers 401 (the deploy stops if it fails) and by hand ([runbook](runbook.md#health-check)). Seven checks: the socket unit is active and listens on exactly `127.0.0.1:8791`; the service is active, its main process runs as `dpbridge` and the `Groups:` line of its `/proc/<pid>/status` is empty or only `dpbridge`'s own gid; only systemd and that process hold the port; no other process runs `bridge.app`; no user-level `durable-park-bridge*` unit exists for any user; `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; `bridge_secret` is `root:root 0600` (stat only, never read). |
 | sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, and once each when withHuman becomes unreachable (breaker open) and answers again. Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
 
 ### Plugin settings
@@ -168,7 +186,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
-| `audit_key_file` | `/etc/durable-park/audit_key` | Optional. A withHuman org API key with only `audit.read`; read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
+| `audit_key_file` | `/etc/durable-park/audit_key` | Optional for the plugin (the bridge needs the same key: systemd hands it a private copy when the bridge starts, so a rotation also needs `sudo systemctl restart durable-park-bridge`). A withHuman org API key with `audit.read`, `request.read` and `request.read.unrouted` and nothing else; the plugin only uses `audit.read`. Read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
 | `audit_base_url` | `https://app.withhuman.ai` | Where that audit lookup (`GET /api/v1/audit`) goes. A bad `audit_*` setting (not a string, empty, a path that cannot be resolved) only switches the name off with a warning in the log; unlike the other settings it never refuses tool calls. |
 | `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json`, `formcheck_status.json` and `plugin_load.json` are written next to it. |
 | `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
@@ -254,7 +272,7 @@ configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 
 | Order | Block | When | Then |
 |---|---|---|---|
 | 1 | `pa-park-money` | server `park:quickbooks` and the tool is one of the 12 money types (create/update/delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Ask an approver |
-| 2 | `block-06ebcdd6` | server `quickbooks` and a money tool (the gateway replay) | Webhook block `durable-park-bridge`: approves only a call matching an approved park, otherwise asks an approver |
+| 2 | `block-06ebcdd6` | server `quickbooks` and a money tool (the gateway replay) | Webhook block `durable-park-bridge`: approves only a call matching one approved, consumed park request that nothing else has used (the bridge checks in withHuman; consumed in the last 120 s), otherwise asks an approver |
 | 3 | `pa-gateway-other` | server `quickbooks`, not a money move | Approve (already asked as `park:quickbooks`) |
 | 4 | `pa-park-quickbooks-other` | server `park:quickbooks`, not a money move | Approve (the gateway decides the real call again) |
 | 5 | `pa-hermes-read` | server `hermes` and a read-only tool (web_search, web_extract, vision_analyze, memory, session_search, todo_list, kanban_list, kanban_show, kanban_attachments, skills_list, skill_view, image_generate) | Approve |
@@ -270,8 +288,8 @@ hook goes live. A tool name missing from rules 5 and 6 falls through to rule 8, 
 **Who approves:** the people on the approvers' escalation path in withHuman (today `notify-yaakov-yehuda`, one
 approver). Adding or changing approvers is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
 request shows the tool as `mcp__wh__quickbooks__...` (server `park:quickbooks`) - that is the one to approve. A
-request with the plain tool name (`create_payment`, server `quickbooks`) means the bridge did not recognise a
-replay, so this is a second ask for the same action ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)).
+request with the plain tool name (`create_payment`, server `quickbooks`) means the bridge did not confirm a
+replay (or withHuman answered it too slowly), so this is a second ask for the same action ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)).
 
 Setup steps for the pipeline: [gateway-setup.md](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline).
 
@@ -312,7 +330,7 @@ sequenceDiagram
   E->>W: consume approval (works once)
   E->>Q: replay the saved call through the gateway
   W->>B: webhook block: is this call approved? (signed)
-  B->>L: find executing park with same tool and args, use its pass
+  B->>W: list requests (org key, read-only): one consumed approved park, same tool and args, no earlier use
   B-->>W: approve
   W->>Q: forward to QuickBooks
   Q-->>E: payment created
@@ -327,11 +345,64 @@ Notes:
   forged wake cannot approve anything.
 - Step 16: `parked_action_execute` replays with `ctx.dispatch_tool`, which does not run `pre_tool_call` hooks, so
   the replay is not parked again.
-- Step 18: the bridge matches on the Hermes tool name (built the way Hermes builds it, `bridge.app.hermes_tool_name`)
+- Step 18: the bridge matches on the Hermes tool name (built the way Hermes builds it, `bridge.verify.hermes_tool_name`)
   and a digest of the arguments (`ledger.normalize_args`: ignores `withhuman_context`, defaults `withhuman_scope`,
-  treats `2.0` as `2`). Anything that does not match goes to a person - never auto-approved. If withHuman
-  retries the **same** delivery (same idempotency key), the bridge repeats its earlier answer; that is the same
-  request, not a second run.
+  treats `2.0` as `2`; names must be plain, see [the decision rule](#the-bridges-decision-rule)). Anything that does not match goes to a person - never auto-approved. The bridge keeps no
+  record of its answers. A retried delivery of the **same** gateway request gets the same answer, because the
+  request never counts against itself.
+
+### The bridge's decision rule
+
+The bridge (`bridge/app.py` for the webhook, `bridge/verify.py` for the rule, `bridge/whapi.py` for the withHuman
+call) holds no state and never opens the ledger. For each signed delivery of the gateway request G it asks withHuman
+(`GET /api/v1/requests`, agent `proto-agents`, newest first, with the organization key `/etc/durable-park/audit_key`)
+twice, within a total budget of 3.5 s (withHuman's webhook block gives up at 5 s): once for park requests of the
+Hermes tool name (`q` = that name, 50 items), once for **every** recent request of the agent (no `q`, 200 items:
+Hermes folds `-` into `_`, so a filter on the tool name could miss a second use under the other spelling). Then:
+
+1. **Plain names only** (`unsafe-name`, before anything else): the gateway server and the tool must each be ASCII
+   words joined by single `-` or `_` (the server's own tool-name shape: no `__`, no leading or trailing separator),
+   and the unhashed Hermes name `mcp__wh__<server>__<tool>` must be at most 64 characters (so Hermes never adds a
+   hash suffix). Hermes' name sanitisation then only folds `-` into `_`, and the bridge can name the park exactly.
+   A `__` in the tool is refused because the gateway pipeline's money regex allows an optional `quickbooks__`
+   prefix that the park regex lacks: `quickbooks__create-bill` must never pair with a park for `create-bill`.
+2. A park request P **matches** only if all hold: same agent, tool = the Hermes tool name, server = `park:<slug>`,
+   status and decision `approved`, `consumed_at` present and within the last **120 s** (5 s of clock skew allowed
+   against this host's clock),
+   consumed before the approval expired, no truncated arguments, and the digest of P's arguments equals G's.
+3. No match: ask a person (`no-approved-park`). Two matches: ask a person (`ambiguous-park`).
+4. On the single match P: arguments the approver could not read go to a person (`redacted-args`: P's arguments hold
+   the `[redacted]` placeholder anywhere, or G's arguments would be redacted or cut short by the park hook's own
+   redaction); a park whose consumption already has an `outcome` was used and goes to a person
+   (`already-reported`).
+5. **The listing is checked, not trusted** (neither its page size nor its order): every item needs a readable
+   `created_at` and the list must run newest first (`neighbours-unsorted`); and it must contain an item created
+   more than 5 s before P was consumed, normally the park itself (`neighbours-truncated`), otherwise a later request
+   could be hidden beyond the page boundary. Both checks run first, so a doubtful listing never reaches the next two
+   steps.
+6. **G itself must be in the listing**, created **at or after** P was consumed (both stamps come from withHuman's
+   clock, so no skew is allowed), with the same agent, server, tool and argument digest
+   (`gateway-request-not-listed`, `gateway-request-before-release`, `gateway-request-mismatch`).
+7. **Single use, collision-aware:** any other request (not G) of the same agent, not itself a park request, that
+   Hermes would map to the **same** park (the same Hermes tool name, so `create-bill` and `create_bill` count as
+   one), with the same arguments (or arguments that are not an object), created at or after 5 s before P was
+   consumed - in any state, pending, denied or expired too - means the approval is used: ask a person
+   (`already-used`). The window is wider than G's on purpose: the model's own call made 3 s before the release
+   cannot ride on the executor's call made 2 s after it (the earlier one is refused as before-release, the later as
+   already-used).
+8. Otherwise approve, naming P's id.
+
+The webhook-level payload checks in `bridge/app.py` (signature, block type, preview flag, agent slug, shapes,
+idempotency key, `request.id`) run **before** this rule; the rule only sees a delivery that passed them.
+
+Anything unexpected - withHuman slow or down, a missing or too-weak key, a bad answer - asks a person. That is a
+second ask for the same action (safe, only noisy). The bridge never raises to withHuman and never auto-approves on
+error. Spec: [bridge verifies approvals in withHuman](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md).
+
+**Limit, check when adding a gateway server:** if a server ever offers two tools that differ only by `-` versus `_`
+(for example `create-bill` and `create_bill`), the bridge cannot tell them apart: they share one park tool name, so
+an approval for one is also an approval for the other, and a use of either uses it. Check the server's tool
+catalogue first (`list_gateway_server_tools`). Today quickbooks has `create-bill` but no `create_bill`.
 
 ## 3. Ledger states
 
@@ -374,13 +445,13 @@ stateDiagram-v2
   outcome (`executed`, `failed`, `unknown`) or a human decision (`denied`, `expired`) are kept.
 - `unknown` is final on purpose: the approval was already used, so the call is never retried automatically. A
   person checks QuickBooks (runbook: [UNKNOWN outcome](runbook.md#outcome-unknown)).
-- `gateway_passed_at` is set when the bridge approves the gateway call (once per row). `notified_at` is set when the
-  chat was told about a decision.
+- `gateway_passed_at` is no longer written: the bridge does not open the ledger (it asks withHuman). The column
+  stays; old rows may have it set and nothing reads it. `notified_at` is set when the chat was told about a decision.
 - `decided_by` (nullable, `"Name (channel)"`) is written in the same single update as the decision, only for
   `approved`, `denied` and `cancelled`, and only when the withHuman audit log's newest `approval.decided` event for
   the request was made by a human. It is cosmetic: any failure of that lookup (no key file, HTTP error, 5 s timeout,
   bad JSON, a pipeline decision) leaves it empty and the message and the decision unchanged. An older ledger gets the
-  column added when any process (gateway, sweep, bridge) first opens it.
+  column added when any process (gateway, sweep) first opens it.
 
 ## 4. Tool call: form check, then one question to withHuman
 
@@ -463,7 +534,7 @@ and re-run against the real code on the VM (2026-10-21):
   (`hermes_cli/plugins.py:670-679`, `tools/registry.py:946-963`). Deferral only changes the tool list shown to the
   model; every tool stays in the registry under its real name, so a deferred MCP tool is replayed like any other.
 - **Unchanged:** the form check (it reads the schema from the registry, not from the model's tool list), the bridge's
-  tool-name matching (`bridge.app.hermes_tool_name`; withHuman's own call still names the real tool), the ledger and
+  tool-name matching (`bridge.verify.hermes_tool_name`; withHuman's own call still names the real tool), the ledger and
   the sweep. One model call is one ledger row because a batch of local tools is rejected by Hermes (one entry per
   `tool_call`), so no two real calls share an outer call id.
 - **`parked_action_execute` is deferred too** (it is a plugin tool). The model reaches it through `tool_describe` and
@@ -495,7 +566,8 @@ and re-run against the real code on the VM (2026-10-21):
 | Tool returns an unclear error (session expired, interrupted) | `unknown`, same as above. | Check QuickBooks |
 | Tool returns a clear error | `failed`, error stored; nothing to check. | Fix and ask again |
 | A decision's wake is lost (Hermes down, wake refused) | The sweep re-posts wakes every 5 minutes until the chat is told. | Nobody |
-| Bridge cannot match the gateway call (args changed, bridge down, bad signature) | withHuman asks a person instead. Never auto-approves. | An approver decides |
+| Bridge cannot confirm the gateway call (no matching consumed park, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
+| The bridge process dies or is restarted | systemd keeps listening on `127.0.0.1:8791` (the socket unit holds the port) and restarts the service after 1 s (`Restart=always`); a delivery meanwhile waits in the socket's backlog or times out, and withHuman asks a person instead. Nobody else can bind the port and answer, for as long as the socket unit is neither stopped nor failed. systemd fails a socket unit when the service it activates trips its start limit (`service-start-limit-hit`, with `Accept=no`) and when the socket trips its own trigger limit, and either frees the port; so the service has `StartLimitIntervalSec=0` (systemd keeps retrying every second, however long the start keeps failing) and the socket has `TriggerLimitIntervalSec=0`. Only an admin's `systemctl stop` or `disable --now` of the socket frees the port, and `bridge_check.py` check 1 fails when it is not active. | Nobody; check the unit if it keeps restarting ([runbook](runbook.md#health-check)) |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
 | Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
@@ -505,8 +577,10 @@ and re-run against the real code on the VM (2026-10-21):
 | Another park is still waiting in the chat | A new call that withHuman sends to a person is blocked: "already waiting", and its request is cancelled. Calls withHuman answers at once still run or are refused. A park can wait up to 168 h. | Decide the waiting one |
 
 Known gaps (see the [backlog](backlog.md)): an inject Hermes accepted but
-dropped is never retried; the bridge's
-replay store is not tied to the withHuman request id.
+dropped is never retried. `bridge_check.py` is a deploy-time check, not a monitor: its process scan (no other process
+runs `bridge.app`) is a heuristic that can raise a false alarm, it does not look at the running bridge's supplementary
+groups or at the permissions of `/etc/durable-park` itself, and a change to the socket unit takes effect only after
+`sudo systemctl restart durable-park-bridge.socket` (the deploy script does not restart a running socket).
 
 ## 6. Where everything runs
 
@@ -517,10 +591,19 @@ replay store is not tied to the withHuman request id.
 | Teams tunnel | `ubuntu` | Microsoft devtunnel `proto-agents-bot`, forwards to the gateway's `127.0.0.1:3978` | outbound only | systemd user unit `devtunnel-hermes` (user `ubuntu`) |
 | Claude connector "Proto-Agents" | `ubuntu` (the admin; was `hermes` until 2026-10-22) | `/home/ubuntu/hermes-shell-mcp` (shell access for Claude on this VM; reaches Hermes with `sudo -u hermes ...`) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
-| bridge | `hermes` | `/opt/durable-park/bridge/` + `/opt/durable-park/plugin/durable_park/ledger.py` (root-owned copy) | `127.0.0.1:8791` `/wh/bridge` | system unit `durable-park-bridge` |
+| bridge | `dpbridge` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` (the socket is held by systemd, not by the bridge process) | system units `durable-park-bridge.socket` (holds the port) and `durable-park-bridge` (`Restart=always`) |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
 | tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` | outbound only | Docker, container `wh-tunnel` |
 | Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
+
+System users behind that table:
+
+| User | What runs as it | Groups that matter |
+|---|---|---|
+| `hermes` | the agent, the plugin, the sweep, the Hermes user units | `dpwake` (reads `wake_secret`); no sudo |
+| `aaprecv` | the receiver | `dpwake` |
+| `dpbridge` | the gateway bridge | its own group only; no login, no home, shell `nologin`; deliberately not in `dpwake` or `hermes` (`bridge_check.py` checks it) |
+| `ubuntu` | the admin and the Claude connector | passwordless sudo |
 
 - Outside services the gateway talks to: withHuman (approvals and the MCP gateway), Telegram, Teams and, since 2026-10-22, Langfuse Cloud (traces out only).
 - The git clone is `/home/hermes/tapdash-agents`; `/home/hermes/durable-park` is a link to its `durable-park/`
@@ -528,9 +611,10 @@ replay store is not tied to the withHuman request id.
 - The receiver and bridge run from **root-owned copies** in `/opt/durable-park`, so the agent's user could not change
   the code that says "approved" (since Clean Setup Phase 1, 2026-10-22, `hermes` has no sudo, so these copies are now a
   boundary for the code, [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1). Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
-- Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`, `bridge_deliveries.db`,
+- Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`,
   `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
-  `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`.
+  `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`. The bridge keeps nothing here: the
+  `bridge_deliveries.db` of the old bridge is unused and can be deleted once the new bridge is live.
 - Since 2026-10-21 03:16 UTC the v1 lockdown is applied (`deploy/hermes_tool_policy.py`: tools limited to
   `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`, plus Hermes's three Tool Search bridge tools (Tool Search has been on since
   2026-10-21 19:59 UTC) ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); on every platform key, `check` ok) and Hermes's own
@@ -551,14 +635,16 @@ the repo) and never printed by any script.
 | `instance_token` | 0640 root:hermes | plugin, Hermes (`wh` MCP server via the secrets helper) | withHuman instance credential: approval requests and the gateway |
 | `receiver.json` | 0600 aaprecv | receiver | withHuman webhook signing secret + the receiver's own credential copy |
 | `wake_secret` | 0640 root:dpwake | receiver, sweep, Hermes (via the secrets helper) | signs the local wake to Hermes |
-| `bridge_secret` | 0640 root:dpwake | bridge | verifies withHuman's pipeline webhook signature |
+| `bridge_secret` | 0600 root:root | bridge (systemd reads it as root and hands the bridge a private copy: `LoadCredential`) | verifies withHuman's pipeline webhook signature. The bot cannot read it |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
-| `audit_key` (optional) | 0640 root:hermes | plugin | withHuman org API key with only `audit.read`: names who decided in the chat message |
+| `audit_key` | 0640 root:hermes | bridge (every gateway call; systemd copies it when the bridge starts: `LoadCredential`), plugin (optional; reads the file) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
 
 The Langfuse keys are not in this folder: they are `HERMES_LANGFUSE_PUBLIC_KEY` and `HERMES_LANGFUSE_SECRET_KEY` in `~hermes/.hermes/.env`, typed in by an admin like the rest ([runbook](runbook.md#tracing-langfuse)). The key pair gives full read and write access to the project's traces, and with capture mode `full` the traces hold all conversations, so treat the keys like the other secrets: typed in by an admin with `read -rs` (no echo), never in chat, rotated before production.
 
-Since Clean Setup Phase 1 (2026-10-22) the user `hermes` has no sudo: an agent that got a terminal or file tool could still read the files that `hermes` reads by design (`instance_token`, `audit_key`, and `wake_secret` and `bridge_secret` through group `dpwake`), but not `tunnel.env` or `provisioner_token` (root-only) or `receiver.json` (`aaprecv`). The ledger is still `hermes`-owned until Phase 2, and the v1 lockdown withholds those tools today. See backlog items 0 and 7.
+Since Clean Setup Phase 1 (2026-10-22) the user `hermes` has no sudo: an agent that got a terminal or file tool could still read the files that `hermes` reads by design (`instance_token`, `audit_key`, and `wake_secret` through group `dpwake`), but not `tunnel.env`, `provisioner_token` or `bridge_secret` (root-only) or `receiver.json` (`aaprecv`). The ledger is still `hermes`-owned until Phase 2, and the v1 lockdown withholds those tools today. See backlog items 0 and 7.
+
+`bridge_secret` and `audit_key` reach the bridge as systemd credentials (`LoadCredential`: private copies made when the service starts, in a directory only `dpbridge` can read). A rotation of either therefore takes effect after `sudo systemctl restart durable-park-bridge`; the socket unit keeps the port during the restart.
 
 Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before-production).
 
@@ -575,6 +661,8 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | 75 min | Form-check report older than this is treated as broken | `durable_park_sweep.py` |
 | 2 | Bad sweeps in a row before a form-checker alert | `durable_park_sweep.py` |
 | 300 s | Allowed clock difference on the bridge signature | `bridge/app.py` |
+| 120 s | A park approval can approve one gateway call only if it was consumed this recently (5 s of clock skew allowed) | `bridge/verify.py` |
+| 3.5 s | The bridge's total budget for its two withHuman lists (withHuman's webhook block gives up at 5 s; 3 s per call). A hard limit: each list runs in a worker thread and the caller stops waiting for it when the budget is spent (`deadline`), even if withHuman stalls mid-response; an abandoned worker ends at its own 3 s httpx timeout | `bridge/app.py`, `bridge/whapi.py` |
 | 60 s | Hermes waits this long for the park hook | `plugins.hook_callback_timeout` |
 | 3 failures / 60 s | Hermes pauses an MCP server after 3 failed calls (blocked calls never reach it) | Hermes `tools/mcp_tool.py` |
 
@@ -588,7 +676,7 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | MCP | Model Context Protocol: how Hermes calls tools. QuickBooks tools arrive through withHuman's **MCP gateway**. |
 | park | Stopping a risky call before it runs and saving it in the ledger, with an open approval request. |
 | wake | A small signed message telling the plugin "look at this park again". It carries only the park id. |
-| gateway pass | The one-time "yes" the bridge gives for one approved park. Used once, then gone. |
+| gateway pass | The one-time "yes" the bridge gives for one consumed park approval. withHuman's request list is the record of whether it was used. |
 | digest | A fingerprint (sha256) of a call's arguments, used to check a replay is the exact approved call. |
 | sweep | The 5-minute cron script that catches anything missed and sends alerts. |
 | tunnel | withHuman's container that runs a tool server (here QuickBooks) on the VM and dials out to withHuman. |

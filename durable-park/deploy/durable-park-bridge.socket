@@ -1,0 +1,25 @@
+# durable-park gateway bridge: the socket systemd holds for durable-park-bridge.service (127.0.0.1:8791).
+# System unit, installed, enabled and started by deploy/configure_hermes.sh.
+#
+# Why a socket unit: the bridge answers "approve" or "human" to withHuman and nothing signs those answers. If the
+# bridge's own process owned the port, the moment it died (and until systemd restarted it) anything running as the
+# bot's user could bind 127.0.0.1:8791 and answer "approve" to every gateway call. systemd holds the listening
+# socket the whole time, including while the bridge restarts: connections wait in the backlog and nobody else can
+# bind the port. The service gets the socket as file descriptor 3 (bridge.app --systemd-socket).
+#
+# The port stays ours only while this socket unit is neither stopped nor failed. Two limits can fail it, so both are
+# off: the service's start limit (StartLimitIntervalSec=0 in durable-park-bridge.service) and this unit's trigger
+# limit (TriggerLimitIntervalSec=0: by default 20 activations per 2 s for Accept=no, after which systemd marks the
+# socket failed and closes the listening socket, so a burst of connections while the bridge restarts would free the
+# port; systemd.socket(5)). PollLimitIntervalSec/PollLimitBurst still slow a flood down temporarily.
+[Unit]
+Description=durable-park gateway bridge socket (127.0.0.1:8791)
+
+[Socket]
+ListenStream=127.0.0.1:8791
+Accept=no
+NoDelay=true
+TriggerLimitIntervalSec=0
+
+[Install]
+WantedBy=sockets.target

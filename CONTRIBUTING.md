@@ -58,6 +58,10 @@ rule: change either, update the runbook's "Tool policy check failed" and "Open a
 The gateway-start load check (`durable-park/deploy/plugin_load_check.sh`, run by the same drop-in as `ExecStartPost`)
 is covered by the same rule (`deploy/*.sh`): change it, update the runbook's "Gateway will not start: the plugin did
 not load" section.
+The gateway bridge's own user and port (`durable-park/deploy/durable-park-bridge.service`, `durable-park-bridge.socket`
+and `bridge_check.py`) are mapped to `architecture.md` and `gateway-setup.md` in the "Gateway bridge isolation" rule (and,
+like the other deploy files, to the runbook and the two setup guides in "Deploy scripts and service units"): change one,
+update the bridge's tables and the "Own user and own port" section in the same commit.
 The withHuman entry pipeline kept as a reviewed file (`durable-park/deploy/withhuman/entry-pipeline.json`) is mapped to
 `architecture.md`: change the file, change the pipeline table there in the same commit.
 

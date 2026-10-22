@@ -1,0 +1,485 @@
+"""bridge.whapi: the bridge's read-only lister of withHuman approval requests (org key, no network in tests)."""
+
+import threading
+import time
+
+import httpx
+import pytest
+
+from bridge.whapi import DEFAULT_API_BASE, DEFAULT_KEY_FILE, ListError, RequestLister
+
+BASE = "https://wh.test/api/v1"
+KEY = "whk_DISTINCTIVE-fake-key-9f3a77c1"
+
+
+@pytest.fixture
+def key_file(tmp_path):
+    path = tmp_path / "audit_key"
+    path.write_text(KEY + "\n")
+    return path
+
+
+class Recorder:
+    """A MockTransport handler that records every request it receives and answers with ``reply``."""
+
+    def __init__(self, reply=None):
+        self.requests = []
+        self.reply = reply or (lambda request: httpx.Response(200, json={"requests": []}))
+
+    def __call__(self, request):
+        self.requests.append(request)
+        return self.reply(request)
+
+    @property
+    def transport(self):
+        return httpx.MockTransport(self)
+
+
+def make(key_file, recorder, base=BASE, **kwargs):
+    return RequestLister(base, str(key_file), transport=recorder.transport, **kwargs)
+
+
+def code_of(excinfo):
+    return excinfo.value.code
+
+
+def test_defaults_name_the_withhuman_api_and_the_audit_key():
+    assert DEFAULT_API_BASE == "https://app.withhuman.ai/api/v1"
+    assert DEFAULT_KEY_FILE == "/etc/durable-park/audit_key"
+
+
+def test_sends_get_to_requests_with_params_and_bearer_header(key_file):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="hermes", q="create_payment", limit=25)
+    (req,) = rec.requests
+    assert req.method == "GET"
+    assert req.url.scheme == "https"
+    assert req.url.host == "wh.test"
+    assert req.url.path == "/api/v1/requests"
+    assert dict(req.url.params) == {"agent_slug": "hermes", "q": "create_payment", "limit": "25"}
+    assert req.headers["authorization"] == f"Bearer {KEY}"
+    assert req.headers["accept"] == "application/json"
+
+
+def test_default_limit_is_50(key_file):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="a", q="t")
+    assert rec.requests[0].url.params["limit"] == "50"
+
+
+@pytest.mark.parametrize("asked,sent", [(0, "1"), (-5, "1"), (1, "1"), (200, "200"), (5000, "200")])
+def test_limit_is_clamped_to_1_through_200(key_file, asked, sent):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="a", q="t", limit=asked)
+    assert rec.requests[0].url.params["limit"] == sent
+
+
+def test_trailing_slash_on_base_url_is_stripped(key_file):
+    rec = Recorder()
+    make(key_file, rec, base=BASE + "/").list(agent_slug="a", q="t")
+    assert rec.requests[0].url.path == "/api/v1/requests"
+
+
+def test_returns_the_requests_list_as_is(key_file):
+    items = [{"id": "r1", "tool": "x"}, {"id": "r2"}, "odd", 7]
+    rec = Recorder(lambda request: httpx.Response(200, json={"requests": items, "next": "ignored"}))
+    assert make(key_file, rec).list(agent_slug="a", q="t") == items
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500, 503])
+def test_non_200_raises_http_status(key_file, status):
+    rec = Recorder(lambda request: httpx.Response(status, json={"error": "nope"}))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == f"http-{status}"
+
+
+def test_204_is_not_accepted_as_success(key_file):
+    rec = Recorder(lambda request: httpx.Response(204))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "http-204"
+
+
+def test_redirect_is_not_followed(key_file):
+    def reply(request):
+        if request.url.host == "wh.test":
+            return httpx.Response(302, headers={"location": "https://evil.test/steal"})
+        return httpx.Response(200, json={"requests": []})
+    rec = Recorder(reply)
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "http-302"
+    assert [r.url.host for r in rec.requests] == ["wh.test"]
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(200, content=b"not json{"),
+    httpx.Response(200, content=b""),
+    httpx.Response(200, json={}),
+    httpx.Response(200, json={"items": []}),
+    httpx.Response(200, json={"requests": {"id": "r1"}}),
+    httpx.Response(200, json={"requests": None}),
+    httpx.Response(200, json=[{"id": "r1"}]),
+    httpx.Response(200, json="requests"),
+])
+def test_malformed_body_raises_shape(key_file, response):
+    rec = Recorder(lambda request: response)
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "shape"
+
+
+@pytest.mark.parametrize("error", [
+    httpx.ConnectError("boom"),
+    httpx.ReadTimeout("slow"),
+    httpx.RemoteProtocolError("bad"),
+])
+def test_transport_errors_raise_transport(key_file, error):
+    def reply(request):
+        raise error
+    with pytest.raises(ListError) as exc:
+        make(key_file, Recorder(reply)).list(agent_slug="a", q="t")
+    assert code_of(exc) == "transport"
+
+
+@pytest.mark.parametrize("content", [None, "", "  \n\t "])
+def test_missing_or_empty_key_file_raises_no_key_and_sends_nothing(tmp_path, content):
+    path = tmp_path / "audit_key"
+    if content is not None:
+        path.write_text(content)
+    rec = Recorder()
+    with pytest.raises(ListError) as exc:
+        make(path, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "no-key"
+    assert rec.requests == []
+
+
+def test_unreadable_key_file_raises_no_key(tmp_path):
+    rec = Recorder()
+    with pytest.raises(ListError) as exc:
+        make(tmp_path, rec).list(agent_slug="a", q="t")  # a directory cannot be read as a file
+    assert code_of(exc) == "no-key"
+    assert rec.requests == []
+
+
+def test_key_file_that_is_not_text_raises_no_key(tmp_path):
+    path = tmp_path / "audit_key"
+    path.write_bytes(b"\xff\xfe\x00\x80")
+    rec = Recorder()
+    with pytest.raises(ListError) as exc:
+        make(path, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "no-key"
+    assert rec.requests == []
+
+
+def test_key_is_reread_on_every_call_so_rotation_takes_effect(key_file):
+    rec = Recorder()
+    lister = make(key_file, rec)
+    lister.list(agent_slug="a", q="t")
+    key_file.write_text("whk_ROTATED-key-2\n")
+    lister.list(agent_slug="a", q="t")
+    assert [r.headers["authorization"] for r in rec.requests] == [f"Bearer {KEY}", "Bearer whk_ROTATED-key-2"]
+
+
+def test_key_file_is_not_read_at_construction(tmp_path):
+    path = tmp_path / "later"
+    rec = Recorder()
+    lister = make(path, rec)  # does not exist yet: constructing must not fail
+    path.write_text(KEY)
+    lister.list(agent_slug="a", q="t")
+    assert rec.requests[0].headers["authorization"] == f"Bearer {KEY}"
+
+
+class FakeClock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def test_expired_deadline_raises_deadline_and_sends_nothing(key_file):
+    rec = Recorder()
+    clock = FakeClock(1000.0)
+    lister = make(key_file, rec, clock=clock)
+    with pytest.raises(ListError) as exc:
+        lister.list(agent_slug="a", q="t", deadline=1000.0)  # exactly now: nothing left
+    assert code_of(exc) == "deadline"
+    with pytest.raises(ListError) as exc:
+        lister.list(agent_slug="a", q="t", deadline=990.0)
+    assert code_of(exc) == "deadline"
+    assert rec.requests == []
+
+
+def test_timeout_is_the_per_call_timeout_when_the_deadline_is_far(key_file):
+    rec = Recorder()
+    clock = FakeClock(1000.0)
+    make(key_file, rec, per_call_timeout=3.0, clock=clock).list(agent_slug="a", q="t", deadline=1100.0)
+    assert set(rec.requests[0].extensions["timeout"].values()) == {3.0}
+
+
+def test_timeout_is_the_remaining_time_when_the_deadline_is_near(key_file):
+    rec = Recorder()
+    clock = FakeClock(1000.0)
+    make(key_file, rec, per_call_timeout=3.0, clock=clock).list(agent_slug="a", q="t", deadline=1001.25)
+    assert set(rec.requests[0].extensions["timeout"].values()) == {1.25}
+
+
+def test_timeout_without_a_deadline_is_the_per_call_timeout(key_file):
+    rec = Recorder()
+    make(key_file, rec, per_call_timeout=2.5).list(agent_slug="a", q="t")
+    assert set(rec.requests[0].extensions["timeout"].values()) == {2.5}
+
+
+@pytest.mark.parametrize("base", [
+    "http://wh.test/api/v1",
+    "ftp://wh.test",
+    "wh.test/api/v1",
+    "",
+    "HTTP://wh.test",
+])
+def test_non_https_base_url_is_rejected_at_construction(key_file, base):
+    with pytest.raises(ListError) as exc:
+        RequestLister(base, str(key_file))
+    assert code_of(exc) == "bad-base-url"
+
+
+def test_key_never_appears_in_errors_or_repr(key_file):
+    rec = Recorder(lambda request: httpx.Response(403, json={"error": request.headers["authorization"]}))
+    lister = make(key_file, rec)
+    with pytest.raises(ListError) as exc:
+        lister.list(agent_slug="a", q="t")
+    assert KEY not in str(exc.value)
+    assert KEY not in repr(exc.value)
+    assert KEY not in repr(lister)
+    assert KEY not in str(lister)
+    assert BASE in repr(lister)
+    assert str(key_file) in repr(lister)
+
+
+def test_transport_error_message_does_not_leak_the_key(key_file):
+    def reply(request):
+        raise httpx.ConnectError(f"failed with {request.headers['authorization']}")
+    with pytest.raises(ListError) as exc:
+        make(key_file, Recorder(reply)).list(agent_slug="a", q="t")
+    assert KEY not in str(exc.value)
+    assert KEY not in repr(exc.value)
+    assert exc.value.__cause__ is None or KEY not in str(exc.value.__cause__)
+
+
+def test_list_error_str_is_its_code():
+    err = ListError("no-key")
+    assert err.code == "no-key"
+    assert str(err) == "no-key"
+
+
+# --- optional q ------------------------------------------------------------------------------------------------
+
+
+def test_q_is_omitted_entirely_when_none(key_file):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="hermes", q=None, limit=10)
+    (req,) = rec.requests
+    assert "q" not in req.url.params
+    assert dict(req.url.params) == {"agent_slug": "hermes", "limit": "10"}
+
+
+def test_q_is_omitted_when_not_passed_at_all(key_file):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="hermes")
+    assert "q" not in rec.requests[0].url.params
+
+
+def test_q_is_still_sent_when_given(key_file):
+    rec = Recorder()
+    make(key_file, rec).list(agent_slug="hermes", q="create_payment")
+    assert rec.requests[0].url.params["q"] == "create_payment"
+
+
+# --- bounded body ----------------------------------------------------------------------------------------------
+
+MIB = 1024 * 1024
+CAP = 4 * MIB
+
+
+class Drip(httpx.SyncByteStream):
+    """A response body that yields ``chunks`` one by one, counting how many were handed out.
+
+    ``on_chunk`` runs just before each chunk is handed out (a test uses it to advance a fake clock)."""
+
+    def __init__(self, chunks, on_chunk=None):
+        self._chunks = chunks
+        self._on_chunk = on_chunk
+        self.yielded = 0
+
+    def __iter__(self):
+        for chunk in self._chunks:
+            if self._on_chunk is not None:
+                self._on_chunk()
+            self.yielded += 1
+            yield chunk
+
+    def close(self):
+        pass
+
+
+def json_body_of_size(size):
+    prefix, suffix = b'{"requests":[],"pad":"', b'"}'
+    body = prefix + b"x" * (size - len(prefix) - len(suffix)) + suffix
+    assert len(body) == size
+    return body
+
+
+def test_max_body_bytes_is_4_mib():
+    import bridge.whapi as whapi
+
+    assert whapi.MAX_BODY_BYTES == CAP
+
+
+def test_body_over_the_cap_raises_too_large_and_reading_stops(key_file):
+    drip = Drip([b"x" * MIB] * 10)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "too-large"
+    assert drip.yielded == 5  # the fifth 1 MiB chunk is the first to pass 4 MiB; the other five are never read
+
+
+def test_body_one_byte_over_the_cap_raises_too_large(key_file):
+    rec = Recorder(lambda request: httpx.Response(200, content=json_body_of_size(CAP + 1)))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "too-large"
+
+
+def test_body_exactly_at_the_cap_is_accepted(key_file):
+    body = json_body_of_size(CAP)
+    quarter = CAP // 4
+    drip = Drip([body[i:i + quarter] for i in range(0, CAP, quarter)])
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    assert make(key_file, rec).list(agent_slug="a", q="t") == []
+    assert drip.yielded == 4
+
+
+def test_non_200_body_is_not_read_at_all(key_file):
+    drip = Drip([b"x" * MIB] * 10)
+    rec = Recorder(lambda request: httpx.Response(500, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec).list(agent_slug="a", q="t")
+    assert code_of(exc) == "http-500"
+    assert drip.yielded == 0
+
+
+# --- wall-clock deadline while reading -------------------------------------------------------------------------
+
+
+def test_slow_drip_past_the_deadline_raises_deadline_and_reading_stops(key_file):
+    clock = FakeClock(1000.0)
+
+    def tick():
+        clock.now += 0.4
+
+    drip = Drip([b"x" * 10] * 10, on_chunk=tick)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec, clock=clock).list(agent_slug="a", q="t", deadline=1001.0)
+    assert code_of(exc) == "deadline"
+    assert drip.yielded == 3  # 1000.4 and 1000.8 are inside the deadline; 1001.2 is past it
+
+
+def test_slow_drip_reaching_exactly_the_deadline_raises_deadline(key_file):
+    clock = FakeClock(1000.0)
+
+    def tick():
+        clock.now += 0.5
+
+    drip = Drip([b"x" * 10] * 10, on_chunk=tick)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec, clock=clock).list(agent_slug="a", q="t", deadline=1001.0)
+    assert code_of(exc) == "deadline"
+    assert drip.yielded == 2  # 1001.0 is not < 1001.0
+
+
+def test_slow_drip_without_a_deadline_is_bounded_by_the_per_call_timeout(key_file):
+    clock = FakeClock(1000.0)
+
+    def tick():
+        clock.now += 1.0
+
+    drip = Drip([b"x" * 10] * 10, on_chunk=tick)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    with pytest.raises(ListError) as exc:
+        make(key_file, rec, per_call_timeout=3.0, clock=clock).list(agent_slug="a", q="t")
+    assert code_of(exc) == "deadline"
+    assert drip.yielded == 3  # 1003.0 is not < 1000.0 + 3.0
+
+
+def test_fast_body_inside_the_deadline_is_accepted(key_file):
+    clock = FakeClock(1000.0)
+
+    def tick():
+        clock.now += 0.1
+
+    body = json_body_of_size(100)
+    drip = Drip([body[:50], body[50:]], on_chunk=tick)
+    rec = Recorder(lambda request: httpx.Response(200, stream=drip))
+    assert make(key_file, rec, clock=clock).list(agent_slug="a", q="t", deadline=1001.0) == []
+
+
+class StallThenLate(httpx.SyncByteStream):
+    """A body whose first chunk arrives just inside the deadline and whose second read then stalls.
+
+    A server that stops sending mid-body keeps ``__iter__`` blocked on ``release`` (a real wait, as a socket read
+    would be). If the wait ends, the fake clock jumps past the deadline, as it would after a stalled read.
+    """
+
+    def __init__(self, clock, *, first_at, late_at, release):
+        self._clock, self._first_at, self._late_at, self._release = clock, first_at, late_at, release
+
+    def __iter__(self):
+        self._clock.now = self._first_at
+        yield b"x" * 10
+        self._release.wait(5)
+        self._clock.now = self._late_at
+        yield b"x" * 10
+
+    def close(self):
+        pass
+
+
+def test_a_body_that_stalls_just_before_the_deadline_is_cut_at_the_deadline_not_one_read_timeout_later(key_file):
+    """After the first chunk (1000.29, deadline 1000.3) the next read could wait a whole read timeout (3 s) more:
+    the caller must get ``deadline`` when its budget is spent, whatever the server is doing."""
+    clock = FakeClock(1000.0)
+    release = threading.Event()
+    stall = StallThenLate(clock, first_at=1000.29, late_at=1003.3, release=release)
+    rec = Recorder(lambda request: httpx.Response(200, stream=stall))
+    started = time.monotonic()
+    try:
+        with pytest.raises(ListError) as exc:
+            make(key_file, rec, per_call_timeout=3.0, clock=clock).list(agent_slug="a", q="t", deadline=1000.3)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()  # let the abandoned reader go
+    assert code_of(exc) == "deadline"
+    assert elapsed < 2.0, f"waited {elapsed:.1f} s for a budget of 0.3 s"
+
+
+# --- no environment trust --------------------------------------------------------------------------------------
+
+
+def test_client_is_built_with_trust_env_false(key_file, monkeypatch):
+    built = []
+    real_client = httpx.Client
+
+    class SpyClient(real_client):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(httpx, "Client", SpyClient)
+    make(key_file, Recorder()).list(agent_slug="a", q="t")
+    assert len(built) == 1
+    assert built[0].trust_env is False
