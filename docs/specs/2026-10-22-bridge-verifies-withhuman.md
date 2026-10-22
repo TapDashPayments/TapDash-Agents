@@ -101,14 +101,15 @@ from `durable_park.gatecall`, `args_digest` from `durable_park.ledger` (both pur
 ```python
 DEFAULT_API_BASE = "https://app.withhuman.ai/api/v1"
 DEFAULT_KEY_FILE = "/etc/durable-park/audit_key"
-class ListError(Exception): code: str     # short safe code: no-key, deadline, http-403, shape, transport
+class ListError(Exception): code: str     # short safe code: no-key, deadline, http-<status>, shape, transport, too-large, bad-base-url
 class RequestLister:
     def __init__(self, base_url: str, key_file: str, *, per_call_timeout: float = 3.0,
                  transport: httpx.BaseTransport | None = None, clock=time.monotonic)
     def list(self, *, agent_slug: str, q: str | None, limit: int = 50, deadline: float | None = None) -> list
 ```
 Reads the key file on every call (rotation), never logs or repr()s it; https only; no redirects;
-timeout = min(per_call_timeout, deadline - clock()); non-200 -> ListError; body must be an object with a
+timeout = min(per_call_timeout, deadline - clock()); the body is streamed, capped at 4 MiB (`too-large`) and the
+wall clock is checked after each chunk (`deadline`); `trust_env=False`; non-200 -> ListError; body must be an object with a
 `requests` list.
 
 `bridge/app.py`

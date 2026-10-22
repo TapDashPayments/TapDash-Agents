@@ -405,7 +405,7 @@ Argument values and the key are never logged.
 | `no-request-id` | The delivery carried no gateway request id (only real deliveries have one; a preview or test does not) | Nothing for a test; for a real call, tell the developer |
 | `no-key` | `/etc/durable-park/audit_key` is missing, empty or unreadable | [Store the key](#the-gateway-bridge) |
 | `http-403` | The key lacks `request.read` or `request.read.unrouted` | Mint a key with the three permissions |
-| `deadline`, `transport`, `shape` | withHuman was slow (the bridge gives up after 3.5 s), unreachable, or answered something unexpected | Check withHuman's status; the call went to a person, so nothing is lost |
+| `deadline`, `transport`, `shape`, `too-large` | withHuman was slow (the bridge gives up after 3.5 s), unreachable, or answered something unexpected (or over 4 MiB) | Check withHuman's status; the call went to a person, so nothing is lost |
 
 (The tags are those of `bridge/app.py` and `bridge/whapi.py`; if `journalctl` shows another tag, trust the code.)
 
