@@ -290,3 +290,23 @@ def test_build_call_with_a_note_is_still_a_pure_function_of_the_row(tmp_path):
     bodies = [submission(build_call(row), gate.timeout, gate.context) for _ in range(2)]
     assert bodies[0] == bodies[1]
     assert bodies[0]["agent_reasoning"] == "Find customer 58"
+
+
+@pytest.mark.parametrize("nested_rules", [
+    {"$ref": "#/$defs/params"},
+    {"allOf": [{"properties": {"withhuman_context": {"type": "string"}}}]},
+    {"anyOf": [{"type": "object"}]},
+    {"oneOf": [{"type": "object"}]},
+    {"patternProperties": {"^withhuman_": {"type": "string"}}},
+])
+def test_lift_skips_a_key_whose_rules_might_declare_the_field(nested_rules):
+    schema = {"properties": {"params": nested_rules, "withhuman_context": {"type": "string"}}}
+    args = {"params": {"criteria": "x", "withhuman_context": "maybe the server's"}}
+    assert lift_gateway_context(args, schema) == args
+
+
+def test_lift_still_lifts_when_the_nested_rules_are_plain():
+    schema = {"properties": {"params": {"type": "object", "properties": {"criteria": {"type": "string"}}},
+                             "withhuman_context": {"type": "string"}}}
+    assert lift_gateway_context({"params": {"withhuman_context": "n"}}, schema) == {
+        "params": {}, "withhuman_context": "n"}

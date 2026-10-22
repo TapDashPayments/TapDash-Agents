@@ -41,6 +41,13 @@ Also found on the way:
   Fixed on branch `fix/withhuman-context-lift` (2026-10-22, not deployed yet): the park hook lifts it to the top
   level and shows it to the approver ([architecture section 4](architecture.md#4-tool-call-form-check-then-one-question-to-withhuman)).
   After deploy, confirm in Langfuse that the warning is gone.
+  **Deploy gate:** (1) before restarting the gateway with this change, run
+  `DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_reasoning_echo.py` on proto-agents (it sends a 2000-character
+  reasoning with spaces, newlines and non-ASCII to withHuman and expects an instant approval, which proves the AAP
+  exact-match check passes; if it fails, withHuman changes or caps `agent_reasoning`: lower `MAX_REASONING_CHARS`
+  and note the limit in `gateway-setup.md`). (2) Deploy only with no ledger row `parked`, `approved` or `executing`:
+  this change alters the AAP request body for rows with a note, so a row parked by the old code would not match its
+  approved request when the executor replays it.
 - `hermes plugins enable langfuse` created a new Hermes environment directory; the old ones remain. Clean up the old
   environments later, when disk space matters.
 

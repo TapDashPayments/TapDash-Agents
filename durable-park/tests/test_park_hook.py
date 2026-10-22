@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import logging
 import os
 import re
 import sys
@@ -1731,3 +1732,45 @@ def test_lift_never_runs_for_exempt_tools(env):
     hook = lifting_hook(env, schema_fn=lambda tool: seen.append(tool) or GW_SCHEMA)
     assert call(hook, "clarify", args=copy.deepcopy(NESTED)) is None
     assert seen == [] and env.provider.requests == {}
+
+
+def test_hermes_merge_of_the_modify_equals_the_lifted_args(env):
+    """Hermes shallow-merges ``result["args"]`` into the original args (it can add or replace a key, never delete):
+    the merge must be exactly the lifted call, with two nested dicts and a dropped non-string value."""
+    env.provider.auto = "approved"
+    original = {"zeta": {"k": 1, "withhuman_context": "from zeta"}, "alpha": {"withhuman_context": 7, "j": 2},
+                "plain": {"x": [1, 2]}, "n": 5}
+    expected = {"zeta": {"k": 1}, "alpha": {"j": 2}, "plain": {"x": [1, 2]}, "n": 5,
+                "withhuman_context": "from zeta"}
+    result = call(lifting_hook(env), GW_TOOL, args=copy.deepcopy(original))
+    assert result["action"] == "modify"
+    assert {**original, **result["args"]} == expected == result["args"]
+    assert env.provider.only().body["arguments"] == expected
+
+
+def test_default_schema_lookup_is_resolved_when_called(env, monkeypatch):
+    env.provider.auto = "approved"
+    seen = []
+    monkeypatch.setattr("durable_park.formcheck.registry_schema", lambda tool: seen.append(tool) or GW_SCHEMA)
+    assert call(make_hook(env), GW_TOOL, args=copy.deepcopy(NESTED)) == {"action": "modify", "args": LIFTED}
+    assert GW_TOOL in seen  # (the form check reads the same lookup)
+
+
+def test_default_hook_does_not_log_a_lift_failure(env, caplog):
+    caplog.set_level(logging.WARNING, logger="durable_park")
+    assert call(env.hook, "web_search", args={"query": "x"})["message"].startswith("PARKED P-")
+    assert [r for r in caplog.records if "could not lift" in r.getMessage()] == []
+
+
+def test_lift_failure_warning_has_no_note_and_no_argument_values(env, caplog):
+    def broken(tool):
+        raise RuntimeError("secret-detail-7788 " + NESTED["params"]["withhuman_context"])
+
+    caplog.set_level(logging.DEBUG, logger="durable_park")
+    args = {"params": {"customer_ref": "cust-ref-9911", "withhuman_context": "private note 4455"}}
+    assert call(lifting_hook(env, schema_fn=broken), GW_TOOL, args=args)["message"].startswith("PARKED P-")
+    warnings = [r.getMessage() for r in caplog.records if "could not lift" in r.getMessage()]
+    assert warnings == [f"could not lift withhuman_context for tool={GW_TOOL} (RuntimeError)"]
+    everything = "\n".join(r.getMessage() for r in caplog.records)
+    for secret in ("private note 4455", "cust-ref-9911", "secret-detail-7788", "Find customer 58"):
+        assert secret not in everything

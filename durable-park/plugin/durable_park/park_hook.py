@@ -15,7 +15,8 @@ from typing import Any, Callable, Iterable
 from agentapprovalprotocol import Allow, Deny, Pending
 
 from .breaker import Breaker
-from .formcheck import FormChecker, FormCheckUnavailable, registry_schema
+from . import formcheck
+from .formcheck import FormChecker, FormCheckUnavailable
 from .gatecall import build_call, lift_gateway_context, server_label
 from .ledger import Ledger, args_digest, call_key
 from .wake import one_line
@@ -132,13 +133,14 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                        foreign_hooks_fn: Callable[[], list[str]] | None = None,
                        session_key_fn: Callable[[], str] | None = None,
                        form_checker: FormChecker | None = None,
-                       schema_fn: Callable[[str], dict | None] = registry_schema) -> Callable[..., dict | None]:
+                       schema_fn: Callable[[str], dict | None] | None = None) -> Callable[..., dict | None]:
     """Build the hook. ``gate_factory`` is called per call (e.g. ``GateHolder.get``). ``form_checker``
     validates a form-checked call's arguments against the tool's rules before anything is recorded or asked
     (default: the rules Hermes registered for the tool). ``breaker`` (optional) stops asking withHuman while
     it is unreachable. ``foreign_hooks_fn`` (optional) names other plugins' ``pre_tool_call`` hooks that could
     change arguments after approval; while it names any, every non-exempt call is refused. ``schema_fn`` looks up
-    a tool's registered input rules (default: Hermes's registry); it decides whether a nested ``withhuman_context``
+    a tool's registered input rules (default: ``formcheck.registry_schema``, looked up when called);
+    it decides whether a nested ``withhuman_context``
     note is lifted to the top level (see ``lift_gateway_context``), and a lookup error means no lift."""
     checker = form_checker if form_checker is not None else FormChecker()
     exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
@@ -148,7 +150,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
         if not isinstance(args, dict):
             return args
         try:
-            return lift_gateway_context(args, schema_fn(tool_name))
+            return lift_gateway_context(args, (schema_fn or formcheck.registry_schema)(tool_name))
         except Exception as exc:  # noqa: BLE001 - the lift is a cleanup, never a gate
             log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)
             return args

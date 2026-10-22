@@ -112,13 +112,24 @@ def _declares_context(schema: Any) -> bool:
     return isinstance(props, dict) and CONTEXT_FIELD in props
 
 
+_INDIRECT_SCHEMA_KEYWORDS = ("$ref", "allOf", "anyOf", "oneOf", "patternProperties")
+
+
+def _may_own_context(schema: Any) -> bool:
+    """True when a nested object's own rules declare ``withhuman_context``, or might (they point elsewhere with
+    ``$ref``/``allOf``/``anyOf``/``oneOf`` or match names by pattern): when in doubt, the field is left alone."""
+    return _declares_context(schema) or (
+        isinstance(schema, dict) and any(key in schema for key in _INDIRECT_SCHEMA_KEYWORDS))
+
+
 def lift_gateway_context(args: Any, schema: dict | None) -> Any:
     """Move a ``withhuman_context`` note the model nested inside an argument object up to the top level.
 
     The withHuman gateway's schema has ``withhuman_context`` as a sibling of the tool's own fields and strips only
     the top-level one before forwarding, so a nested copy would reach the server as an unknown parameter. Only
     tools whose ``schema`` advertises the field at the top level are touched, one level deep, in sorted key order;
-    a nested object whose own schema declares the field is left alone. The first removed non-empty string becomes
+    a nested object whose own schema declares the field, or might (it uses
+    ``$ref``, ``allOf``, ``anyOf``, ``oneOf`` or ``patternProperties``), is left alone. The first removed non-empty string becomes
     the top-level note unless the top level already has the key (it always wins); other removed values are dropped.
     A JSON-string value is not parsed. Pure and idempotent: the input is never mutated (a deep copy is returned
     when anything is touched, the same object otherwise)."""
@@ -129,7 +140,7 @@ def lift_gateway_context(args: Any, schema: dict | None) -> Any:
     note: str | None = None
     for key in sorted(out, key=str):
         value = out[key]
-        if not isinstance(value, dict) or CONTEXT_FIELD not in value or _declares_context(props.get(key)):
+        if not isinstance(value, dict) or CONTEXT_FIELD not in value or _may_own_context(props.get(key)):
             continue
         removed = value.pop(CONTEXT_FIELD)
         if note is None and isinstance(removed, str) and removed:

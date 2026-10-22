@@ -472,3 +472,23 @@ def test_failed_reply_is_still_flagged_as_a_failure_by_hermes(env):
     reply = env.build()({"park_id": row.park_id})
     assert json.loads(reply)["status"] == "failed"
     assert _hermes_flags_failure(reply)
+
+
+def test_nested_note_call_parks_lifted_and_executor_consumes_the_same_request(env):
+    schema = {"type": "object", "properties": {"params": {"type": "object"}, "withhuman_context": {"type": "string"}}}
+    hook = make_pre_tool_call(env.ledger, env.gate_factory, RISKY, session_key_fn=lambda: SESSION_KEY,
+                              schema_fn=lambda tool: schema)
+    nested = {"params": {"customer_ref": "58", "withhuman_context": "Find customer 58"}}
+    lifted = {"params": {"customer_ref": "58"}, "withhuman_context": "Find customer 58"}
+    assert hook(tool_name=TOOL, args=nested, session_id="sess-1", tool_call_id="call-n")["action"] == "block"
+    (row,) = env.ledger.list_by_status("parked")
+    assert json.loads(row.args_json) == lifted
+    stored = env.provider.only()
+    assert stored.id == row.request_id and stored.body["agent_reasoning"] == "Find customer 58"
+    env.provider.decide(row.request_id, "approved")
+    assert env.ledger.transition(row.park_id, "parked", "approved")
+    out = run(env.build(), row.park_id)
+    assert out["status"] == "executed"
+    assert env.dispatched == [(TOOL, lifted)]  # the lifted call, not the nested one
+    assert len(env.provider.requests) == 1  # the replayed body matched: the SAME request was consumed
+    assert env.provider.only().id == row.request_id and env.provider.only().consumed_at is not None
