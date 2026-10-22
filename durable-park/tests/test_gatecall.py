@@ -799,27 +799,30 @@ def test_a_held_lock_never_blocks_the_caller_for_more_than_a_moment(tmp_path):
         status.record("t", "declared", "params")
         assert time.monotonic() - started < 1.0  # about 200 ms of retries, never an unbounded wait
         assert not (tmp_path / "lift_status.json").exists()
-        assert not (tmp_path / MARKER).exists()  # a mere lock timeout is not an outage yet
+        # The entry waits in memory, so a restart before the next write would lose it: the marker (which needs no
+        # lock) says so at once and the sweep alerts.
+        assert (tmp_path / MARKER).read_text().split()[1] == "LockTimeout"
     finally:
         holder.close()
-    status.flush()  # the next flush writes what was kept pending
+    status.flush()  # the next flush writes what was kept pending and removes the marker
     assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+    assert not (tmp_path / MARKER).exists()
 
 
-def test_a_lock_that_stays_held_past_the_next_flush_leaves_the_marker(tmp_path, monkeypatch):
+def test_a_lock_timeout_leaves_the_marker_at_once_and_the_next_good_write_removes_it(tmp_path, monkeypatch):
     monkeypatch.setattr("durable_park.gatecall.LIFT_LOCK_WAIT_SECONDS", 0.02)
     holder = hold_lock(tmp_path)
     try:
         status = LiftStatus(str(tmp_path / "lift_status.json"))
         status.record("t", "declared", "params")
-        assert not (tmp_path / MARKER).exists()
-        status.flush()
-        assert (tmp_path / MARKER).read_text().split()[1] == "LockTimeout"
+        assert (tmp_path / MARKER).read_text().split()[1] == "LockTimeout"  # no second failure needed
+        status.flush()  # still held: the marker stays
+        assert (tmp_path / MARKER).exists()
     finally:
         holder.close()
-    status.flush()
+    status.record("t", "lift_error")  # the next successful write (no flush needed)
     assert not (tmp_path / MARKER).exists()
-    assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+    assert sorted(e["kind"] for e in read_entries(tmp_path / "lift_status.json")) == ["declared", "lift_error"]
 
 
 def test_a_report_that_was_unreadable_is_flagged_so_the_sweep_hears_of_the_reset(tmp_path):

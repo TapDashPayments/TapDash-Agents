@@ -69,7 +69,7 @@ LIFT_CHECK_STATE = "lift_check_alert_state.json"  # the lift check itself failed
 LIFT_UNWRITABLE = "lift_status.unwritable"  # exists while the hook cannot write the lift report
 LIFT_UNWRITABLE_STATE = "lift_unwritable_alert_state.json"
 LIFT_REALERT = timedelta(hours=24)  # a problem that keeps happening is said again this often
-LIFT_NO_REPEAT = frozenset({"declared", "note_cut", "note_not_text"})  # said once per tool, never again
+LIFT_NO_REPEAT = frozenset({"declared"})  # intentional: said once, never again
 LIFT_EXAMPLES = 3  # at most this many other places are named in an aggregated line
 LIFT_TEXTS = {
     "declared": ("durable-park ALERT: {tool} has its own withhuman_context field inside {key}; the agent's note is "
@@ -408,7 +408,7 @@ def _lift_alert(ledger_path: str, now: datetime) -> None:
     except Exception:  # noqa: BLE001 - for example RecursionError on a file nested absurdly deep
         unreadable_reason = "unexpected format"
     current: dict[tuple[str, str, str, str], dict] = {}
-    said: dict[tuple[str, str, bool], list] = {}  # (tool, kind, repeat) -> [(key, text, count)] in report order
+    said: dict[tuple[str, str, bool], list] = {}  # (tool, kind, repeat) -> [(key, text, count, detail)] in report order
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("tool"), str) or not isinstance(entry.get("kind"), str):
             continue
@@ -425,24 +425,26 @@ def _lift_alert(ledger_path: str, now: datetime) -> None:
             current[ident]["count"] = max(current[ident]["count"], count)
             continue
         if before is None:
-            said.setdefault((ident[0], ident[1], False), []).append((key, text, count))
+            said.setdefault((ident[0], ident[1], False), []).append((key, text, count, detail))
             current[ident] = {"count": count, "at": stamp_now}
         else:
             last = _parse_stamp(before["at"])
             if (count > before["count"] and entry["kind"] not in LIFT_NO_REPEAT
                     and (last is None or now - last >= LIFT_REALERT)):
-                said.setdefault((ident[0], ident[1], True), []).append((key, text, count))
+                said.setdefault((ident[0], ident[1], True), []).append((key, text, count, detail))
                 current[ident] = {"count": count, "at": stamp_now}
             else:  # same leak, said recently or no new occurrence; a smaller count (file restarted) lowers the base
                 current[ident] = {"count": min(count, before["count"]), "at": before["at"] or stamp_now}
     for (_tool, _kind, repeat), places in said.items():
-        first_key, text, first_count = places[0]
+        first_key, text, first_count, first_detail = places[0]
         if repeat:
             text = text.replace("durable-park ALERT:", f"durable-park ALERT (still happening, {first_count} times):", 1)
         others = places[1:]
         if others:
-            examples = [_clean(other_key, 200) for other_key, _text, _count in others if other_key][:LIFT_EXAMPLES]
-            text += f" (+{len(others)} more places" + (f", e.g. {', '.join(examples)}" if examples else "") + ")"
+            examples = [_clean(other_key, 200) for other_key, _text, _count, _detail in others if other_key][:LIFT_EXAMPLES]
+            reasons = list(dict.fromkeys(_clean(d, 100) for _k, _t, _c, d in others if d and d != first_detail))
+            text += (f" (+{len(others)} more places" + (f", e.g. {', '.join(examples)}" if examples else "")
+                     + (f"; other reasons: {', '.join(reasons)}" if reasons else "") + ")")
         print(text, flush=True)
     if unreadable_reason is not None:
         if not unreadable_alerted:

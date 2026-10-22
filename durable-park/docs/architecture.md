@@ -178,7 +178,7 @@ flowchart LR
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
 | bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). Its digest comparison (`ledger.normalize_args`) drops the top-level `withhuman_context`, which is why the note the park hook moved to the top level (and the gateway strips before forwarding) does not change the match: the park row and the delivered call agree. |
 | bridge check | `deploy/bridge_check.py` | Read-only isolation check, run as root by `configure_hermes.sh` right after the bridge answers 401 (the deploy stops if it fails) and by hand ([runbook](runbook.md#health-check)). Seven checks: the socket unit is active and listens on exactly `127.0.0.1:8791`; the service is active, its main process runs as `dpbridge` and the `Groups:` line of its `/proc/<pid>/status` is empty or only `dpbridge`'s own gid; only systemd and that process hold the port; no other process runs `bridge.app`; no user-level `durable-park-bridge*` unit exists for any user; `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; `bridge_secret` is `root:root 0600` (stat only, never read). |
-| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, and once per (tool, kind, key, detail) when the park hook reports that the agent's `withhuman_context` note was not moved, was dropped or could not be checked for (`lift_status.json`; one line per tool and kind that names the first place and up to three more; a tool's own field is said once; and once when `lift_status.unwritable` says the report cannot be saved, with a line when it can again; [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
+| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, and once per (tool, kind, key, detail) when the park hook reports that the agent's `withhuman_context` note was not moved, was dropped, could not be checked for, was cut to 2000 units for the approver (`note_cut`) or was empty or not text (`note_not_text`) (`lift_status.json`; one line per tool and kind that names the first place and up to three more; a tool's own field is said once; a problem that keeps growing is said again after 24 hours; and once when `lift_status.unwritable` says the report cannot be saved, with a line when it can again; [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
 
 ### Plugin settings
 
@@ -503,67 +503,76 @@ flowchart TD
   busy -->|"no"| parked["Attach request id<br/>Block: PARKED, a person decides"]
 ```
 
-- **Lifting the note.** The withHuman gateway's tool schema is `{params: {...}, withhuman_context: string}`, and the
-  gateway strips only the top-level `withhuman_context` before forwarding. When the model nests the note inside an
-  argument object (`{"params": {..., "withhuman_context": "..."}}`), the QuickBooks server would get an unknown
-  parameter and answer with an "IGNORED" warning that wastes tokens, and the approver would not see the reason.
-  `gatecall.lift_gateway_context` moves it up one level for tools whose registered rules (`schema_fn`, default the
-  Hermes registry) list `withhuman_context` at the top level: sorted key order, the first non-empty string wins, an
-  existing top-level note always wins. For a nested object that holds a note, its own rules decide, and **the note is
-  lifted unless the rules positively declare their own `withhuman_context`** (in `properties`, a matching
-  `patternProperties` pattern, any `allOf`/`anyOf`/`oneOf` branch, or a local `$ref` such as `#/$defs/X` resolved inside
-  the tool's rules): then the server really has that field and the key is left alone. Rules that cannot be judged (a
-  remote or unresolvable `$ref`, an invalid pattern, a `$ref` cycle, nesting deeper than 10) lift too. The move is one
-  level deep; deeper notes are found and reported, not moved. Arguments that arrive as JSON text (`pre_tool_call`
-  fires before Hermes's type fixing) are put through Hermes's own coercion (`formcheck.hermes_coerce`, on a copy)
-  when a string argument decodes to an object holding the note, and **only the values of those text keys are taken
-  from the coerced copy**: every other key keeps the model's own value, and a coerced copy that has no object under
-  the same key name (Hermes renames sanitized keys back to wire names) leaves that key unread. Before a `modify` is
-  returned the hook checks that Hermes's merge (`{**original, **lifted}`) equals the lifted call exactly (a modify
-  can neither delete nor rename a key); if not, the original arguments are used.
-  **Every case the hook can detect where the note is not moved, is dropped, or the check could not run ends as a chat
-  alert.** The hook records it once the call has passed its form check (a refused call never reaches a server) in
-  `lift_status.json` (next to the ledger; `gatecall.LiftStatus`: tool, kind, key, detail, `first_seen`, `last_seen`,
-  `count`; key names are chosen by the model and can themselves be data, but no value or note text is ever stored; every
-  list item is written `[*]`, so a note in each of 30 items is one place; at most 200 entries). Writing is careful:
-  the file is replaced under a lock file that merges with other processes' entries; the lock is only tried, never
-  waited for (a tool call waits at most 0.2 s, then the entries stay in memory and are written on the next record or
-  by the 30-minute self-check thread); an entry that has not been written yet is never dropped (past 200 waiting
-  entries the newcomers are counted in one `*` entry per kind); an unreadable report is kept as
-  `lift_status.json.corrupt` and the new one starts with a `report_reset` entry. When the report **cannot be written**
-  (wrong owner, a leftover path that is a directory, a lock that stays held past the next 30-minute tick), the hook
-  also writes a small marker file `lift_status.unwritable` next to the ledger (UTC time and error type, nothing
-  else); the next successful write removes it. The sweep reads the marker and alerts once per outage ("lift problems
-  could not be saved ...") and says when it is gone. A key spelling is the note when, with every character that is
-  not a letter or digit removed and lower-cased, it reads `withhumancontext`
-  (`withHumanContext`, `with-human-context`); only the exact `withhuman_context` is ever moved, the other spellings
-  are found and reported. The sweep alerts once per (tool, kind, key, detail) and prints one line per tool and kind
-  (the first place, then `(+N more places, e.g. a.b, c.d)` with at most three examples); it repeats a problem after 24
-  hours while its count keeps growing, except `declared`, `note_cut` and `note_not_text`, which are said once per tool; it also alerts once when the report is
-  unreadable or the check itself fails ([runbook](runbook.md#the-agents-note-could-not-be-moved)). Kinds: `declared`
-  (a key was left alone because its rules declare the field; the note goes to the server, not the approver),
-  `note_dropped` (a nested note was removed but not shown to the approver: not text, empty or blank, another note was
-  already at the top, more than one note), `schema_unavailable` (a gateway tool whose rules could not be read),
-  `args_unreadable` (a JSON-text argument that Hermes's type fixing could not turn into an object under the same key),
-  `lift_error` (any other error, or a lift that failed the merge check), `note_left_inside` (a note is still inside
-  the final arguments, found by a bounded walk of dicts, lists and JSON text at any depth, in any spelling; also for a
-  gateway tool whose rules do not show the field; text that is not JSON but merely mentions the field name is reported
-  too), `check_incomplete` (the walk hit its bound: depth 50, 10 000 nodes or 20 hits), `report_reset`, `note_cut` (the top-level note is longer than 2000 UTF-16
-  code units, so the approver sees it shortened; the hook works this out from the final arguments with the same helper
-  `build_call` cuts with, and `build_call` itself records nothing) and `note_not_text` (the top-level note is empty,
-  blank or not text, so the approver sees no reason). The call goes
-  on with the lifted arguments, or with the original ones when the lift could not run (`schema_unavailable`,
-  `args_unreadable`, `lift_error`); approval is unaffected. A replay of the same `tool_call_id` whose lift comes out
-  differently from the stored row (the rules could be read on one attempt and not on the other) is blocked with its
-  own message (the tool's rules changed since the call was parked; the call was not run), never run. What is still
-  **not** covered: a note hidden somewhere the walk cannot read (for example inside a string in another encoding).
-  The remaining uncovered case is the ledger directory itself not being writable, which the existing form-check stale-status alert covers.
-  The lifted arguments are the
-  only arguments from then on: the form check, the row (digest and stored args, so the executor later dispatches the
-  lifted call), the request to withHuman, and, for an instant `Allow`, the `{"action": "modify", "args": ...}` the
-  hook returns (Hermes shallow-merges it into the call; nothing is returned when nothing was lifted). The top-level
-  note goes to the approver as the request's reasoning (`gatecall.build_call`, cut to 2000 UTF-16 code units and never
-  in the middle of a pair, a pure function of the row).
+- **Lifting the note.** Plain version first, details below.
+  - *The problem.* The model writes a short reason for each risky call in a field called `withhuman_context`. The
+    withHuman gateway wants that field at the top level of the call (next to `params`) and shows it to the approver.
+    Models often tuck it inside `params`. Then the approver never sees the reason, and the QuickBooks server complains
+    ("IGNORED") and wastes tokens.
+  - *The fix.* `gatecall.lift_gateway_context` moves a note found one level down (inside `params` or another top-level
+    key) up to the top. It only does this for gateway tools whose rules list `withhuman_context` at the top level.
+    If several notes are found, the first non-empty text (keys in sorted order) wins; a note already at the top always
+    wins.
+  - *When it leaves a note alone.* If the tool's own rules for that key say the server really has its own
+    `withhuman_context` there, the note stays (kind `declared`). The rules are read in `properties`, a matching
+    `patternProperties` pattern, any `allOf`/`anyOf`/`oneOf` branch and a local `$ref` such as `#/$defs/X`. A key the
+    rules do not list (Hermes may show the model a cleaned-up spelling) counts as declared when any other property
+    declares it. Rules that cannot be judged (a remote `$ref`, a bad pattern, a `$ref` cycle, nesting deeper than 10) do
+    not stop the move.
+  - *Arguments that are JSON text.* `pre_tool_call` fires before Hermes fixes argument types, so a `params` that is a
+    string holding JSON is run through Hermes's own fixer (`formcheck.hermes_coerce`, on a copy). Only the values of
+    those text keys are taken from the copy; every other key keeps the model's own value. If the copy has no object
+    under the same key name, that key is left as it was (kind `args_unreadable`).
+  - *One safe version.* From the lift on, the lifted arguments are THE arguments: the form check, the ledger row (its
+    digest and stored arguments, so the executor later runs the lifted call), the request to withHuman and, for an
+    instant `Allow`, the `{"action": "modify", "args": ...}` the hook returns (Hermes shallow-merges it into the call;
+    nothing is returned when nothing was lifted). Before a `modify` the hook checks that Hermes's merge
+    (`{**original, **lifted}`) equals the lifted call exactly and that no key but the note was added; if not, the
+    original arguments are used (kind `lift_error`).
+  - *What the approver sees.* The top-level note goes to the approver as the request's reasoning (`gatecall.build_call`,
+    a pure function of the row): at most 2000 UTF-16 code units, never cut in the middle of an emoji.
+  - *Nothing fails silently.* Every case the hook can detect becomes a chat alert from the sweep (list below).
+    The hook records the problem once the call has passed its form check (a refused call never reaches a server) in
+    `lift_status.json` next to the ledger (`gatecall.LiftStatus`: tool, kind, key, detail, `first_seen`, `last_seen`,
+    `count`; at most 200 entries; never a value or note text; key names are chosen by the model and can themselves be
+    data; every list item is written `[*]`, so a note in each of 30 items is one place).
+  - *The kinds of problem:*
+    - `declared`: a key was left alone because its rules declare the field; the note goes to the server, not the approver.
+    - `note_dropped`: a nested note was removed but not shown to the approver (not text; empty or blank; another note
+      was already at the top; more than one note).
+    - `schema_unavailable`: a gateway tool whose rules could not be read (the call goes on with the original arguments).
+    - `args_unreadable`: a JSON-text argument that Hermes's fixer could not turn into an object under the same key (original arguments).
+    - `lift_error`: any other error, or a lift that failed the merge check (original arguments).
+    - `note_left_inside`: a note is still inside the final arguments. A bounded walk looks through dicts, lists and
+      JSON text at any depth and in any spelling (a key is the note when, with everything that is not a letter or digit
+      removed and lower-cased, it reads `withhumancontext`: `withHumanContext`, `with-human-context`). Text that is not
+      JSON but mentions the field name is reported too. Only the exact `withhuman_context` is ever moved. Also used for
+      a gateway tool whose rules do not show the field.
+    - `check_incomplete`: the walk hit its bound (depth 50, 10 000 nodes or 20 hits).
+    - `report_reset`: the report was unreadable at write time, was kept as `lift_status.json.corrupt`, and a new one started.
+    - `note_cut`: the top-level note is longer than 2000 UTF-16 code units, so the approver sees it shortened. The hook
+      works this out from the final arguments with the same helper `build_call` cuts with; `build_call` records nothing.
+    - `note_not_text`: the top-level note is empty, blank or not text, so the approver sees no reason.
+  - *How the sweep says it.* One alert per (tool, kind, key, detail), printed as one line per tool and kind (the first
+    place, then `(+N more places, e.g. a.b, c.d)` with at most three examples, and for `note_dropped` the other
+    reasons). A problem that keeps growing is said again after 24 hours; `declared` is said once. The sweep also alerts
+    once when the report is unreadable or the check itself fails
+    ([runbook](runbook.md#the-agents-note-could-not-be-moved)).
+  - *Careful writing.* The report is replaced under a lock file that merges with other processes' entries. The lock is
+    only tried: a tool call waits at most 0.2 s for it and never blocks the call beyond that, and the entries
+    then stay in memory and are written on the next record or by the 30-minute self-check thread. An entry that has not
+    been written is never dropped (past 200 waiting entries, newcomers are counted in one `*` entry per kind).
+  - *If the report cannot be written* (wrong owner, a path that is a directory, a lock held too long), the hook writes
+    a small marker file `lift_status.unwritable` next to the ledger at once (UTC time and error type, nothing else; it
+    needs no lock). A lock timeout counts too, because the waiting entries would be lost if the gateway restarted. The
+    next successful write removes the marker. The sweep alerts once per outage ("lift problems could not be saved
+    ...") and says when it is gone.
+  - *A replay.* If the model replays a `tool_call_id` and the lift now comes out differently from the stored row (the
+    rules could be read once and not the other time), the call is blocked with its own message (the tool's rules
+    changed since the call was parked; the call was not run). It never runs.
+  - *Calls that go on.* With the lifted arguments, or with the original ones when the lift could not run
+    (`schema_unavailable`, `args_unreadable`, `lift_error`). Approval is unaffected.
+  - *Not covered.* A note hidden where the walk cannot read it (for example inside a string in another encoding).
+    The remaining uncovered case is the ledger directory itself not being writable, which the existing form-check stale-status alert covers.
 - **Allow** means the SDK already consumed the approval. If the row cannot move to `allowed` (the sweep cancelled
   it meanwhile), the call is blocked and the spent approval is not used again.
 - **Deny** with status `error` (withHuman unreachable, credential refused, bad answer) counts as a breaker failure;
@@ -637,8 +646,8 @@ and re-run against the real code on the VM (2026-10-21):
 | Bridge cannot confirm the gateway call (no matching consumed park, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
 | The bridge process dies or is restarted | systemd keeps listening on `127.0.0.1:8791` (the socket unit holds the port) and restarts the service after 1 s (`Restart=always`); a delivery meanwhile waits in the socket's backlog or times out, and withHuman asks a person instead. Nobody else can bind the port and answer, for as long as the socket unit is neither stopped nor failed. systemd fails a socket unit when the service it activates trips its start limit (`service-start-limit-hit`, with `Accept=no`) and when the socket trips its own trigger limit, and either frees the port; so the service has `StartLimitIntervalSec=0` (systemd keeps retrying every second, however long the start keeps failing) and the socket has `TriggerLimitIntervalSec=0`. Only an admin's `systemctl stop` or `disable --now` of the socket frees the port, and `bridge_check.py` check 1 fails when it is not active. | Nobody; check the unit if it keeps restarting ([runbook](runbook.md#health-check)) |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
-| The agent's `withhuman_context` note was not moved to the top level, was dropped, or could not be checked for (rules or arguments unreadable, an error, a tool that declares its own field, a note left inside or removed, a search cut short, a note shortened or missing for the approver) | The call goes on (with the lifted arguments, or the original ones when the lift could not run); approval is unaffected; the note may reach the server instead of the approver. The sweep alerts once per tool, kind, key and detail (one line per tool and kind), again after 24 hours while it keeps growing (never for a tool's own field). | See [runbook](runbook.md#the-agents-note-could-not-be-moved) |
-| `lift_status.json` or its lock cannot be written (wrong owner, a path in the way, a lock held for long) | The hook keeps the problems in memory (never dropping an unwritten one), never blocks the tool call for more than 0.2 s, and leaves the marker `lift_status.unwritable`. The sweep alerts once and says when it is gone. If the ledger directory itself is not writable, the form-check report goes stale and that alert fires instead. | Fix the permissions ([runbook](runbook.md#the-agents-note-could-not-be-moved)) |
+| The agent's `withhuman_context` note was not moved to the top level, was dropped, or could not be checked for (rules or arguments unreadable, an error, a tool that declares its own field, a note left inside or removed, a search cut short, a note shortened or missing for the approver) | The call goes on (with the lifted arguments, or the original ones when the lift could not run); approval is unaffected; the note may reach the server instead of the approver. The sweep alerts once per tool, kind, key and detail (one line per tool and kind), again after 24 hours while it keeps growing (not for a tool's own field). The same sweep reports a top-level note cut to 2000 units for the approver (`note_cut`) and one that is empty or not text (`note_not_text`). | See [runbook](runbook.md#the-agents-note-could-not-be-moved) |
+| `lift_status.json` or its lock cannot be written (wrong owner, a path in the way, a lock held for long) | The hook keeps the problems in memory (never dropping an unwritten one), waits at most 0.2 s for the lock and never blocks the call beyond that, and leaves the marker `lift_status.unwritable` at once (also after a lock timeout). The sweep alerts once and says when it is gone. If the ledger directory itself is not writable, the form-check report goes stale and that alert fires instead. | Fix the permissions ([runbook](runbook.md#the-agents-note-could-not-be-moved)) |
 | A replay of a tool call id lifts differently from the stored row | Blocked with "the rules for the tool changed since this call was first checked ... the call was not run"; the row is left alone. | Ask the model to make the call again |
 | Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |

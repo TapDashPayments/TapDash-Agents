@@ -401,7 +401,8 @@ class LiftStatus:
     Several processes may write the file (the gateway, a CLI run that loads the plugin): every write takes an
     ``flock`` on a sidecar lock file, re-reads the file, adds this process's new occurrences to what is there and
     replaces it atomically, so nobody drops another's entries. The lock is only tried, never waited for: a tool
-    call waits at most 0.2 s for it and the entries then stay pending (written on the next record or ``flush``). A
+    call waits at most 0.2 s for it and the entries then stay pending (written on the next record or ``flush``);
+    the marker below is written at once then, so a restart cannot lose them silently. A
     file that cannot be parsed is kept as ``lift_status.json.corrupt`` before it is replaced, and the replacement
     holds a ``report_reset`` entry so the sweep says so.
 
@@ -409,8 +410,7 @@ class LiftStatus:
     self-check thread calls it every 30 minutes). One error is logged per outage, and a marker file
     ``lift_status.unwritable`` (UTC time and error type, nothing else) is written next to the report for the sweep
     to alert on, unless the whole directory is unwritable (the form-check report goes stale then and says so). A
-    mere lock timeout leaves no marker unless it fails again on a later ``flush``. The next successful write (or
-    ``flush``) removes the marker. A repeat of a problem already in the file rewrites it only every 60 s (the
+    lock timeout leaves it too (the entries wait in memory). The next successful write (or ``flush``) removes it. A repeat of a problem already in the file rewrites it only every 60 s (the
     count lags; ``flush`` catches up). Thread-safe and never raises. ``path=None`` only remembers."""
 
     def __init__(self, path: str | None = None, clock: Callable[[], float] = time.monotonic):
@@ -477,7 +477,7 @@ class LiftStatus:
                 due = (ident not in self._known or self._write_failed or self._last_write is None
                        or self._clock() - self._last_write >= LIFT_REWRITE_SECONDS)
                 if due:
-                    self._flush_locked(from_tick=False)
+                    self._flush_locked()
         except Exception as exc:  # noqa: BLE001 - reporting must never break a tool call
             log.error("could not record a lift problem (%s)", type(exc).__name__)
 
@@ -488,7 +488,7 @@ class LiftStatus:
             with self._lock:
                 marker = self.marker_path
                 if self._pending or (marker is not None and os.path.lexists(marker)):
-                    self._flush_locked(from_tick=True)
+                    self._flush_locked()
         except Exception as exc:  # noqa: BLE001
             log.error("could not flush lift problems (%s)", type(exc).__name__)
 
@@ -522,7 +522,7 @@ class LiftStatus:
         except OSError as exc:  # the marker then stays and the sweep keeps alerting: loud, not silent
             log.error("could not remove %s (%s)", LIFT_UNWRITABLE_FILENAME, type(exc).__name__)
 
-    def _flush_locked(self, from_tick: bool) -> None:
+    def _flush_locked(self) -> None:
         if not self._path:
             self._known |= set(self._pending)
             self._pending.clear()
@@ -576,9 +576,9 @@ class LiftStatus:
             if not was_failed:
                 log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
             self._write_failed = True
-            # A busy lock is normal for a moment: it is an outage only when a later flush fails too.
-            if not isinstance(exc, LockTimeout) or (from_tick and was_failed):
-                self._write_marker(exc)
+            # The entries now wait in memory, where a restart would lose them: say so at once (the marker needs no
+            # lock; the next successful write removes it). A lock timeout counts, however brief it may turn out.
+            self._write_marker(exc)
 
 
 def build_call(row: ParkRow) -> Call:

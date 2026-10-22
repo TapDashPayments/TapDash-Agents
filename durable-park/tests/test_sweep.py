@@ -898,7 +898,8 @@ def test_places_of_different_tools_and_kinds_stay_separate_lines(world, monkeypa
     assert out.splitlines() == [
         LIFT_TEXTS["note_left_inside"].format(tool=LIFT_TOOL, key="a") + " (+1 more places, e.g. b)",
         LIFT_TEXTS["note_left_inside"].format(tool=other, key="a"),
-        LIFT_TEXTS["note_dropped"].format(tool=LIFT_TOOL, key="a", reason="empty") + " (+1 more places, e.g. b)"]
+        LIFT_TEXTS["note_dropped"].format(tool=LIFT_TOOL, key="a", reason="empty")
+        + " (+1 more places, e.g. b; other reasons: not text)"]
 
 
 def test_a_repeat_of_many_places_is_one_line_too(world, monkeypatch, capsys, tmp_path):
@@ -951,6 +952,24 @@ def test_no_marker_and_no_state_is_silent(world, monkeypatch, capsys, tmp_path):
     assert runs(world, monkeypatch, capsys, 2) == ["", ""]
 
 
+def test_a_lock_timeout_marker_is_alerted_by_the_sweep(world, monkeypatch, capsys, tmp_path):
+    """End to end: a held lock leaves the marker with the hook's own recorder, the sweep says so, and says when the
+    next good write removed it."""
+    import fcntl
+    from durable_park.gatecall import LiftStatus
+    monkeypatch.setattr("durable_park.gatecall.LIFT_LOCK_WAIT_SECONDS", 0.02)
+    with open(tmp_path / "lift_status.json.lock", "a") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        status = LiftStatus(str(tmp_path / "lift_status.json"))
+        status.record(LIFT_TOOL, "note_left_inside", "params")
+        first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [UNWRITABLE.format(error="LockTimeout")] and second == ""
+    status.flush()
+    recovered, = runs(world, monkeypatch, capsys, 1)
+    assert recovered.splitlines() == ["durable-park: lift problems can be saved again.",
+                                      LIFT_TEXTS["note_left_inside"].format(tool=LIFT_TOOL, key="params")]
+
+
 def test_a_failing_marker_check_never_hides_the_lift_problems(world, monkeypatch, capsys, tmp_path):
     """The marker check and the report check are independent: when the first cannot run (here its state file
     is a directory), the second still alerts, and the failure itself is reported once."""
@@ -980,14 +999,26 @@ def test_problems_beyond_200_waiting_ones_get_their_own_plain_alert(world, monke
                  "for the approver."),
     ("note_not_text", "durable-park ALERT: the agent's note for {tool} was empty or not text, so the approver saw "
                       "no reason.")], ids=["note_cut", "note_not_text"])
-def test_note_cut_and_note_not_text_are_said_once_per_tool_and_never_repeated(world, monkeypatch, capsys, tmp_path,
-                                                                             kind, text):
+def test_note_cut_and_note_not_text_are_said_per_tool_and_again_after_24h_while_they_grow(
+        world, monkeypatch, capsys, tmp_path, kind, text):
     write_lift(tmp_path, (LIFT_TOOL, kind, ""), count=2)
     first, second = runs(world, monkeypatch, capsys, 2)
     assert first.splitlines() == [text.format(tool=LIFT_TOOL)] and second == ""
     write_lift(tmp_path, (LIFT_TOOL, kind, ""), count=900)
-    set_alerted_at(tmp_path, 100)
-    assert runs(world, monkeypatch, capsys, 1) == [""]  # no daily repeat
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # grew, but said recently
+    set_alerted_at(tmp_path, 25)
+    again, = runs(world, monkeypatch, capsys, 1)
+    assert again.splitlines() == [text.format(tool=LIFT_TOOL).replace(
+        "durable-park ALERT:", "durable-park ALERT (still happening, 900 times):", 1)]
     write_lift(tmp_path, (LIFT_TOOL, kind, ""), ("mcp__wh__quickbooks__get_bill", kind, ""), count=900)
     other, = runs(world, monkeypatch, capsys, 1)
     assert other.splitlines() == [text.format(tool="mcp__wh__quickbooks__get_bill")]  # another tool is new
+
+
+def test_an_aggregated_note_dropped_line_shows_each_distinct_reason(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "note_dropped", "a", "empty"), (LIFT_TOOL, "note_dropped", "b", "not text"),
+               (LIFT_TOOL, "note_dropped", "c", "empty"), (LIFT_TOOL, "note_dropped", "d", "more than one note"))
+    first, = runs(world, monkeypatch, capsys, 1)
+    assert first.splitlines() == [
+        LIFT_TEXTS["note_dropped"].format(tool=LIFT_TOOL, key="a", reason="empty")
+        + " (+3 more places, e.g. b, c, d; other reasons: not text, more than one note)"]

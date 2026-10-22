@@ -68,7 +68,8 @@ Also found on the way:
   **Known gaps of the note lift (not fixed, all safe):** (a) A note in text that is neither JSON nor mentions the field
   name, or inside a deeply nested JSON text that fails to decode, is not found. (b) The form self-check thread
   retries a lift report that could not be written only where it runs (a gateway with a form-checked tool); the next
-  problem retries too. (c) Arguments that are not JSON text are digested by the hook before Hermes's own dispatch coercion (`"5"` to `5`,
+  problem retries too. Until a write works, problems wait in the gateway's memory and a restart loses them; that is
+  why the unwritable marker is written at once, so the sweep still says something. (c) Arguments that are not JSON text are digested by the hook before Hermes's own dispatch coercion (`"5"` to `5`,
   `arg_coercion.py`) runs, so the bridge can see a mismatch and a person is asked a second time (safe, noisy; older
   than the lift).
 - `hermes plugins enable langfuse` created a new Hermes environment directory; the old ones remain. Clean up the old
