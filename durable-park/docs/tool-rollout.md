@@ -1,5 +1,7 @@
 # Toolset Rollout Guide & Profile Scoping
 
+In plain English: this page explains how we turn on Hermes tools one group at a time, and how each tool call carries the user and profile so withHuman can apply the right approval rule.
+
 This document tracks the rollout of Hermes toolsets through `durable-park` and `withHuman` pipeline rules.
 
 ## Profile Scoping in AAP Context
