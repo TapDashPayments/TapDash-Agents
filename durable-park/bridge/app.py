@@ -233,8 +233,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--api-base", default=os.environ.get("DURABLE_PARK_WH_API_BASE", DEFAULT_API_BASE),
                         help="withHuman API base URL, https only (env DURABLE_PARK_WH_API_BASE)")
     parser.add_argument("--key-file", default=os.environ.get("DURABLE_PARK_WH_KEY_FILE", DEFAULT_KEY_FILE),
-                        help="file holding the withHuman organization key, read on every call "
-                             "(env DURABLE_PARK_WH_KEY_FILE)")
+                        help="file holding the withHuman organization key, re-read on every call (under the "
+                             "systemd unit it is systemd's copy made at service start, so a rotated key needs "
+                             "a service restart) (env DURABLE_PARK_WH_KEY_FILE)")
     args = parser.parse_args(argv)
     if args.systemd_socket:
         if args.host is not None or args.port is not None:

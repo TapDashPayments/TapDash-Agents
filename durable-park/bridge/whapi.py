@@ -1,8 +1,10 @@
 """Read-only lister of withHuman approval requests for the bridge.
 
 The bridge asks withHuman (``GET <base>/requests``) instead of reading the local ledger, with the organization
-key in ``/etc/durable-park/audit_key`` (it can read requests and audit events, nothing else). The key file is
-read on every call so a rotation takes effect without a restart; the key is never logged, never part of an
+key in ``/etc/durable-park/audit_key`` (it can read requests and audit events, nothing else). The file it is
+given is re-read on every call. Under the systemd unit that file is systemd's private copy
+(``LoadCredential``), made when the service starts, so rotating ``/etc/durable-park/audit_key`` reaches the
+bridge only after ``systemctl restart durable-park-bridge``. The key is never logged, never part of an
 exception message and never in a ``repr``. Any failure is a ``ListError`` with a short safe ``code``; the
 caller turns it into "ask a human".
 """
