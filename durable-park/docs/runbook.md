@@ -1,5 +1,9 @@
 # durable-park runbook
 
+In plain English: this is the admin's manual for the test server. It says how to check that everything is healthy,
+how to put a change live, what each alert means and what to do about it, and how to roll back. If something looks
+wrong, start with the [Health check](#health-check).
+
 How to check, change and fix durable-park on the test VM. For how it works, see [architecture.md](architecture.md).
 
 - [Access and ground rules](#access-and-ground-rules)
@@ -23,8 +27,8 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 | Repo on the VM | `/home/hermes/tapdash-agents` (a clone of this repo). `/home/hermes/durable-park` links to its `durable-park/` folder. |
 | GitHub CLI | `gh` 2.46.0 (apt). Signed in as the admin user `ubuntu` only, which is also the user the connector runs as, so `gh` works directly from the connector; `hermes` is not signed in (`gh auth status` as `hermes` says so). Pull requests are opened with that `gh`: [Open a pull request from the VM](#open-a-pull-request-from-the-vm). |
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
-| Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where alerts go). |
-| Teams bot | "TapDash Agent", served by the same `hermes` gateway on `127.0.0.1:3978`; the devtunnel `proto-agents-bot` (user `ubuntu`, unit `devtunnel-hermes`) forwards to it. |
+| Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where the sweep's cron job delivers alerts; alerts also go to Teams, see [live settings](#live-hermes-settings-on-proto-agents)). |
+| Teams bot | "TapDash Agent", served by the same `hermes` gateway on `127.0.0.1:3978`; the devtunnel `proto-agents-bot` forwards to it. The tunnel runs as user `hermes` (systemd user unit `devtunnel-hermes`, program `/usr/local/bin/devtunnel`; moved from `ubuntu` on 2026-10-22). Manage it like the other `hermes` units: `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user <status\|restart> devtunnel-hermes`. |
 | Web dashboard | <https://proto-agents.taila95862.ts.net:8443/> (HTTPS through Tailscale Serve; tailnet only, **not** Funnel), user `TapDash`; systemd user unit `hermes-dashboard` of user `hermes`. Fallback, plain HTTP by IP only: `http://100.99.171.75:9119/`. How it is wired and how to undo it: [Dashboard over HTTPS](#dashboard-over-https). |
 | Claude connector "Proto-Agents" | system service `hermes-shell-mcp`, runs as user `ubuntu` from `/home/ubuntu/hermes-shell-mcp` (own venv, fastmcp 4.1.1) since 2026-10-22 02:22 UTC; `127.0.0.1:8792`, Tailscale Funnel path `/hermes-shell`, GitHub OAuth for one allowed account. Stopping it cuts Claude's access to the VM. Backup of the previous unit file: `/root/hermes-shell-mcp.service.bak`. If a connector login ever fails with `PathSecurityError` (entries resolve outside the new root), do not copy fastmcp's OAuth store (`~/.local/share/fastmcp/oauth-proxy`) between users: move it aside and re-authorize the connector in Claude, which creates a fresh store. |
 
@@ -44,27 +48,23 @@ Rules:
   2026-10-22 they no longer need the admin at a terminal: the connector runs as `ubuntu`, which has passwordless sudo, so
   Claude can run them. Keep the rule that the admin confirms risky actions first (anything destructive, hard to undo, or
   that touches secrets, sudoers, sshd, Tailscale or a running gateway). The agent (`hermes`) has no sudo and no terminal tool.
-- **One agent, v1 lockdown re-applied (since 2026-10-21 03:16 UTC).** The `hermes` install is the only agent on the VM.
-  Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
-  `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (on every platform key; `hermes_tool_policy.py check` prints the key count and ends `ok`).
-  Hermes approvals stay off. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC, 2026-10-21 10:22 PM ET;
-  [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1): `hermes` no longer has sudo. The ledger is
-  still owned by `hermes` (Clean Setup Phase 2, §4.5, not done), so the lockdown is still a configuration guard for the
-  ledger, not a permission boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay
-  off until Phase 2. Re-running `configure_hermes.sh` or
-  `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
-  row" rule applies. **Before you run `configure_hermes.sh`, check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway`** ([Before you run the configure script](#before-you-run-the-configure-script)): its `hermes plugins enable`
-  step would otherwise reload every plugin in the running gateway ([warning](#never-change-plugins-while-the-gateway-runs),
-  [backlog](backlog.md#before-real-books), item 12). With the gateway stopped, step 7 of the script finds no gateway process (`MainPID` 0) and restarts `user@1001.service` instead of the gateway alone, which restarts **all** of `hermes`'s user units, `hermes-dashboard` included (it starts the gateway again too).
-  durable-park asks withHuman about every tool call except the exempt tools (`parked_action_execute`, `clarify`,
-  `tool_search`, `tool_describe`); withHuman's
-  pipeline decides which need a person; today that means the QuickBooks tools, since the agent has no terminal or
-  file tools. **This is not a full security boundary today:** `hermes` can no longer sudo, so an agent that got such a tool
-  could not read `tunnel.env` (QuickBooks secret and refresh token, withHuman tunnel token) or change `/opt/durable-park`,
-  but it still owns the ledger and could forge rows (Phase 2). Yaakov accepted the earlier, wider risk on 2026-10-20 for
-  the exploration phase on a QuickBooks sandbox; the rest of containing the agent's tools comes before real
-  credentials ([backlog](backlog.md#before-real-books)). The old `ubuntu` user's
-  Hermes install (gateway and dashboard units) is stopped and kept as an archive; do not start it next to this one.
+- **One agent, one Hermes install, v1 tool lockdown.** The `hermes` install is the only agent on the VM. The agent can
+  reach only `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*`, plus the three Tool Search bridge tools
+  (`tool_search`, `tool_describe`, `tool_call`) while Tool Search is on. **This is not a full security boundary
+  today.** How strong it is, what an agent could still do and where Clean Setup Phase 1 and Phase 2 stand:
+  [architecture section 0](architecture.md#0-how-strong-is-it-today) (the one copy of that text). What is left before
+  real books: the [backlog](backlog.md#before-real-books).
+- **Run `hermes` commands only as the `hermes` user** (`sudo -u hermes -H ...`, see
+  [Reaching Hermes as admin](#access-and-ground-rules) above). Running `hermes` as `ubuntu` or any other user can create
+  a second Hermes install or a second gateway, without any of the guards. That happened: an old install under `ubuntu`
+  had its gateway unit re-created on 2026-10-21 at 22:50 ET and ran an unguarded agent until it was deleted on
+  2026-10-22 (TAP2-112; [what happened](architecture.md#0-how-strong-is-it-today)). If you ever find `~ubuntu/.hermes`,
+  a Hermes unit under `ubuntu`, or something on port 3978 or 8644 that is not the `hermes` gateway, treat it as an
+  incident and tell the admin.
+- **Before you run `configure_hermes.sh`:** it re-applies the tool lockdown and restarts the gateway, and its
+  `hermes plugins enable` step reloads every plugin inside a running gateway. Check the ledger, then stop
+  `hermes-gateway`: [Before you run the configure script](#before-you-run-the-configure-script)
+  ([warning](#never-change-plugins-while-the-gateway-runs), [backlog](backlog.md#before-real-books) item 12).
 - **Restarting `hermes-gateway` also restarts the Teams bot** (and briefly drops Telegram). The dashboard is its own unit
   and keeps running when only the gateway is restarted (not when `configure_hermes.sh` runs with the gateway stopped: it
   restarts the whole `hermes` user manager, see above). The "no `parked`, `approved` or `executing` row" rule below still applies before any restart.
@@ -124,8 +124,9 @@ or `~/.hermes/.env`: they hold secrets).
 | `platforms.ntfy.enabled` | `false` | Hermes has no adapter for ntfy and nothing here uses it; it also made the gateway report `DEGRADED`. |
 | `max_concurrent_sessions` | `20` | The key was present and empty, and Hermes warned about it; the owner chose 20. |
 | Secret references (`platforms.webhook.extra.routes.durable-park-wake.secret`, `mcp_servers.wh.headers.Authorization`) | bare `${VAR}` form | PR #28; no `${env:...}` is left in `config.yaml`. See [Config ref is not set](#every-hermes-command-prints-config-ref---is-not-set). |
-| `TEAMS_ALERT_WEBHOOK_URL` (environment of the sweep's cron run; a secret, never print it) | unset until the owner sets it | The URL of a Power Automate "Post card in a chat or channel" (Teams webhook) flow; the sweep sends an Adaptive Card (a plain `{"text": ...}` body is rejected with "Property 'type' must be 'AdaptiveCard'"). When set, the sweep also posts what it printed (its alert lines: ids, tool names and reasons, never argument values) to Teams once per run. When unset, nothing changes. A failed post (timeout 10 s, so an outage can delay the sweep's exit by about that long) adds one plain line to the chat alerts, `durable-park ALERT: Teams post failed (<ErrorType or HTTP code>).`, and `teams alert failed (...)` on stderr; the exit code stays 0, so the Telegram message is not wrapped in "Script exited with code 1". The URL is never printed. If the sweep itself crashes, what it printed is still posted and the crash is not hidden. |
-| Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *` | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). |
+| `TEAMS_ALERT_WEBHOOK_URL` (environment of the sweep's cron run, set in `~/.hermes/.env`; a secret, never print it) | **set** (verified with a test card on 2026-10-22 at 16:57 ET) | The URL of a Power Automate "Post card in a chat or channel" (Teams webhook) flow; the sweep sends an Adaptive Card (a plain `{"text": ...}` body is rejected with "Property 'type' must be 'AdaptiveCard'"). When set, the sweep also posts what it printed (its alert lines: ids, tool names and reasons, never argument values) to Teams once per run. When unset, nothing changes. A failed post (timeout 10 s, so an outage can delay the sweep's exit by about that long) adds one plain line to the chat alerts, `durable-park ALERT: Teams post failed (<ErrorType or HTTP code>).`, and `teams alert failed (...)` on stderr; the exit code stays 0, so the Telegram message is not wrapped in "Script exited with code 1". The URL is never printed. If the sweep itself crashes, what it printed is still posted and the crash is not hidden. |
+| Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *`; delivery is still Telegram | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). Alerts reach Teams through `TEAMS_ALERT_WEBHOOK_URL` (row above), so a Telegram copy is now optional; stopping the Telegram delivery is an open decision ([backlog](backlog.md#later)). |
+| Teams tunnel (`devtunnel-hermes`) | systemd **user unit of `hermes`**, enabled (moved from `ubuntu` on 2026-10-22). Program `/usr/local/bin/devtunnel` (root-owned). Login cache `/home/hermes/.local/share/DevTunnels` (mode 600), logged in as Yaakov@TapDash.co. Tunnel `proto-agents-bot` forwards to `127.0.0.1:3978` | The Teams bot's public address needs a tunnel to the gateway. Never print or copy the login cache. Manage it with `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user <status\|restart> devtunnel-hermes`. It no longer exists under `ubuntu`. |
 | `hermes-dashboard` unit | `RestartPreventExitStatus=78` in the main unit file | See [Dashboard over HTTPS](#dashboard-over-https). |
 | Langfuse tracing: plugin `langfuse` (Nous Research's unpatched catalog plugin) enabled, `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | on since 2026-10-22 04:37 UTC; settings last changed 13:42 UTC. The patched `tapdash-langfuse` is built and tested but **not deployed**: this row changes when it is ([deploy](#switch-to-the-patched-plugin-deploy)) | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
 
@@ -162,7 +163,7 @@ front of it on the machine's Tailscale name, port 8443 (set up 2026-10-21):
 As `hermes` on the VM (from `ubuntu`: [how to reach Hermes as admin](#access-and-ground-rules)):
 
 ```sh
-systemctl --user is-active hermes-gateway hermes-dashboard         # active active
+systemctl --user is-active hermes-gateway hermes-dashboard devtunnel-hermes   # active active active
 systemctl is-active hermes-shell-mcp                               # active
 systemctl is-active durable-park-receiver durable-park-bridge.socket durable-park-bridge   # active active active
 sudo docker ps --filter name=wh-tunnel --format '{{.Status}}'      # Up ...
@@ -213,13 +214,19 @@ PY
 
    ```sh
    cd /home/hermes/tapdash-agents && git pull --ff-only
-   git worktree add ../wt-myfix -b myfix && cd ../wt-myfix
+   git worktree add /home/hermes/tapdash-agents-wt/myfix -b myfix && cd /home/hermes/tapdash-agents-wt/myfix
    # edit code AND the docs it affects (see CONTRIBUTING.md); tests use the live clone's venv:
    (cd durable-park && /home/hermes/tapdash-agents/durable-park/.venv/bin/pytest -q -W error)
    git add -A && git commit
    cd /home/hermes/tapdash-agents && git merge --ff-only myfix && git push   # the hook checks the docs
-   git worktree remove ../wt-myfix && git branch -d myfix
+   git worktree remove /home/hermes/tapdash-agents-wt/myfix && git branch -d myfix
    ```
+
+   Worktrees always live under `/home/hermes/tapdash-agents-wt/<name>` (one path everywhere in these docs). The
+   `git merge --ff-only` in the live clone is the **deliberate deploy step**: the gateway and the sweep load code from
+   the live clone, so this is the moment the code on disk changes for them (the sweep uses it on its next run, the
+   gateway on its next restart). Do it only for reviewed code, only as a fast-forward, and never edit files in the
+   live clone by hand.
 
    `git push` uses the VM's deploy key for this repo (`~/.ssh/tapdash_agents_deploy`, set in the clone's
    `core.sshCommand`). One-time per clone: `git config core.hooksPath .githooks`. Bigger changes go through a
@@ -234,7 +241,7 @@ PY
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it (set `TEAMS_ALERT_WEBHOOK_URL` to also copy its alert lines to Teams as an Adaptive Card: [live settings](#live-hermes-settings-on-proto-agents); a Teams outage can delay the sweep's exit by about 10 s, the post timeout) |
    | `tracing/tapdash_langfuse/` (the patched Langfuse plugin; once it is deployed, the gateway loads it through a symlink into the live clone) | Run `bash tracing/run_tests.sh` as `hermes` first. The change is loaded at the next gateway restart **or the next plugin reload**, so follow [When the plugin changes](#when-the-plugin-changes) (hook re-review before the pull; pull with the gateway stopped) |
-   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`, and with the gateway stopped first ([Before you run the configure script](#before-you-run-the-configure-script), [warning](#never-change-plugins-while-the-gateway-runs), [backlog](backlog.md#before-real-books) item 12). With the gateway stopped, step 7 of the script finds no gateway process (`MainPID` 0) and restarts `user@1001.service` instead of the gateway alone, which restarts **all** of `hermes`'s user units, `hermes-dashboard` included (it starts the gateway again too). Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
+   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`, and with the gateway stopped first ([Before you run the configure script](#before-you-run-the-configure-script), [warning](#never-change-plugins-while-the-gateway-runs), [backlog](backlog.md#before-real-books) item 12). Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
    Rollback: revert the code first (git checkout the previous `main`, restart the gateway with 0 active rows); never
@@ -258,7 +265,7 @@ Do this every time you run `sudo bash deploy/configure_hermes.sh` (or tell someo
 `gh` of the admin user `ubuntu`, which is signed in. From the connector (which runs as `ubuntu`) that is just `gh`:
 
 ```sh
-sudo -u hermes -H git -C /home/hermes/tapdash-agents-wt/my-worktree push -u origin my-branch   # the deploy key is hermes's
+sudo -u hermes -H git -C /home/hermes/tapdash-agents-wt/<name> push -u origin my-branch   # the deploy key is hermes's
 gh pr create --repo TapDashPayments/TapDash-Agents --head my-branch --base main \
   --title '...' --body-file /tmp/pr-body.md     # as ubuntu; delete the file afterwards
 ```
@@ -269,7 +276,7 @@ token with the `repo`, `workflow`, `read:org` and `gist` scopes, which reaches e
 
 ## Alerts and what to do
 
-Alerts come from the sweep and arrive in the Telegram DM with the bot (the cron job's delivery target).
+Alerts come from the sweep. They arrive in the Telegram DM with the bot (the cron job's delivery target) and, because `TEAMS_ALERT_WEBHOOK_URL` is set, also in Teams as an Adaptive Card.
 
 ### Outcome UNKNOWN
 
@@ -1351,13 +1358,16 @@ and Hermes code is only imported. The Hermes venv has no pytest, so borrow the p
 durable-park venv (from a worktree, never the live clone's tree):
 
 ```sh
-cd ~/tapdash-agents-wt/<worktree>/durable-park
+cd /home/hermes/tapdash-agents-wt/<name>/durable-park
 PY=$(python3 -I -c 'import glob,json,os; f=glob.glob(os.path.expanduser("~/.hermes/installs/*/facts.json"))[0]; print(json.load(open(f))["packages"]["venv"]["environment"]+"/bin/python")')
 SP=$(ls -d ~/tapdash-agents/durable-park/.venv/lib/python3*/site-packages); T=$HOME/scratch-pytest
 mkdir -p $T/libs && for m in _pytest pytest pluggy iniconfig pygments py.py; do ln -sfn $SP/$m $T/libs/$m; done
 PYTHONPATH=$HOME/.hermes/hermes-agent:$T/libs PATH=$HOME/stubbin:$PATH \
   $PY -m pytest -q -W error -p no:cacheprovider --basetemp=$T/base tests/test_hermes_integration.py
 ```
+
+`/home/hermes/stubbin` is kept on purpose for this step (do not delete it). It holds a fake `systemctl` (a script that
+just exits 1), put first on the `PATH` so that the test cannot reach the real systemd units.
 
 It must pass with no skips (a skip means Hermes was not importable). A failure after an upgrade means Hermes changed
 what the hook receives: read [section 4b](architecture.md#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)
@@ -1515,13 +1525,16 @@ Several secrets were pasted into chat during testing (approved for testing only)
   - Temporary sudo for hermes (`/etc/sudoers.d/90-hermes` was removed): recreate it with `sudo install -m 440`, fix the step
     so it runs as ubuntu, then delete the file again.
 - **The one-agent merge (2026-10-21)**: the configs, units and ledger from before the cutover are in
-  `/home/hermes/merge-backup-20261021T021246Z/` (`hermes/` and `ubuntu/`). To go back: `systemctl --user disable --now hermes-dashboard`, copy
-  `hermes/config.yaml` and `hermes/.env` over `~/.hermes/`, restart `hermes-gateway` (locked-down tools again, no
-  Teams), then start the `ubuntu` user's `hermes-gateway` and `hermes-dashboard` units (they are disabled and stopped:
-  `enable --now` them) and check Telegram and the dashboard login. They were disabled on 2026-10-21 at 02:37:47 UTC, so
-  nothing restarts them at boot until you do this. The config rollback does not undo the venv switch: the install's
-  `facts.json` now points at venv `58c7a333` (the Teams packages) and the old venv `e74ec07b` still exists. Only with nothing `parked`, `approved` or
-  `executing`. Plan: [docs/plans/2026-10-20-one-agent-merge.md](../../docs/plans/2026-10-20-one-agent-merge.md).
+  `/home/hermes/merge-backup-20261021T021246Z/` (`hermes/` and `ubuntu/`). You cannot go back to the old `ubuntu`
+  install: it was **deleted on 2026-10-22** (TAP2-112, [what happened](architecture.md#0-how-strong-is-it-today)), and it must
+  not be rebuilt, because it ran an unguarded agent. What survives is a backup of its chat history, config files,
+  skills and logs, `/home/ubuntu/old-hermes-backup-2026-10-22.tar.gz` (being moved to Google Drive; no secrets and no
+  program files in it): read from it, never run it as a second agent. To undo only the `hermes` side of the merge:
+  `systemctl --user disable --now hermes-dashboard`, copy `hermes/config.yaml` and `hermes/.env` from the merge backup
+  over `~/.hermes/`, and restart `hermes-gateway` (locked-down tools again, no Teams). The config rollback does not
+  undo the venv switch: the install's `facts.json` now points at venv `58c7a333` (the Teams packages) and the old venv
+  `e74ec07b` still exists. Only with nothing `parked`, `approved` or `executing`. Plan:
+  [docs/plans/2026-10-20-one-agent-merge.md](../../docs/plans/2026-10-20-one-agent-merge.md).
 - **The patched Langfuse plugin (once deployed)**: go back to the unpatched catalog plugin with the rollback in
   [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy): enable `langfuse`, disable `tapdash-langfuse`
   **with the gateway stopped** (never with it running, see the [warning](#never-change-plugins-while-the-gateway-runs)),
