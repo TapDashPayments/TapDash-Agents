@@ -1774,3 +1774,37 @@ def test_lift_failure_warning_has_no_note_and_no_argument_values(env, caplog):
     everything = "\n".join(r.getMessage() for r in caplog.records)
     for secret in ("private note 4455", "cust-ref-9911", "secret-detail-7788", "Find customer 58"):
         assert secret not in everything
+
+
+def test_unknown_nested_rules_warn_once_per_tool_and_key_without_values(env, caplog):
+    """Rules the lift cannot judge (a remote ``$ref``) leave the note in place and log ONE warning per tool and key."""
+    env.provider.auto = "approved"
+    schema = {"type": "object", "properties": {"params": {"$ref": "https://example.com/params.json"},
+                                               "withhuman_context": {"type": "string"}}}
+    hook = lifting_hook(env, schema_fn=lambda tool: schema)
+    caplog.set_level(logging.DEBUG, logger="durable_park")
+    args = {"params": {"customer_ref": "cust-ref-9911", "withhuman_context": "private note 4455"}}
+    assert call(hook, GW_TOOL, args=copy.deepcopy(args), tool_call_id="call-1") is None  # nothing lifted
+    assert call(hook, GW_TOOL, args=copy.deepcopy(args), tool_call_id="call-2") is None
+    other = call(hook, "mcp__wh__quickbooks__create_bill", args=copy.deepcopy(args), tool_call_id="call-3")
+    assert other is None
+    warnings = [r.getMessage() for r in caplog.records if "could not tell whether" in r.getMessage()]
+    assert warnings == [
+        f"could not tell whether {GW_TOOL}.params has its own withhuman_context; the note was left in place",
+        "could not tell whether mcp__wh__quickbooks__create_bill.params has its own withhuman_context; "
+        "the note was left in place"]
+    everything = "\n".join(r.getMessage() for r in caplog.records)
+    for secret in ("private note 4455", "cust-ref-9911"):
+        assert secret not in everything
+    assert json.loads(env.ledger.get_by_call("sess-1", "call-1").args_json) == args  # sent unchanged
+
+
+def test_unknown_warning_memory_is_bounded(env, caplog):
+    env.provider.auto = "approved"
+    schema = {"properties": {"params": {"$ref": "https://example.com/p.json"}, "withhuman_context": {}}}
+    hook = lifting_hook(env, schema_fn=lambda tool: schema)
+    caplog.set_level(logging.WARNING, logger="durable_park")
+    for i in range(1005):
+        call(hook, f"tool_{i}", args={"params": {"withhuman_context": "n"}}, tool_call_id=f"c-{i}")
+    warnings = [r for r in caplog.records if "could not tell whether" in r.getMessage()]
+    assert len(warnings) == 1000

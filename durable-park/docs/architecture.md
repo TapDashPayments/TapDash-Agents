@@ -503,8 +503,12 @@ flowchart TD
   parameter and answer with an "IGNORED" warning that wastes tokens, and the approver would not see the reason.
   `gatecall.lift_gateway_context` moves it up one level for tools whose registered rules (`schema_fn`, default the
   Hermes registry) list `withhuman_context` at the top level: sorted key order, the first non-empty string wins, an
-  existing top-level note always wins, other values are dropped, a nested object whose own rules declare the field
-  is left alone (so is one whose rules use `$ref`, `allOf`, `anyOf`, `oneOf` or `patternProperties`: when in doubt the field stays), JSON strings are not parsed. Any error means the original arguments. The lifted arguments are the
+  existing top-level note always wins, other values are dropped, for a nested object that holds a note, its own rules decide: they declare
+  `withhuman_context` (in `properties`, a matching `patternProperties` pattern, any `allOf`/`anyOf`/`oneOf` branch, or
+  a local `$ref` such as `#/$defs/X` resolved inside the tool's rules) and the key is left alone, because the server
+  really has that field; they do not and the note is removed; they cannot be judged (a remote or unresolvable `$ref`,
+  an invalid pattern, a `$ref` cycle, nesting deeper than 10) and the key is left alone and one warning per tool and
+  key is logged (`could not tell whether <tool>.<key> has its own withhuman_context`, never any value). JSON strings are not parsed. Any error means the original arguments. The lifted arguments are the
   only arguments from then on: the form check, the row (digest and stored args, so the executor later dispatches the
   lifted call), the request to withHuman, and, for an instant `Allow`, the `{"action": "modify", "args": ...}` the
   hook returns (Hermes shallow-merges it into the call; nothing is returned when nothing was lifted). The top-level

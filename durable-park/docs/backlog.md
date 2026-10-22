@@ -62,6 +62,9 @@ Also found on the way:
   and note the limit in `gateway-setup.md`). (2) Deploy only with no ledger row `parked`, `approved` or `executing`:
   this change alters the AAP request body for rows with a note, so a row parked by the old code would not match its
   approved request when the executor replays it.
+  **When adding tools from a new provider,** check the gateway journal for
+  `could not tell whether ... withhuman_context` warnings: they mean the tool's rules use a `$ref` the lift cannot
+  follow, so a stray nested note still reaches that server.
 - `hermes plugins enable langfuse` created a new Hermes environment directory; the old ones remain. Clean up the old
   environments later, when disk space matters.
 

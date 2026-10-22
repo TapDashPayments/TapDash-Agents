@@ -7,7 +7,7 @@ import json
 import os
 import re
 import threading
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import httpx
 from agentapprovalprotocol import Call, Client, Gate
@@ -112,27 +112,83 @@ def _declares_context(schema: Any) -> bool:
     return isinstance(props, dict) and CONTEXT_FIELD in props
 
 
-_INDIRECT_SCHEMA_KEYWORDS = ("$ref", "allOf", "anyOf", "oneOf", "patternProperties")
+MAX_SCHEMA_DEPTH = 10  # how deep ``$ref``/``allOf``/``anyOf``/``oneOf`` are followed before giving up
+MAX_PATTERN_CHARS = 200  # a longer ``patternProperties`` regex is not run (it comes from outside): unknown
+_UNRESOLVED = object()
 
 
-def _may_own_context(schema: Any) -> bool:
-    """True when a nested object's own rules declare ``withhuman_context``, or might (they point elsewhere with
-    ``$ref``/``allOf``/``anyOf``/``oneOf`` or match names by pattern): when in doubt, the field is left alone."""
-    return _declares_context(schema) or (
-        isinstance(schema, dict) and any(key in schema for key in _INDIRECT_SCHEMA_KEYWORDS))
+def _resolve_local_ref(ref: Any, root: Any) -> Any:
+    """The part of ``root`` a local JSON pointer (``#``, ``#/$defs/X``, ``~0``/``~1`` unescaped) names, or
+    ``_UNRESOLVED`` for anything else (remote, relative file, not a string, no such place)."""
+    if not isinstance(ref, str) or not (ref == "#" or ref.startswith("#/")):
+        return _UNRESOLVED
+    node = root
+    for part in ([] if ref == "#" else ref[2:].split("/")):
+        part = part.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            return _UNRESOLVED
+    return node
 
 
-def lift_gateway_context(args: Any, schema: dict | None) -> Any:
+def _declares_context_in(schema: Any, root: Any, seen: frozenset = frozenset(), depth: int = 0) -> bool | None:
+    """Does ``schema`` (the rules of one nested object) declare a ``withhuman_context`` property?
+    True: yes. False: no. None: cannot tell (remote or unresolvable ``$ref``, a bad pattern, a cycle, too deep).
+    A schema that is not an object (including plain ``true``/``false``) names no property: False. Sibling keywords
+    combine the way ``allOf``/``anyOf``/``oneOf`` branches do: any True wins, then any None, else False."""
+    if depth > MAX_SCHEMA_DEPTH:
+        return None
+    if not isinstance(schema, dict):
+        return False
+    found: list[bool | None] = []
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        target = _resolve_local_ref(ref, root)
+        found.append(None if target is _UNRESOLVED or ref in seen
+                     else _declares_context_in(target, root, seen | {ref}, depth + 1))
+    props = schema.get("properties")
+    if isinstance(props, dict) and CONTEXT_FIELD in props:
+        found.append(True)
+    patterns = schema.get("patternProperties")
+    if isinstance(patterns, dict):
+        for pattern in patterns:
+            try:
+                if not isinstance(pattern, str) or len(pattern) > MAX_PATTERN_CHARS:
+                    found.append(None)
+                elif re.search(pattern, CONTEXT_FIELD):
+                    found.append(True)
+            except re.error:
+                found.append(None)
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        if keyword in schema:
+            branches = schema[keyword]
+            if not isinstance(branches, list):
+                found.append(None)
+                continue
+            found.extend(_declares_context_in(branch, root, seen, depth + 1) for branch in branches)
+    if True in found:
+        return True
+    return None if None in found else False
+
+
+def lift_gateway_context(args: Any, schema: dict | None, on_unknown: Callable[[str], None] | None = None) -> Any:
     """Move a ``withhuman_context`` note the model nested inside an argument object up to the top level.
 
     The withHuman gateway's schema has ``withhuman_context`` as a sibling of the tool's own fields and strips only
     the top-level one before forwarding, so a nested copy would reach the server as an unknown parameter. Only
-    tools whose ``schema`` advertises the field at the top level are touched, one level deep, in sorted key order;
-    a nested object whose own schema declares the field, or might (it uses
-    ``$ref``, ``allOf``, ``anyOf``, ``oneOf`` or ``patternProperties``), is left alone. The first removed non-empty string becomes
-    the top-level note unless the top level already has the key (it always wins); other removed values are dropped.
-    A JSON-string value is not parsed. Pure and idempotent: the input is never mutated (a deep copy is returned
-    when anything is touched, the same object otherwise)."""
+    tools whose ``schema`` advertises the field at the top level are touched, one level deep, in sorted key order.
+    For each top-level key holding a nested ``withhuman_context``, the tool's own rules for that key decide
+    (``_declares_context_in``: ``properties``, ``patternProperties``, ``allOf``/``anyOf``/``oneOf``, and local
+    ``$ref`` such as ``#/$defs/X`` resolved inside ``schema``): they declare the field, so the server really has it
+    and the key is left alone; they do not, so the note is removed; they cannot be judged (remote ``$ref``, a bad
+    pattern, a cycle) so the key is left alone and ``on_unknown(key)`` is called (the key name only, never a
+    value). The first removed non-empty string becomes the top-level note unless the top level already has the key
+    (it always wins); other removed values are dropped. A JSON-string value is not parsed. Pure and idempotent: the
+    input is never mutated (a deep copy is returned when anything is touched, the same object otherwise), and a
+    bug while judging or reporting never raises, it counts as "cannot tell"."""
     if not isinstance(args, dict) or not _declares_context(schema):
         return args
     props = schema["properties"]
@@ -140,7 +196,18 @@ def lift_gateway_context(args: Any, schema: dict | None) -> Any:
     note: str | None = None
     for key in sorted(out, key=str):
         value = out[key]
-        if not isinstance(value, dict) or CONTEXT_FIELD not in value or _may_own_context(props.get(key)):
+        if not isinstance(value, dict) or CONTEXT_FIELD not in value:
+            continue
+        try:
+            declared = _declares_context_in(props.get(key), schema)
+        except Exception:  # noqa: BLE001 - never raise out of the lift
+            declared = None
+        if declared is not False:
+            if declared is None and on_unknown is not None:
+                try:
+                    on_unknown(str(key))
+                except Exception:  # noqa: BLE001 - a reporting bug must not stop the lift
+                    pass
             continue
         removed = value.pop(CONTEXT_FIELD)
         if note is None and isinstance(removed, str) and removed:
