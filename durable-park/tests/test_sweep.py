@@ -1060,6 +1060,18 @@ def _teams(monkeypatch, outcome=200):
     return sent
 
 
+def _card_text(body):
+    """Assert ``body`` is the Adaptive Card wrapper Power Automate "Post card" flows require; return its text."""
+    assert body["type"] == "message" and len(body["attachments"]) == 1
+    attachment = body["attachments"][0]
+    assert attachment["contentType"] == "application/vnd.microsoft.card.adaptive"
+    card = attachment["content"]
+    assert card["type"] == "AdaptiveCard" and card["version"] == "1.4"
+    assert card["$schema"] == "http://adaptivecards.io/schemas/adaptive-card.json"
+    assert len(card["body"]) == 1 and card["body"][0]["type"] == "TextBlock" and card["body"][0]["wrap"] is True
+    return card["body"][0]["text"]
+
+
 def test_teams_off_without_a_webhook_setting(world, monkeypatch):
     sent = _teams(monkeypatch)
     monkeypatch.delenv("TEAMS_ALERT_WEBHOOK_URL")
@@ -1074,8 +1086,10 @@ def test_teams_gets_the_alert_lines_the_sweep_printed(world, monkeypatch, capsys
     assert world.main(monkeypatch) == 0
     printed = capsys.readouterr().out
     assert printed  # stdout (the Telegram delivery) is unchanged
-    assert sent == [(TEAMS_URL, {"text": printed.strip()})]
-    assert pid in sent[0][1]["text"] and '"n"' not in sent[0][1]["text"]  # no argument values
+    assert len(sent) == 1 and sent[0][0] == TEAMS_URL
+    text = _card_text(sent[0][1])
+    assert text == printed.strip()
+    assert pid in text and '"n"' not in text  # no argument values
 
 
 def test_teams_not_posted_when_there_is_no_alert(world, monkeypatch):
@@ -1105,4 +1119,4 @@ def test_a_crashing_sweep_still_posts_what_it_printed_and_raises(world, monkeypa
     monkeypatch.setattr(sweep, "_wake_targets", lambda ledger: (_ for _ in ()).throw(RuntimeError("bug")))
     with pytest.raises(RuntimeError, match="bug"):  # the sweep's own error is not hidden
         world.main(monkeypatch)
-    assert len(sent) == 1 and "outcome UNKNOWN" in sent[0][1]["text"]
+    assert len(sent) == 1 and "outcome UNKNOWN" in _card_text(sent[0][1])

@@ -161,11 +161,16 @@ class _Tee:
 
 
 def _post_teams(webhook_url: str, text: str) -> None:
-    """POST ``text`` to a Teams incoming webhook. A failure is never silent and never stops the sweep: one plain
+    """POST ``text`` to the Teams webhook (a Power Automate "Post card in a chat or channel" flow, which rejects
+    plain ``{"text": ...}``) as an Adaptive Card. A failure is never silent and never stops the sweep: one plain
     ALERT line on stdout (so it reaches the chat like any other alert) and one line on stderr, both with only the
     error type or HTTP code, because the URL is a secret."""
     try:
-        request = urllib.request.Request(webhook_url, data=json.dumps({"text": text}).encode("utf-8"),
+        card = {"type": "message", "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "version": "1.4", "body": [{"type": "TextBlock", "text": text, "wrap": True}]}}]}
+        request = urllib.request.Request(webhook_url, data=json.dumps(card).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=TEAMS_TIMEOUT_SECONDS):
             pass
