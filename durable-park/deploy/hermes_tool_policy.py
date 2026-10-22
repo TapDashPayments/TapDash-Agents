@@ -1,8 +1,9 @@
 """durable-park tool policy for the proto VM's Hermes (v0.22.2): the model gets NO local file/command access.
 
 Why: the agent's tools run as user ``hermes``, which owns the ledger and can read instance_token. A
-prompt-injected agent with a terminal or file tool could forge an ``executing`` row and get the bridge to
-approve a call. v1 closes this by giving the model only:
+prompt-injected agent with a terminal or file tool could forge ledger rows (it once also got the bridge to approve a
+call; the bridge now asks withHuman and ignores the ledger) and read the withHuman credentials.
+v1 closes this by giving the model only:
 
 * ``durable_park``  - ``parked_action_execute`` (runs an approved, parked call; the point of the plugin)
 * ``clarify``       - asks the user a question in the chat; no local access (tools/clarify_tool.py:111-130)

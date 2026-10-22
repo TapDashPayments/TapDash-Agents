@@ -67,12 +67,37 @@ def test_no_pipe_into_grep_q_under_pipefail():
         assert not re.search(r"\|\s*grep\b[^|]*-[a-zA-Z]*q", line), line
 
 
-def test_bridge_unit_uses_the_deployed_venv_and_ledger():
+def _unit_lines():
     unit = (SCRIPT.parent / "durable-park-bridge.service").read_text()
-    assert "ExecStart=/opt/durable-park/bin/python -B -m bridge.app --host 127.0.0.1 --port 8791" in unit
-    assert "Environment=DURABLE_PARK_LEDGER=/home/hermes/.hermes/plugin-data/durable-park/ledger.db" in unit
+    return [line.strip() for line in unit.splitlines() if line.strip() and not line.strip().startswith("#")]
+
+
+def test_bridge_unit_uses_the_deployed_venv_and_the_org_key():
+    unit = (SCRIPT.parent / "durable-park-bridge.service").read_text()
+    exec_start = next(line for line in _unit_lines() if line.startswith("ExecStart="))
+    assert exec_start.startswith("ExecStart=/opt/durable-park/bin/python -B -m bridge.app --host 127.0.0.1 --port 8791")
+    for flag in ("--secret-file /etc/durable-park/bridge_secret", "--key-file /etc/durable-park/audit_key",
+                 "--expected-agent proto-agents"):
+        assert flag in exec_start, flag
     assert "User=hermes" in unit and "SupplementaryGroups=dpwake" in unit
-    assert 'LEDGER="$HERMES_HOME/plugin-data/durable-park/ledger.db"' in SCRIPT.read_text()
+    assert 'LEDGER="$HERMES_HOME/plugin-data/durable-park/ledger.db"' in SCRIPT.read_text()  # the plugin still has one
+
+
+def test_bridge_unit_is_stateless_and_cannot_touch_the_ledger():
+    """The bridge asks withHuman with the org key; it keeps no state, so no ledger path and no writable path."""
+    code = "\n".join(_unit_lines())
+    for gone in ("DURABLE_PARK_LEDGER", "ReadWritePaths", "--ledger", "ledger.db", "plugin-data"):
+        assert gone not in code, gone
+    assert "ProtectHome=yes" in code and "ProtectSystem=strict" in code
+    assert "ProtectHome=read-only" not in code
+
+
+def test_bridge_warns_about_a_missing_org_key_not_a_missing_ledger():
+    code = "\n".join(_code_lines())
+    warn = code.index('[[ -e "$ETC/audit_key" ]] || log "no $ETC/audit_key')
+    assert "answers human" in code[warn:warn + 300]
+    assert "the bridge answers human until the plugin creates it" not in code
+    assert "ReadWritePaths" not in SCRIPT.read_text()  # the ledger directory is no longer a bridge path
 
 
 def test_webhook_route_secret_is_a_bare_ref():

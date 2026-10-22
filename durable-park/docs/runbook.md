@@ -174,7 +174,7 @@ PY
    | You changed | Make it live with |
    |---|---|
    | `plugin/` (park hook, form check, wake, executor, ledger) | `systemctl --user restart hermes-gateway` (as hermes) |
-   | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger`, which runs `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (step 4b copies both trees recursively, removes files the repo no longer has, restarts the bridge, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge). By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401`. |
+   | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger` for `args_digest` and `durable_park.gatecall` for `gateway_slug`, which run `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (step 4b copies both trees recursively, removes files the repo no longer has, restarts the bridge, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge). By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401`. The bridge also needs the organization key ([The gateway bridge](#the-gateway-bridge)); without it every gateway call goes to a person. Rollback of a bridge change: [below](#roll-back-a-bridge-change). |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
    | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
@@ -374,26 +374,35 @@ the outage was shorter than 5 minutes, both lines may arrive together.
 
 ### An approver was asked twice for one action
 
-The park was approved, but the bridge did not match the gateway call, so withHuman asked a person again. Find
-what differed:
+The park was approved, but the bridge did not confirm the gateway call, so withHuman asked a person again. That
+second ask is safe (a person decides it) but noisy. The bridge keeps no record of its answers, so the evidence is
+the bridge log and the two requests in withHuman (the `park:quickbooks` one you approved and the plain
+`quickbooks` one that arrived later). The ledger row shows what was parked:
 
 ```sh
 python3 - <<'PY'
 import sqlite3
 L = sqlite3.connect("file:/home/hermes/.hermes/plugin-data/durable-park/ledger.db?mode=ro", uri=True)
-D = sqlite3.connect("file:/home/hermes/.hermes/plugin-data/durable-park/bridge_deliveries.db?mode=ro", uri=True)
-print(L.execute("select park_id, tool, substr(args_digest,1,16) from parks order by created_at desc limit 3").fetchall())
-print(D.execute("select outcome, park_id, name, substr(args_digest,1,16) from deliveries order by rowid desc limit 3").fetchall())
+print(L.execute("select park_id, tool, status, substr(args_digest,1,16) from parks order by created_at desc limit 3").fetchall())
 PY
 ```
 
-The bridge's own log says why it answered `human`: `journalctl -u durable-park-bridge -n 20` (root), tag
-`why=`: `no-park` (no matching executing park), `replay` (repeat of an earlier answer), `replay-mismatch` (same
-delivery key, different call), `agent`, `preview`, `type` (not a real block delivery). Argument values are never
-logged.
+The bridge's own log says why it answered `human`: `journalctl -u durable-park-bridge -n 20` (root), tag `why=`.
+Argument values and the key are never logged.
+
+| `why=` | Meaning | What to do |
+|---|---|---|
+| `no-approved-park` | No park request matched: wrong tool name or arguments, not approved, not consumed yet, or consumed more than 120 s before the gateway call | See the two causes below; if the call was simply slow, ask again |
+| `ambiguous-park` | Two park requests matched the same call | Look in withHuman for a duplicate park of the same call; nothing runs twice, a person decides |
+| `already-used` | Another gateway request for the same call was created after the approval was consumed (a retry, or a replay) | Expected for a replay; for a first run, find the earlier gateway request |
+| `no-key` | `/etc/durable-park/audit_key` is missing, empty or unreadable | [Store the key](#the-gateway-bridge) |
+| `http-403` | The key lacks `request.read` or `request.read.unrouted` | Mint a key with the three permissions |
+| `deadline`, `transport`, `shape` | withHuman was slow (the bridge gives up after 3.5 s), unreachable, or answered something unexpected | Check withHuman's status; the call went to a person, so nothing is lost |
+
+(The tags are those of `bridge/app.py` and `bridge/whapi.py`; if `journalctl` shows another tag, trust the code.)
 
 - **Name differs** (e.g. `create-bill` vs `create_bill`): the bridge must build names the way Hermes does
-  (`bridge/app.py: hermes_tool_name`). Was the bridge's `/opt` copy updated?
+  (`bridge/verify.py: hermes_tool_name`). Was the bridge's `/opt` copy updated?
 - **Digest differs**: the gateway rewrote the arguments (seen so far: added `withhuman_scope`, `2.0` sent as `2`).
   Extend `ledger.normalize_args` for the new rewrite, add a test, deploy to the plugin and the bridge copy.
 
@@ -501,8 +510,10 @@ By default the chat is told "P-XXXX was DENIED in withHuman: <note>". With an au
 DENIED in withHuman by Yaakov Yehuda (android): <note>". Without the key nothing breaks; the message stays as above.
 A decision made by the pipeline (no person) is never given a name.
 
-1. In withHuman, mint an **organization API key** (`who_...`) with **only** `audit.read`. Read-only: it cannot decide,
-   change or delete anything.
+1. In withHuman, mint an **organization API key** (`who_...`) with `audit.read`, `request.read` and
+   `request.read.unrouted` and **nothing else** (the plugin needs only `audit.read`; the gateway bridge reads the same
+   file and needs the other two, see [The gateway bridge](#the-gateway-bridge)). Read-only: it cannot decide,
+   change or delete anything, and it must not be able to read rules or members.
 2. An admin stores it on the VM, typed with `read -rs` (never pasted into chat, never in the repo):
 
    ```sh
@@ -516,6 +527,66 @@ A decision made by the pipeline (no person) is never given a name.
    `decider lookup failed (<ErrorType>)` (HTTP error such as 403 = key lacks `audit.read`, a timeout, bad JSON).
 
 Settings `audit_key_file` and `audit_base_url`: [architecture](architecture.md#plugin-settings).
+
+### The gateway bridge
+
+The bridge is withHuman's webhook block for gateway calls (`POST /wh/bridge` on `127.0.0.1:8791`). It keeps no
+state and never opens the ledger: for each gateway call it asks withHuman (`GET /api/v1/requests`) with the
+organization key `/etc/durable-park/audit_key`, and approves only a call that matches one approved park request
+consumed in the last 120 s that no other gateway request has used ([decision
+rule](architecture.md#the-bridges-decision-rule)). Anything unclear, slow or failing goes to a person: a second ask
+for the same action, never an auto-approve.
+
+**The key.** The same file as [the decider name](#name-the-decider-optional), now with exactly three permissions:
+`audit.read`, `request.read`, `request.read.unrouted`. It must not be able to read rules or members, and it cannot
+approve, deny or change anything. It is read on every call, so storing a new one needs no restart. To move from the
+old audit-only key: in withHuman mint the new key with the three permissions, store it with the `read -rs` command
+under [Name the decider](#name-the-decider-optional) (it replaces the file), run the check below, then revoke the
+old key in withHuman. Never paste a key into chat.
+
+**Check** (as `hermes`, after any bridge change; nothing is printed that is secret):
+
+```sh
+systemctl is-active durable-park-bridge                                              # active
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8791/wh/bridge     # 401 (unsigned)
+cd ~/tapdash-agents/durable-park && DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_bridge_lister_live.py
+```
+
+The live test builds the bridge's own lister with the deployed key and lists five requests for `proto-agents`: it
+passes when withHuman answers with a list. It prints neither the key nor any arguments. It fails with
+`ListError` code `no-key` (file missing) or `http-403` (key too weak).
+
+**Live acceptance after a bridge change** (a sandbox payment, with an approver at hand):
+
+1. One real $1 payment through the chat: approve it **once**. It must run and be created once, with no second ask
+   from the gateway. The bridge runs with `ProtectHome=yes`, so the ledger under `/home/hermes` is invisible to it:
+   a payment that passes proves the bridge works without the ledger.
+2. Replay the same call through the gateway afterwards (same tool, same arguments, the approved park is already
+   used): the gateway must ask a person (log `why=already-used`). Decline it.
+3. `journalctl -u durable-park-bridge -n 20` shows no key or argument values.
+
+**When withHuman is slow or down**: the bridge answers `human` within its 3.5 s budget (or withHuman's own 5 s
+webhook timeout ends the block and the call goes to a person). The gateway asks a human, so the approver sees a
+second ask for the action. Nothing runs unapproved and nothing runs twice. The old `bridge_deliveries.db` in
+`plugin-data/durable-park/` is unused; delete it once the new bridge is live and the acceptance above passed.
+
+#### Roll back a bridge change
+
+Before the change, keep the old code and unit:
+
+```sh
+sudo cp -a /opt/durable-park/bridge /opt/durable-park/bridge.rollback
+sudo cp -a /opt/durable-park/plugin /opt/durable-park/plugin.rollback
+sudo cp -a /etc/systemd/system/durable-park-bridge.service /root/durable-park-bridge.service.rollback
+```
+
+To go back: confirm no ledger row is `parked`, `approved` or `executing` (the query under
+[Health check](#health-check)); then restore the three copies (`sudo rm -r /opt/durable-park/bridge` first, then
+`sudo cp -a /opt/durable-park/bridge.rollback /opt/durable-park/bridge`; the same for `plugin`; copy the unit file
+back), `sudo systemctl daemon-reload && sudo systemctl restart durable-park-bridge`, and check `401` as above. The
+old bridge needs the ledger path and `ReadWritePaths` from the old unit, which the restored file has. Do not run
+`configure_hermes.sh` for a rollback: it copies the clone's current code over the restored files. After the
+rollback, `git revert` the change as in [Code](#rollback).
 
 ### Allow another hook (`observer_hooks`)
 
@@ -573,7 +644,7 @@ that has to agree:
 1. **withHuman**: register the server (e.g. slug `docusign`) and grant it to agent `proto-agents`, granting only the
    gateway servers the agent needs (spec section 7, Q5) ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
    sends its `park:docusign` request to a person, and add it to pipeline **rule 2**, so the bridge decides its
-   replays ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
+   replays (it asks withHuman for the matching park, by the Hermes name `mcp__wh__<slug>__<tool>`) ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
    other `mcp__wh__` tool registers. Allow the new server there.
 3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify`,
@@ -740,8 +811,8 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - [ ] Issue a new withHuman tunnel token
 - [ ] Rotate the `durable-park-bridge` webhook endpoint secret and re-store `bridge_secret`
 - [ ] Regenerate `wake_secret`
-- [ ] Rotate the withHuman audit key (`audit_key`, if you set one): revoke it in withHuman and
-      [store a new one](#name-the-decider-optional)
+- [ ] Rotate the withHuman org key (`audit_key`; the bridge needs it, so it is always set): revoke it in withHuman
+      and [store a new one](#the-gateway-bridge) with `audit.read`, `request.read`, `request.read.unrouted`
 - [ ] Revoke any GitHub token shared in chat; keep only the VM's deploy key for this repo
 - [ ] Then the rest of the [backlog's "Before real books" list](backlog.md#before-real-books)
 
