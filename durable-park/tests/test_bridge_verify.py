@@ -1,7 +1,11 @@
 """Tests for bridge.verify: the pure decision rule that checks a gateway call against withHuman's own records.
 
 Fixtures are shaped like the live ``GET /api/v1/requests`` items (keys: id, agent_slug, tool, server, arguments,
-context, status, decision{status, decided_at, expires_at}, consumption{consumed_at, outcome}, created_at).
+context, status, decision{id, request_id, organization_id, membership_id, status, channel, reviewer_display_name,
+reviewer_email, authentication, idempotency_key, decided_at}, consumption{consumed_at}, created_at). The
+listing's ``decision`` carries no ``expires_at`` and the rule never reads one: withHuman refuses to consume an
+expired approval, so ``consumed_at`` is the proof. ``consumption`` has no ``outcome`` until the executor reports
+one. A request still pending has neither a ``decision`` nor a ``consumption`` key.
 """
 
 import copy
@@ -43,9 +47,11 @@ def park(**overrides):
         "id": "park-1", "agent_slug": AGENT, "tool": PARK_TOOL, "server": PARK_SERVER,
         "arguments": copy.deepcopy(PARK_ARGS), "context": {"reason": "pay invoice"},
         "status": "approved",
-        "decision": {"status": "approved", "decided_at": iso(consumed - timedelta(minutes=5)),
-                     "expires_at": iso(consumed + timedelta(minutes=30))},
-        "consumption": {"consumed_at": iso(consumed), "outcome": None},
+        "decision": {"id": "dec-1", "request_id": "park-1", "organization_id": "org-1", "membership_id": "mem-1",
+                     "status": "approved", "channel": "web", "reviewer_display_name": "Reviewer",
+                     "reviewer_email": "reviewer@example.com", "authentication": {"method": "session"},
+                     "idempotency_key": "idem-dec-1", "decided_at": iso(consumed - timedelta(minutes=5))},
+        "consumption": {"consumed_at": iso(consumed)},
         "created_at": iso(consumed - timedelta(minutes=6)),
     }
     item.update(overrides)
@@ -57,7 +63,6 @@ def neighbour(**overrides):
     item = {
         "id": "gw-2", "agent_slug": AGENT, "tool": TOOL, "server": SERVER,
         "arguments": copy.deepcopy(GATEWAY_ARGS), "context": {}, "status": "pending",
-        "decision": None, "consumption": None,
         "created_at": iso(NOW - timedelta(seconds=5)),
     }
     item.update(overrides)
@@ -70,7 +75,6 @@ def own(**overrides):
     item = {
         "id": "gw-1", "agent_slug": AGENT, "tool": TOOL, "server": SERVER,
         "arguments": copy.deepcopy(GATEWAY_ARGS), "context": {}, "status": "pending",
-        "decision": None, "consumption": None,
         "created_at": iso(NOW - timedelta(seconds=9)),
     }
     item.update(overrides)
@@ -242,29 +246,18 @@ def test_decide_accepts_a_park_consumed_5_seconds_in_the_future_clock_skew():
     assert decide(call(), [item], [own(created_at=seconds_ago(-6))], NOW).approve is True
 
 
-def test_decide_rejects_a_park_consumed_after_its_approval_expired():
-    consumed = NOW - timedelta(seconds=10)
+def test_decide_accepts_a_park_in_the_real_live_listing_shape():
     item = park()
-    item["decision"]["expires_at"] = iso(consumed - timedelta(seconds=1))
-    assert_no_approved_park(decide(call(), [item], [own()], NOW))
-
-
-def test_decide_accepts_a_park_consumed_exactly_at_its_expiry():
-    item = park()
-    item["decision"]["expires_at"] = item["consumption"]["consumed_at"]
+    assert "expires_at" not in item["decision"] and set(item["consumption"]) == {"consumed_at"}
     assert decide(call(), [item], [own()], NOW).approve is True
 
 
-def test_decide_rejects_a_park_with_no_expires_at():
+@pytest.mark.parametrize("stray", [None, "soon", "2026-10-22T11:59:00Z", iso(NOW - timedelta(days=1))])
+def test_decide_ignores_a_stray_expires_at_on_the_decision(stray):
+    """The product listing never sends one; if it ever did, the rule would still not read it."""
     item = park()
-    del item["decision"]["expires_at"]
-    assert_no_approved_park(decide(call(), [item], [own()], NOW))
-
-
-def test_decide_rejects_a_park_with_an_unparseable_expires_at():
-    item = park()
-    item["decision"]["expires_at"] = "soon"
-    assert_no_approved_park(decide(call(), [item], [own()], NOW))
+    item["decision"]["expires_at"] = stray
+    assert decide(call(), [item], [own()], NOW).approve is True
 
 
 def test_decide_rejects_a_park_whose_arguments_were_truncated():

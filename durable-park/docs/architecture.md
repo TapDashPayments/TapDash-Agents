@@ -371,8 +371,8 @@ Hermes folds `-` into `_`, so a filter on the tool name could miss a second use 
    prefix that the park regex lacks: `quickbooks__create-bill` must never pair with a park for `create-bill`.
 2. A park request P **matches** only if all hold: same agent, tool = the Hermes tool name, server = `park:<slug>`,
    status and decision `approved`, `consumed_at` present and within the last **120 s** (5 s of clock skew allowed
-   against this host's clock),
-   consumed before the approval expired, no truncated arguments, and the digest of P's arguments equals G's.
+   against this host's clock; the approval's own expiry is not read, withHuman already refused to consume an
+   expired one), no truncated arguments, and the digest of P's arguments equals G's.
 3. No match: ask a person (`no-approved-park`). Two matches: ask a person (`ambiguous-park`).
 4. On the single match P: arguments the approver could not read go to a person (`redacted-args`: P's arguments hold
    the `[redacted]` placeholder anywhere, or G's arguments would be redacted or cut short by the park hook's own
@@ -448,6 +448,8 @@ stateDiagram-v2
   outcome (`executed`, `failed`, `unknown`) or a human decision (`denied`, `expired`) are kept.
 - `unknown` is final on purpose: the approval was already used, so the call is never retried automatically. A
   person checks QuickBooks (runbook: [UNKNOWN outcome](runbook.md#outcome-unknown)).
+  When the cause was a timeout, the executor's reply says the call "did not finish in time" and may or may not have
+  gone through; the state and the rule are the same.
 - `gateway_passed_at` is no longer written: the bridge does not open the ledger (it asks withHuman). The column
   stays; old rows may have it set and nothing reads it. `notified_at` is set when the chat was told about a decision.
 - `decided_by` (nullable, `"Name (channel)"`) is written in the same single update as the decision, only for

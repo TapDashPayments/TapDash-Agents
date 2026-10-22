@@ -21,8 +21,16 @@ Documented facts this relies on (withHuman docs / source, read 2026-10-22):
 * `GET https://app.withhuman.ai/api/v1/requests?agent_slug=&q=&limit=` lists one agent's requests,
   newest first, including automatic decisions; `q` is a case-insensitive substring of tool or instance
   name; `limit` max 200. Response `{"requests": [...]}`; each item has `id, agent_slug, tool, server,
-  arguments, context, status, decision{status, decided_at, expires_at, note}, consumption{consumed_at,
-  outcome}, created_at, deadline_at` (verified live 2026-10-22).
+  arguments, context, status, decision{id, request_id, organization_id, membership_id, status, channel,
+  reviewer_display_name, reviewer_email, authentication, idempotency_key, decided_at, note?},
+  consumption{consumed_at, outcome?}, created_at, deadline_at`. The listing's `decision` carries **no**
+  `expires_at` (withHuman `internal/httpapi/representations.go`, `approvalDecisionResponse`; checked live
+  2026-10-22 on every listed park). An earlier version of this spec said `expires_at` was verified live; that
+  was wrong, and it made the deployed bridge send every real approval to a person a second time. Expiry exists
+  only on the agent-side AAP representation, and the bridge does not need it: withHuman's consume refuses an
+  expired approval (`approval_expired`) before it records `consumed_at`, in the same serializable transaction
+  (`internal/postgres/consumptions.go`, `consumeApproval`), so a recorded `consumed_at` already proves the
+  approval was unexpired when it was used.
 * Consume: "only one consume succeeds"; the executor consumes the park approval, then dispatches the
   call through the gateway (so the gateway request is created seconds after `consumed_at`).
 * Webhook block payload (withHuman source `internal/webhookdelivery/payload.go`): `request.id` is the
@@ -48,9 +56,12 @@ human verdict; the `why` code is what the bridge's log says.
    `P.agent_slug == G.agent_slug`, `P.tool == park_tool`, `P.server == park_server`,
    `P.status == "approved"`, `P.decision.status == "approved"`, `P.consumption.consumed_at` parses
    (timezone-aware ISO 8601), `consumed_at <= now + SKEW_SECONDS` and
-   `now - consumed_at <= WINDOW_SECONDS`, `P.decision.expires_at` parses and `consumed_at <= expires_at`,
+   `now - consumed_at <= WINDOW_SECONDS`,
    `P.context` is a dict without a truthy `args_truncated`, `P.arguments` is a dict and
-   `args_digest(P.arguments) == digest`.
+   `args_digest(P.arguments) == digest`. `P.decision.expires_at` is never read (see the facts above).
+   The window is what retires a park: live parks consumed days ago still have no `consumption.outcome` (absent or null; the code uses `.get`),
+   because the executor never reports an outcome (`gatecall.py` builds the gate with `report_outcomes=False`),
+   so without the window a consumed park with no outcome would stay eligible for ever.
 3. Zero matches -> human (`no-approved-park`). More than one -> human (`ambiguous-park`).
 4. On the single match P, in this order:
    * **Redaction** (`redacted-args`): P.arguments contain `gatecall.REDACTED` anywhere (dict values, list items,
