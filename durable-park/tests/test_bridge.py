@@ -2,8 +2,7 @@ import hashlib
 import hmac
 import json
 import logging
-import sqlite3
-import threading
+from datetime import datetime, timedelta, timezone
 
 import warnings
 
@@ -19,16 +18,22 @@ with warnings.catch_warnings():
                             message=r"Using `httpx` with `starlette\.testclient` is deprecated")
     from starlette.testclient import TestClient
 
-from bridge.app import (BLOCK_TYPE, DEFAULT_SECRET_FILE, NO_PARK_REASON, _DeliveryStore, create_app,
-                        load_secret, parse_args, verify_signature)
-from durable_park.ledger import Ledger, args_digest
+import bridge.app as bridge_app
+from bridge.app import (BLOCK_TYPE, DEFAULT_SECRET_FILE, NO_PARK_REASON, create_app, load_secret, parse_args,
+                        verify_signature)
+from bridge.verify import expected_park
+from bridge.whapi import DEFAULT_API_BASE, DEFAULT_KEY_FILE, ListError
+from durable_park.gatecall import gateway_slug
+from durable_park.ledger import args_digest
 
 SECRET = "whsec_0123456789abcdefTESTSECRETvalue=="
+FAKE_KEY = "whk_FAKE-ORG-KEY-do-not-leak-0123456789"
 NOW = 1_800_000_000.0
 TOOL = "create_payment"
 SERVER = "quickbooks"
 ARGS = {"Amount": 5, "CustomerRef": {"value": "58"}, "withhuman_scope": "default"}
 PRIVATE_VALUE = "ACME-PRIVATE-VALUE-123"
+PARK_TOOL, PARK_SERVER = expected_park(SERVER, TOOL)
 
 
 def sign(body: bytes, *, secret=SECRET, t=NOW):
@@ -38,38 +43,82 @@ def sign(body: bytes, *, secret=SECRET, t=NOW):
 
 
 def payload(*, server=SERVER, tool=TOOL, arguments=None, slug="proto-agents", preview=False,
-            type_=BLOCK_TYPE, delivery_id="del-1", idempotency_key="idem-1"):
+            type_=BLOCK_TYPE, delivery_id="del-1", idempotency_key="idem-1", request_id="req_1"):
+    request = {"tool": tool, "server": server,
+               "arguments": ARGS if arguments is None else arguments,
+               "created_at": "2026-10-19T12:00:00Z", "deadline_at": "2026-10-19T12:10:00Z"}
+    if request_id is not None:
+        request["id"] = request_id
     return {
         "version": "2026-09-01", "type": type_, "preview": preview,
         "delivery_id": delivery_id, "idempotency_key": idempotency_key, "organization_id": "org_1",
         "block": {"id": "blk_1", "name": "durable-park-bridge", "attempt": 1, "max_attempts": 2},
         "pipeline": {"evaluation_id": "ev_1"},
-        "request": {"id": "req_1", "tool": tool, "server": server,
-                    "arguments": ARGS if arguments is None else arguments,
-                    "created_at": "2026-10-19T12:00:00Z", "deadline_at": "2026-10-19T12:10:00Z"},
+        "request": request,
         "agent": {"slug": slug, "name": "Proto Agents"},
     }
 
 
-@pytest.fixture
-def ledger(tmp_path):
-    return Ledger(str(tmp_path / "ledger.db"))
+# ---- withHuman-shaped request records and a fake lister --------------------------------------
+
+def iso(offset: float) -> str:
+    return datetime.fromtimestamp(NOW + offset, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def park_item(*, id="park_req_1", args=None, consumed=-10, tool=PARK_TOOL, server=PARK_SERVER,
+              slug="proto-agents"):
+    """The park request withHuman holds after the model asked, a person approved and the executor consumed it."""
+    return {
+        "id": id, "agent_slug": slug, "tool": tool, "server": server,
+        "arguments": ARGS if args is None else args, "context": {},
+        "status": "approved",
+        "decision": {"status": "approved", "decided_at": iso(consumed - 60), "expires_at": iso(86400),
+                     "note": None},
+        "consumption": {"consumed_at": iso(consumed), "outcome": None},
+        "created_at": iso(consumed - 120), "deadline_at": iso(86400),
+    }
+
+
+def gateway_item(*, id, created, args=None, server=SERVER, tool=TOOL, status="pending", slug="proto-agents"):
+    """A request that came through the gateway (what the webhook block is asked about)."""
+    return {
+        "id": id, "agent_slug": slug, "tool": tool, "server": server,
+        "arguments": ARGS if args is None else args, "context": {},
+        "status": status, "decision": None, "consumption": None,
+        "created_at": iso(created), "deadline_at": iso(created + 600),
+    }
+
+
+class FakeLister:
+    """Records every ``list`` call and answers from canned lists keyed by ``q`` (or raises)."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.by_q: dict[str, list] = {}
+        self.raises: dict[str, Exception] = {}
+
+    def list(self, *, agent_slug, q, limit=50, deadline=None):
+        self.calls.append({"agent_slug": agent_slug, "q": q, "limit": limit, "deadline": deadline})
+        if q in self.raises:
+            raise self.raises[q]
+        return list(self.by_q.get(q, []))
 
 
 @pytest.fixture
-def client(tmp_path, ledger):
-    app = create_app(ledger_path=ledger.path, secret=SECRET, expected_agent="proto-agents",
-                     clock=lambda: NOW)
-    return TestClient(app)
+def lister():
+    return FakeLister()
 
 
-def executing_park(ledger, *, tool=f"mcp__wh__{SERVER}__{TOOL}", args=None, call="c1"):
-    args = ARGS if args is None else args
-    row = ledger.park(session_key="tg:1", session_id="s1", tool_call_id=call, tool=tool, args=args,
-                      call_key=hashlib.sha256(call.encode()).hexdigest(), server=f"park:{SERVER}")
-    assert ledger.transition(row.park_id, "parked", "approved")
-    assert ledger.transition(row.park_id, "approved", "executing", executing_at="2026-10-19T12:00:00.000000Z")
-    return row
+@pytest.fixture
+def client(lister):
+    return TestClient(create_app(secret=SECRET, lister=lister, expected_agent="proto-agents",
+                                 clock=lambda: NOW))
+
+
+def arm(lister, *, tool=TOOL, park=None, neighbours=None, park_q=PARK_TOOL):
+    """Make withHuman hold one consumed park for the call, and the gateway request itself (req_1)."""
+    lister.by_q[park_q] = [park_item() if park is None else park]
+    lister.by_q[tool] = [gateway_item(id="req_1", created=-5)] if neighbours is None else neighbours
 
 
 def deliver(client, body_obj=None, *, key="idem-1", headers=None, raw=None, signature=True, t=NOW,
@@ -87,7 +136,7 @@ def deliver(client, body_obj=None, *, key="idem-1", headers=None, raw=None, sign
     return client.post("/wh/bridge", content=raw, headers=hdrs)
 
 
-def approves(client, key, **kw):
+def approves(client, key="k-ok", **kw):
     """A well-formed delivery that must be approved: proves a preceding human was for the intended reason."""
     resp = deliver(client, key=key, **kw)
     assert resp.status_code == 200 and resp.json()["outcome"] == "approve", resp.text
@@ -98,38 +147,75 @@ def human(resp):
     assert resp.json() == {"outcome": "human", "reason": NO_PARK_REASON}
 
 
-# ---- the five brief-named tests -------------------------------------------------------------
-
-def test_bridge_approves_matching_executing_once(client, ledger):
-    row = executing_park(ledger)
-    first = deliver(client, payload(delivery_id="d1", idempotency_key="k1"),
-                    headers={"WithHuman-Idempotency-Key": "k1"})
-    assert first.status_code == 200
-    assert first.headers["content-type"].startswith("application/json")
-    assert first.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
-    assert ledger.get(row.park_id).gateway_passed_at is not None
-    # a second identical call (a different delivery) is not auto-approved again
-    second = deliver(client, payload(delivery_id="d2", idempotency_key="k2"),
-                     headers={"WithHuman-Idempotency-Key": "k2"})
-    human(second)
+def bridge_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "durable_park.bridge"]
 
 
-def test_bridge_unmatched_goes_to_human(client, ledger):
-    human(deliver(client))  # nothing parked at all
-    executing_park(ledger, tool="mcp__wh__quickbooks__create_invoice")  # other tool is executing
+# ---- the core decision ------------------------------------------------------------------------
+
+def test_bridge_approves_when_an_approved_consumed_park_matches(client, lister):
+    arm(lister)
+    resp = deliver(client)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
+
+
+def test_bridge_asks_withhuman_for_parks_then_for_gateway_requests(client, lister):
+    arm(lister)
+    deliver(client)
+    assert [(c["agent_slug"], c["q"], c["limit"]) for c in lister.calls] == [
+        ("proto-agents", PARK_TOOL, 50), ("proto-agents", TOOL, 50)]
+
+
+def test_bridge_unmatched_goes_to_human(client, lister):
+    human(deliver(client))  # withHuman holds nothing
+    arm(lister, park=park_item(tool="mcp__wh__quickbooks__create_invoice"))  # a park for another tool
     human(deliver(client, key="k-other"))
 
 
-def test_bridge_args_mismatch_goes_to_human(client, ledger):
-    row = executing_park(ledger)
-    changed = dict(ARGS, Amount=6)
-    human(deliver(client, payload(arguments=changed)))
-    assert ledger.get(row.park_id).gateway_passed_at is None
-    approves(client, "k-ok")  # the exact arguments are what gets approved
+def test_bridge_args_mismatch_goes_to_human(client, lister):
+    arm(lister)
+    human(deliver(client, payload(arguments=dict(ARGS, Amount=6))))
+    approves(client)  # the exact arguments are what gets approved
 
 
-def test_bridge_bad_signature_401(client, ledger):
-    row = executing_park(ledger)
+def test_bridge_unapproved_park_goes_to_human(client, lister):
+    parked = park_item()
+    parked["status"] = "pending"
+    arm(lister, park=parked)
+    human(deliver(client))
+
+
+def test_bridge_second_gateway_request_after_consumption_goes_to_human(client, lister):
+    arm(lister, neighbours=[gateway_item(id="req_0", created=-8), gateway_item(id="req_1", created=-5)])
+    human(deliver(client))
+
+
+def test_bridge_gateway_request_before_consumption_does_not_count_as_a_use(client, lister):
+    arm(lister, neighbours=[gateway_item(id="req_0", created=-3600), gateway_item(id="req_1", created=-5)])
+    approves(client)
+
+
+def test_retry_of_the_same_gateway_request_approves_again(client, lister):
+    arm(lister)
+    first = deliver(client, payload(delivery_id="a1", idempotency_key="k1"),
+                    headers={"WithHuman-Delivery-Id": "a1"})
+    retry = deliver(client, payload(delivery_id="a2", idempotency_key="k2"),
+                    headers={"WithHuman-Delivery-Id": "a2"})
+    assert first.json() == retry.json() == {"outcome": "approve",
+                                            "reason": "Matches approved park request park_req_1"}
+
+
+def test_park_for_another_agent_goes_to_human(client, lister):
+    arm(lister, park=park_item(slug="someone-else"))
+    human(deliver(client))
+
+
+# ---- signature, size, routing -----------------------------------------------------------------
+
+def test_bridge_bad_signature_401(client, lister):
+    arm(lister)
     raw = json.dumps(payload()).encode()
     wrong = deliver(client, raw=raw, secret="whsec_wrong")
     assert wrong.status_code == 401 and wrong.content == b""
@@ -138,19 +224,17 @@ def test_bridge_bad_signature_401(client, ledger):
     assert deliver(client, raw=raw, headers={"WithHuman-Signature": f"t={int(NOW)},v1=zz"}).status_code == 401
     tampered = sign(raw)
     assert deliver(client, raw=raw + b" ", headers={"WithHuman-Signature": tampered}).status_code == 401
-    assert ledger.get(row.park_id).gateway_passed_at is None
+    assert lister.calls == []
 
 
-def test_bridge_stale_timestamp_401(client, ledger):
-    row = executing_park(ledger)
+def test_bridge_stale_timestamp_401(client, lister):
+    arm(lister)
     assert deliver(client, t=NOW - 301).status_code == 401
     assert deliver(client, t=NOW + 301).status_code == 401
-    assert ledger.get(row.park_id).gateway_passed_at is None
+    assert lister.calls == []
     # exactly at the tolerance edge is still accepted
     assert deliver(client, t=NOW - 300).status_code == 200
 
-
-# ---- signature details ----------------------------------------------------------------------
 
 def test_signature_key_is_the_whole_whsec_string_as_text():
     raw = b'{"a":1}'
@@ -177,9 +261,10 @@ def test_signature_header_edge_cases():
     assert not verify_signature(f"t=1e9,{v1}", raw, SECRET, NOW)
 
 
-def test_oversized_body_rejected(client):
+def test_oversized_body_rejected(client, lister):
     big = b"x" * (1024 * 1024 + 1)
     assert deliver(client, raw=big).status_code == 413
+    assert lister.calls == []
 
 
 def test_only_post_allowed(client):
@@ -187,98 +272,70 @@ def test_only_post_allowed(client):
     assert client.post("/elsewhere", content=b"{}").status_code == 404
 
 
-# ---- R20 -------------------------------------------------------------------------------------
+# ---- payload checks short-circuit before any withHuman call ----------------------------------
 
-def test_wrong_agent_slug_goes_to_human(client, ledger):
-    row = executing_park(ledger)
+def test_wrong_agent_slug_goes_to_human_without_asking_withhuman(client, lister):
+    arm(lister)
     human(deliver(client, payload(slug="someone-else")))
-    assert ledger.get(row.park_id).gateway_passed_at is None
-    approves(client, "k-ok")
+    assert lister.calls == []
+    approves(client)
 
 
-def test_preview_delivery_goes_to_human_and_never_marks(client, ledger):
-    row = executing_park(ledger)
+def test_preview_delivery_goes_to_human_without_asking_withhuman(client, lister):
+    arm(lister)
     human(deliver(client, payload(preview=True)))
-    assert ledger.get(row.park_id).gateway_passed_at is None
-    # the real delivery afterwards still gets its one approval
-    approves(client, "k-real")
+    assert lister.calls == []
+    approves(client, "k-real")  # the real delivery afterwards is judged on its own
 
 
-def test_other_delivery_type_goes_to_human(client, ledger):
-    row = executing_park(ledger)
+def test_other_delivery_type_goes_to_human_without_asking_withhuman(client, lister):
+    arm(lister)
     human(deliver(client, payload(type_="webhook_endpoint.test")))
-    assert ledger.get(row.park_id).gateway_passed_at is None
-    approves(client, "k-ok")
+    assert lister.calls == []
+    approves(client)
 
 
-# ---- idempotent retries ----------------------------------------------------------------------
-
-def test_same_idempotency_key_retry_gets_approve_again(client, ledger):
-    row = executing_park(ledger)
-    hdr = {"WithHuman-Idempotency-Key": "k1"}
-    first = deliver(client, payload(delivery_id="a1", idempotency_key="k1"),
-                    headers={**hdr, "WithHuman-Delivery-Id": "a1"})
-    retry = deliver(client, payload(delivery_id="a2", idempotency_key="k1"),
-                    headers={**hdr, "WithHuman-Delivery-Id": "a2"})
-    assert first.json() == retry.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
-    # a different delivery for the same call is still refused
-    other = deliver(client, payload(idempotency_key="k2"), headers={"WithHuman-Idempotency-Key": "k2"})
-    human(other)
-    # and a second park with the same call can only be approved by its own delivery
-    second = executing_park(ledger, call="c2")
-    again = deliver(client, payload(idempotency_key="k3"), headers={"WithHuman-Idempotency-Key": "k3"})
-    assert again.json() == {"outcome": "approve", "reason": f"Matches approved park {second.park_id}"}
+@pytest.mark.parametrize("preview", ["false", 0, None, "true", 1, True, []])
+def test_only_explicit_false_preview_proceeds(client, lister, preview):
+    arm(lister)
+    body = payload()
+    body["preview"] = preview
+    human(deliver(client, body))
+    assert lister.calls == []
+    approves(client)
 
 
-def test_human_answer_is_replayed_for_same_key(client, ledger):
-    human(deliver(client, key="k9"))
-    executing_park(ledger)  # a matching park appears after the first answer
-    human(deliver(client, key="k9"))  # same evaluation: same answer
-    approves(client, "k10")
+def test_absent_preview_proceeds(client, lister):
+    arm(lister)
+    body = payload()
+    del body["preview"]
+    assert deliver(client, body).json()["outcome"] == "approve"
 
 
-def test_missing_or_mismatched_idempotency_key_goes_to_human(client, ledger):
-    row = executing_park(ledger)
+def test_missing_or_mismatched_idempotency_key_goes_to_human_without_asking_withhuman(client, lister):
+    arm(lister)
     raw = json.dumps(payload(idempotency_key="body-key")).encode()
-    hdrs = {"WithHuman-Signature": sign(raw)}
-    resp = client.post("/wh/bridge", content=raw, headers=hdrs)  # no idempotency header
+    resp = client.post("/wh/bridge", content=raw, headers={"WithHuman-Signature": sign(raw)})  # no header
     human(resp)
     human(deliver(client, payload(idempotency_key="body-key"), headers={"WithHuman-Idempotency-Key": "other"}))
-    assert ledger.get(row.park_id).gateway_passed_at is None
-    approves(client, "k-ok")
+    assert lister.calls == []
+    approves(client)
 
-
-def test_deliveries_live_in_a_separate_file_and_ledger_schema_untouched(client, ledger, tmp_path):
-    executing_park(ledger)
-    deliver(client, key="k1")
-    con = sqlite3.connect(ledger.path)
-    tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
-    con.close()
-    assert tables == {"parks"}
-    others = [p for p in tmp_path.iterdir() if p.name.startswith("bridge_deliveries")]
-    assert others, "expected a bridge_deliveries*.db next to the ledger"
-
-
-# ---- failure behaviour -----------------------------------------------------------------------
 
 @pytest.mark.parametrize("raw", [b"not json", b"[]", b'{"type":"request_approval_block.webhook"}',
                                  b'{"type":"request_approval_block.webhook","preview":false,'
                                  b'"agent":{"slug":"proto-agents"},"request":{"tool":"t","server":"s","arguments":[]}}'])
-def test_malformed_but_signed_body_goes_to_human(client, raw):
+def test_malformed_but_signed_body_goes_to_human_without_asking_withhuman(client, lister, raw):
     human(deliver(client, raw=raw, headers={"WithHuman-Idempotency-Key": "k1"}))
+    assert lister.calls == []
 
 
-def test_ledger_error_goes_to_human(tmp_path):
-    app = create_app(ledger_path=str(tmp_path / "no" / "such" / "dir" / "ledger.db"), secret=SECRET,
-                     expected_agent="proto-agents", clock=lambda: NOW)
-    human(deliver(TestClient(app)))
-
-
-def test_missing_secret_answers_401_to_everything(tmp_path, ledger, caplog):
+def test_missing_secret_answers_401_to_everything(tmp_path, lister):
     assert load_secret(str(tmp_path / "absent")) is None
-    app = create_app(ledger_path=ledger.path, secret=None, expected_agent="proto-agents", clock=lambda: NOW)
+    app = create_app(secret=None, lister=lister, expected_agent="proto-agents", clock=lambda: NOW)
     resp = deliver(TestClient(app))
     assert resp.status_code == 401 and resp.content == b""
+    assert lister.calls == []
 
 
 def test_load_secret(tmp_path, caplog):
@@ -295,12 +352,12 @@ def test_load_secret(tmp_path, caplog):
 
 # ---- logging ---------------------------------------------------------------------------------
 
-def test_one_log_line_per_delivery_without_values(client, ledger, caplog):
+def test_one_log_line_per_delivery_without_values(client, lister, caplog):
     caplog.set_level(logging.INFO, logger="durable_park.bridge")
     args = {"Amount": 5, "Memo": PRIVATE_VALUE, "withhuman_scope": "default"}
-    row = executing_park(ledger, args=args)
+    arm(lister, park=park_item(args=args))
     deliver(client, payload(arguments=args, delivery_id="del-77"))
-    lines = [r.getMessage() for r in caplog.records if r.name == "durable_park.bridge"]
+    lines = bridge_lines(caplog)
     assert len(lines) == 1
     line = lines[0]
     for needed in ("del-77", SERVER, TOOL, "Amount,Memo,withhuman_scope", args_digest(args), "approve"):
@@ -320,7 +377,7 @@ def test_rejected_signature_logs_without_secret(client, caplog):
 def test_human_line_names_the_reason_tag(client, caplog):
     caplog.set_level(logging.INFO, logger="durable_park.bridge")
     deliver(client, payload(slug="other"))
-    (line,) = [r.getMessage() for r in caplog.records if r.name == "durable_park.bridge"]
+    (line,) = bridge_lines(caplog)
     assert "outcome=human" in line and "why=agent" in line
 
 
@@ -328,226 +385,257 @@ def test_endpoint_test_delivery_without_request_logs_why_type(client, caplog):
     caplog.set_level(logging.INFO, logger="durable_park.bridge")
     body = {"version": "2026-09-01", "type": "webhook_endpoint.test", "delivery_id": "t-1"}
     human(deliver(client, body, key="kt"))
-    (line,) = [r.getMessage() for r in caplog.records if r.name == "durable_park.bridge"]
+    (line,) = bridge_lines(caplog)
     assert "outcome=human" in line and "why=type" in line
 
 
-@pytest.mark.parametrize("preview", ["false", 0, None, "true", 1, True, []])
-def test_only_explicit_false_preview_proceeds(client, ledger, preview):
-    row = executing_park(ledger)
-    body = payload()
-    body["preview"] = preview
-    human(deliver(client, body))
-    assert ledger.get(row.park_id).gateway_passed_at is None
-    approves(client, "k-ok")
-
-
-def test_absent_preview_proceeds(client, ledger):
-    executing_park(ledger)
-    body = payload()
-    del body["preview"]
-    body["idempotency_key"] = "k-absent"
-    assert deliver(client, body).json()["outcome"] == "approve"
-
-
-# ---- replay is bound to the call -------------------------------------------------------------
-
-def test_replay_with_changed_arguments_goes_to_human(client, ledger):
-    first = executing_park(ledger)
-    other_args = dict(ARGS, Amount=6)
-    other = executing_park(ledger, args=other_args, call="c2")  # a legitimate, unused park for the NEW args
-    approves(client, "k1")
-    human(deliver(client, payload(arguments=other_args, idempotency_key="k1")))
-    assert ledger.get(other.park_id).gateway_passed_at is None
-    assert ledger.get(first.park_id).gateway_passed_at is not None
-    # the genuine retry (same body) still replays the approve
-    assert deliver(client, payload(idempotency_key="k1")).json() == {
-        "outcome": "approve", "reason": f"Matches approved park {first.park_id}"}
-    # and the other park is approvable under its own key
-    approves(client, "k2", body_obj=payload(arguments=other_args, idempotency_key="k2"))
-
-
-def test_replay_with_different_tool_goes_to_human(client, ledger):
-    first = executing_park(ledger)
-    invoice = executing_park(ledger, tool="mcp__wh__quickbooks__create_invoice", call="c3")
-    approves(client, "k1")
-    human(deliver(client, payload(tool="create_invoice", idempotency_key="k1")))
-    assert ledger.get(invoice.park_id).gateway_passed_at is None
-    human(deliver(client, payload(server="docusign", idempotency_key="k1")))
-
-
-def test_replay_mismatch_is_logged(client, ledger, caplog):
-    executing_park(ledger)
-    approves(client, "k1")
-    caplog.set_level(logging.INFO, logger="durable_park.bridge")
-    deliver(client, payload(arguments={"Amount": 7}, idempotency_key="k1"))
-    assert "why=replay-mismatch" in caplog.text and "outcome=human" in caplog.text
-
-
-def test_store_binds_agent_slug_too(tmp_path):
-    store = _DeliveryStore(str(tmp_path / "d.db"))
-    calls = []
-
-    def decide():
-        calls.append(1)
-        return "approve", "P-1"
-
-    assert store.decide_once("k", "d1", "n", "dg", "agent-a", decide) == ("approve", "P-1", "new")
-    assert store.decide_once("k", "d2", "n", "dg", "agent-a", decide) == ("approve", "P-1", "replay")
-    for changed in (("n2", "dg", "agent-a"), ("n", "dg2", "agent-a"), ("n", "dg", "agent-b")):
-        assert store.decide_once("k", "d3", *changed, decide) == ("human", None, "replay-mismatch")
-    assert calls == [1]
-
-
-def test_old_deliveries_file_without_binding_columns_is_migrated(tmp_path):
-    path = tmp_path / "d.db"
-    con = sqlite3.connect(path)
-    con.execute("CREATE TABLE deliveries (idempotency_key TEXT PRIMARY KEY, delivery_id TEXT,"
-                " outcome TEXT NOT NULL, park_id TEXT, created_at TEXT NOT NULL)")
-    con.execute("INSERT INTO deliveries VALUES ('k','d','approve','P-1','t')")
-    con.commit()
-    con.close()
-    store = _DeliveryStore(str(path))
-    assert store.decide_once("k", "d2", "n", "dg", "a", lambda: ("approve", "P-2")) == ("human", None, "replay-mismatch")
-
-
-# ---- ledger path safety ----------------------------------------------------------------------
-
-def test_missing_ledger_file_is_never_created(tmp_path, caplog):
-    path = tmp_path / "ledger.db"  # directory exists, file does not
-    app = create_app(ledger_path=str(path), secret=SECRET, expected_agent="proto-agents", clock=lambda: NOW)
-    caplog.set_level(logging.INFO, logger="durable_park.bridge")
-    c = TestClient(app)
-    human(deliver(c, key="k1"))
-    human(deliver(c, key="k2"))
-    assert not path.exists()
-    assert not (tmp_path / "bridge_deliveries.db").exists()
-    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert len(errors) == 1 and "does not exist" in errors[0].getMessage()
-    assert "why=ledger-missing" in caplog.text
-    # once the ledger appears (created by the plugin), the bridge works without a restart
-    ledger = Ledger(str(path))
-    executing_park(ledger)
-    approves(c, "k3")
-
-
-# ---- concurrency -----------------------------------------------------------------------------
-
-def test_two_threads_same_park_different_keys_exactly_one_approve(tmp_path, ledger):
-    app = create_app(ledger_path=ledger.path, secret=SECRET, expected_agent="proto-agents", clock=lambda: NOW)
-    for n in range(6):
-        row = executing_park(ledger, args=dict(ARGS, Amount=100 + n), call=f"cc{n}")
-        barrier = threading.Barrier(2)
-        results = []
-
-        def worker(key):
-            c = TestClient(app)
-            barrier.wait()
-            results.append(deliver(c, payload(arguments=dict(ARGS, Amount=100 + n), idempotency_key=key)).json())
-
-        threads = [threading.Thread(target=worker, args=(f"race-{n}-{i}",)) for i in range(2)]
-        [t.start() for t in threads]
-        [t.join(30) for t in threads]
-        assert sorted(r["outcome"] for r in results) == ["approve", "human"], results
-        assert ledger.get(row.park_id).gateway_passed_at is not None
-
-
-# ---- config ----------------------------------------------------------------------------------
-
-def test_parse_args_defaults_and_env(monkeypatch):
-    monkeypatch.delenv("DURABLE_PARK_LEDGER", raising=False)
-    monkeypatch.delenv("DURABLE_PARK_BRIDGE_SECRET_FILE", raising=False)
-    monkeypatch.delenv("DURABLE_PARK_EXPECTED_AGENT", raising=False)
-    ns = parse_args(["--ledger", "/x/ledger.db"])
-    assert (ns.ledger, ns.secret_file, ns.host, ns.port, ns.expected_agent) == (
-        "/x/ledger.db", DEFAULT_SECRET_FILE, "127.0.0.1", 8791, "proto-agents")
-    assert DEFAULT_SECRET_FILE == "/etc/durable-park/bridge_secret"
-    monkeypatch.setenv("DURABLE_PARK_LEDGER", "/env/ledger.db")
-    monkeypatch.setenv("DURABLE_PARK_EXPECTED_AGENT", "agent-z")
-    ns = parse_args([])
-    assert ns.ledger == "/env/ledger.db" and ns.expected_agent == "agent-z"
-    monkeypatch.delenv("DURABLE_PARK_LEDGER")
-    with pytest.raises(SystemExit):
-        parse_args([])
-
-
-# ---- R22: model-style park vs gateway-style delivery ------------------------------------------
-
-def test_model_args_park_matches_gateway_delivery_with_default_scope(client, ledger):
-    params = {"params": {"CustomerRef": {"value": "58"}, "TotalAmt": 12.5}}
-    row = executing_park(ledger, args={**params, "withhuman_context": "paying invoice 42"})  # what the model sent
-    other = deliver(client, payload(arguments={**params, "withhuman_scope": "other"}, delivery_id="d-o",
-                                    idempotency_key="k-other"))
-    human(other)  # a different scope is a different call
-    assert ledger.get(row.park_id).gateway_passed_at is None
-    resp = deliver(client, payload(arguments={**params, "withhuman_scope": "default"}, delivery_id="d-g",
-                                   idempotency_key="k-gw"))  # what the gateway delivered
-    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
-    assert ledger.get(row.park_id).gateway_passed_at is not None
-
-
-# ---- v2 Important #1: tool names are matched the way Hermes registers them ------------------
+# ---- the tool name is built the way Hermes registers it ---------------------------------------
 # withHuman sends the downstream server's own tool name (e.g. "create-bill"); Hermes registers it as
 # mcp__<server>__<tool> with every char outside [A-Za-z0-9_] turned into "_" and names over 64 chars
 # clamped with an 8-hex sha256 suffix (hermes-agent tools/mcp_tool_schema.py, v0.22.2).
 
-@pytest.mark.parametrize("wire_tool, hermes_tool", [
-    ("create-bill", "mcp__wh__quickbooks__create_bill"),
-    ("update-bill", "mcp__wh__quickbooks__update_bill"),
-    ("delete-bill", "mcp__wh__quickbooks__delete_bill"),
+def hermes_clamped(natural: str) -> str:
+    return natural[:64 - 9] + "_" + hashlib.sha256(natural.encode()).hexdigest()[:8]
+
+
+@pytest.mark.parametrize("wire_server, wire_tool, hermes_tool", [
+    ("quickbooks", "create-bill", "mcp__wh__quickbooks__create_bill"),
+    ("quickbooks", "update-bill", "mcp__wh__quickbooks__update_bill"),
+    ("quickbooks", "delete-bill", "mcp__wh__quickbooks__delete_bill"),
+    ("quick-books", "create.pay ment-v2", "mcp__wh__quick_books__create_pay_ment_v2"),
+    ("quickbooks", "create-" + "x" * 70, hermes_clamped("mcp__wh__quickbooks__create_" + "x" * 70)),
+    ("quickbooks", "c-" + "x" * 41, "mcp__wh__quickbooks__c_" + "x" * 41),  # exactly 64 chars: no clamp
 ])
-def test_bridge_hyphenated_bill_tool_matches_hermes_name(client, ledger, wire_tool, hermes_tool):
-    row = executing_park(ledger, tool=hermes_tool)
-    resp = deliver(client, payload(tool=wire_tool, idempotency_key=f"k-{wire_tool}"))
-    assert resp.status_code == 200
-    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
-    assert ledger.get(row.park_id).gateway_passed_at is not None
+def test_bridge_asks_for_parks_under_the_hermes_tool_name_and_matches_them(client, lister, wire_server,
+                                                                          wire_tool, hermes_tool):
+    assert len(hermes_tool) <= 64
+    lister.by_q[hermes_tool] = [park_item(tool=hermes_tool, server="park:" + gateway_slug(hermes_tool))]
+    lister.by_q[wire_tool] = [gateway_item(id="req_1", created=-5, server=wire_server, tool=wire_tool)]
+    resp = deliver(client, payload(server=wire_server, tool=wire_tool))
+    assert [c["q"] for c in lister.calls] == [hermes_tool, wire_tool]
+    assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
 
 
 @pytest.mark.parametrize("wire_tool", ["create-bill", "update-bill", "delete-bill"])
-def test_bridge_hyphenated_bill_tool_without_park_goes_to_human(client, ledger, wire_tool):
-    human(deliver(client, payload(tool=wire_tool, idempotency_key=f"k-none-{wire_tool}")))
+def test_bridge_hyphenated_bill_tool_without_park_goes_to_human(client, wire_tool):
+    human(deliver(client, payload(tool=wire_tool)))
 
 
-def test_bridge_sanitizes_server_and_other_characters(client, ledger):
-    row = executing_park(ledger, tool="mcp__wh__quick_books__create_pay_ment_v2")
-    resp = deliver(client, payload(server="quick-books", tool="create.pay ment-v2", idempotency_key="k-chars"))
-    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
+def test_model_args_park_matches_gateway_delivery_with_default_scope(client, lister):
+    params = {"params": {"CustomerRef": {"value": "58"}, "TotalAmt": 12.5}}
+    park = park_item(args={**params, "withhuman_context": "paying invoice 42"})  # what the model sent
+    arm(lister, park=park, neighbours=[gateway_item(id="req_1", created=-5)])
+    human(deliver(client, payload(arguments={**params, "withhuman_scope": "other"})))  # another scope: another call
+    resp = deliver(client, payload(arguments={**params, "withhuman_scope": "default"}, idempotency_key="k-gw"))
+    assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
 
 
-def test_bridge_clamps_long_names_like_hermes(client, ledger):
-    wire_tool = "create-" + "x" * 70
-    natural = "mcp__wh__quickbooks__create_" + "x" * 70
-    clamped = natural[:64 - 9] + "_" + hashlib.sha256(natural.encode()).hexdigest()[:8]
-    assert len(clamped) == 64
-    row = executing_park(ledger, tool=clamped)
-    resp = deliver(client, payload(tool=wire_tool, idempotency_key="k-long"))
-    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
-
-
-def test_bridge_hyphenated_bill_tool_approves_only_once(client, ledger):
-    executing_park(ledger, tool="mcp__wh__quickbooks__create_bill")
-    approves(client, "k-bill-1", body_obj=payload(tool="create-bill", idempotency_key="k-bill-1"))
-    human(deliver(client, payload(tool="create-bill", idempotency_key="k-bill-2")))
-
-
-def test_bridge_name_of_exactly_64_chars_is_not_clamped(client, ledger):
-    prefix = "mcp__wh__quickbooks__"
-    wire_tool = "c-" + "x" * (64 - len(prefix) - 2)
-    name = prefix + "c_" + "x" * (64 - len(prefix) - 2)
-    assert len(name) == 64
-    row = executing_park(ledger, tool=name)
-    resp = deliver(client, payload(tool=wire_tool, idempotency_key="k-64"))
-    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
-
-
-def test_bridge_matches_when_gateway_rewrites_2_point_0_as_2(client, ledger):
+def test_bridge_matches_when_gateway_rewrites_2_point_0_as_2(client, lister):
     model_args = {"params": {"bill": {"Line": [{"Amount": 2.0, "DetailType": "AccountBasedExpenseLineDetail"}],
                                       "TotalAmt": 2.0, "VendorRef": {"value": "56"}}},
                   "withhuman_context": "test bill"}
     gateway_args = {"params": {"bill": {"Line": [{"Amount": 2, "DetailType": "AccountBasedExpenseLineDetail"}],
                                         "TotalAmt": 2, "VendorRef": {"value": "56"}}},
                     "withhuman_scope": "default"}
-    row = executing_park(ledger, tool="mcp__wh__quickbooks__create_bill", args=model_args)
-    resp = deliver(client, payload(tool="create-bill", arguments=gateway_args, idempotency_key="k-float"))
-    assert resp.json() == {"outcome": "approve", "reason": f"Matches approved park {row.park_id}"}
+    bill_tool = "mcp__wh__quickbooks__create_bill"
+    lister.by_q[bill_tool] = [park_item(tool=bill_tool, server="park:" + gateway_slug(bill_tool), args=model_args)]
+    lister.by_q["create-bill"] = [gateway_item(id="req_1", created=-5, tool="create-bill", args=gateway_args)]
+    resp = deliver(client, payload(tool="create-bill", arguments=gateway_args))
+    assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
+
+
+# ---- request.id -------------------------------------------------------------------------------
+
+def body_with_request_id(value):
+    body = payload()
+    if value == "absent":
+        del body["request"]["id"]
+    else:
+        body["request"]["id"] = value
+    return body
+
+
+@pytest.mark.parametrize("bad_id", ["absent", "", None, 5, ["req_1"], {"id": "req_1"}])
+def test_missing_empty_or_non_string_request_id_goes_to_human_without_asking_withhuman(client, lister, bad_id):
+    arm(lister)
+    human(deliver(client, body_with_request_id(bad_id)))
+    assert lister.calls == []
+
+
+def test_missing_request_id_logs_why_no_request_id(client, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    deliver(client, body_with_request_id("absent"))
+    (line,) = bridge_lines(caplog)
+    assert "outcome=human" in line and "why=no-request-id" in line
+
+
+# ---- one overall deadline, the clock ----------------------------------------------------------
+
+def test_both_list_calls_get_one_deadline_of_monotonic_now_plus_three_and_a_half(lister):
+    arm(lister)
+    ticks = iter([1000.0, 1001.0, 1002.0, 1003.0])
+    app = create_app(secret=SECRET, lister=lister, expected_agent="proto-agents", clock=lambda: NOW,
+                     monotonic=lambda: next(ticks))
+    deliver(TestClient(app))
+    assert [c["deadline"] for c in lister.calls] == [1003.5, 1003.5]
+
+
+def test_park_age_is_judged_against_the_injected_clock(lister):
+    arm(lister)  # consumed 10 s before NOW
+    late = create_app(secret=SECRET, lister=lister, expected_agent="proto-agents", clock=lambda: NOW + 200)
+    human(deliver(TestClient(late)))  # 210 s old at the gateway call: outside the 120 s window
+    on_time = create_app(secret=SECRET, lister=lister, expected_agent="proto-agents", clock=lambda: NOW)
+    approves(TestClient(on_time))
+
+
+# ---- withHuman failures go to a person --------------------------------------------------------
+
+@pytest.mark.parametrize("code", ["no-key", "http-403", "deadline", "transport", "shape"])
+def test_list_error_on_the_first_call_goes_to_human_and_logs_its_code(client, lister, caplog, code):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister)
+    lister.raises[PARK_TOOL] = ListError(code)
+    human(deliver(client))
+    assert len(lister.calls) == 1
+    (line,) = bridge_lines(caplog)
+    assert "outcome=human" in line and f"why={code}" in line
+
+
+@pytest.mark.parametrize("code", ["no-key", "http-403", "deadline", "transport", "shape"])
+def test_list_error_on_the_second_call_goes_to_human_and_logs_its_code(client, lister, caplog, code):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister)
+    lister.raises[TOOL] = ListError(code)
+    human(deliver(client))
+    assert len(lister.calls) == 2
+    (line,) = bridge_lines(caplog)
+    assert "outcome=human" in line and f"why={code}" in line
+
+
+def test_unexpected_lister_exception_goes_to_human_and_logs_only_its_class(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister)
+    lister.raises[PARK_TOOL] = RuntimeError(f"boom {PRIVATE_VALUE} {FAKE_KEY}")
+    human(deliver(client))
+    (line,) = bridge_lines(caplog)
+    assert "why=error:RuntimeError" in line
+    assert PRIVATE_VALUE not in caplog.text and FAKE_KEY not in caplog.text
+
+
+# ---- reasons in the log, nothing sensitive in the answer or the log ---------------------------
+
+def test_approve_line_names_the_park_request(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister)
+    deliver(client)
+    (line,) = bridge_lines(caplog)
+    assert "outcome=approve" in line and "why=park-request=park_req_1" in line
+
+
+def test_human_line_names_already_used(client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister, neighbours=[gateway_item(id="req_0", created=-8), gateway_item(id="req_1", created=-5)])
+    deliver(client)
+    (line,) = bridge_lines(caplog)
+    assert "outcome=human" in line and "why=already-used" in line
+
+
+def test_human_line_names_no_approved_park(client, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    deliver(client)  # withHuman holds nothing
+    (line,) = bridge_lines(caplog)
+    assert "outcome=human" in line and "why=no-approved-park" in line
+
+
+def test_responses_never_contain_argument_values(client, lister):
+    args = {"Amount": 5, "Memo": PRIVATE_VALUE, "withhuman_scope": "default"}
+    arm(lister, park=park_item(args=args))
+    approved = deliver(client, payload(arguments=args))
+    refused = deliver(client, payload(arguments=dict(args, Memo=PRIVATE_VALUE + "-x"), idempotency_key="k2"))
+    assert approved.json()["outcome"] == "approve" and refused.json()["outcome"] == "human"
+    assert PRIVATE_VALUE not in approved.text and PRIVATE_VALUE not in refused.text
+
+
+def test_logs_never_contain_argument_values_or_keys_even_when_withhuman_fails(client, lister, caplog):
+    caplog.set_level(logging.DEBUG)
+    args = {"Amount": 5, "Memo": PRIVATE_VALUE, "withhuman_scope": "default"}
+    arm(lister, park=park_item(args=args))
+    deliver(client, payload(arguments=args))
+    lister.raises[PARK_TOOL] = Exception(f"{PRIVATE_VALUE} {FAKE_KEY}")
+    deliver(client, payload(arguments=args, idempotency_key="k2"))
+    assert PRIVATE_VALUE not in caplog.text and FAKE_KEY not in caplog.text and SECRET not in caplog.text
+
+
+def test_ledger_and_delivery_store_are_gone_from_the_bridge():
+    for name in ("_DeliveryStore", "LedgerMissing", "DELIVERIES_FILENAME", "Ledger"):
+        assert not hasattr(bridge_app, name), name
+
+
+# ---- config ----------------------------------------------------------------------------------
+
+def test_parse_args_defaults_and_env(monkeypatch):
+    for name in ("DURABLE_PARK_BRIDGE_SECRET_FILE", "DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_WH_API_BASE",
+                 "DURABLE_PARK_WH_KEY_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    ns = parse_args([])
+    assert (ns.secret_file, ns.host, ns.port, ns.expected_agent, ns.api_base, ns.key_file) == (
+        DEFAULT_SECRET_FILE, "127.0.0.1", 8791, "proto-agents", DEFAULT_API_BASE, DEFAULT_KEY_FILE)
+    assert DEFAULT_SECRET_FILE == "/etc/durable-park/bridge_secret"
+
+
+def test_parse_args_env_overrides(monkeypatch):
+    monkeypatch.setenv("DURABLE_PARK_EXPECTED_AGENT", "agent-z")
+    monkeypatch.setenv("DURABLE_PARK_WH_API_BASE", "https://wh.example/api/v1")
+    monkeypatch.setenv("DURABLE_PARK_WH_KEY_FILE", "/env/key")
+    ns = parse_args([])
+    assert (ns.expected_agent, ns.api_base, ns.key_file) == ("agent-z", "https://wh.example/api/v1", "/env/key")
+
+
+def test_parse_args_flags_beat_env(monkeypatch):
+    monkeypatch.setenv("DURABLE_PARK_WH_API_BASE", "https://env.example/api/v1")
+    ns = parse_args(["--api-base", "https://flag.example/api/v1", "--key-file", "/flag/key"])
+    assert (ns.api_base, ns.key_file) == ("https://flag.example/api/v1", "/flag/key")
+
+
+def test_ledger_flag_is_no_longer_accepted(monkeypatch, capsys):
+    monkeypatch.delenv("DURABLE_PARK_LEDGER", raising=False)
+    with pytest.raises(SystemExit):
+        parse_args(["--ledger", "/x/ledger.db"])
+    assert "--ledger" in capsys.readouterr().err  # argparse names the unknown flag
+
+
+def test_ledger_env_is_ignored(monkeypatch):
+    monkeypatch.setenv("DURABLE_PARK_LEDGER", "/env/ledger.db")
+    assert not hasattr(parse_args([]), "ledger")
+
+
+def test_main_builds_the_request_lister_from_the_cli_options(monkeypatch, tmp_path):
+    import uvicorn
+    built, served = {}, {}
+
+    class Recorder:
+        def __init__(self, base_url, key_file):
+            built["args"] = (base_url, key_file)
+
+    monkeypatch.setattr(bridge_app, "RequestLister", Recorder)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: served.update(app=app, **kw))
+    secret = tmp_path / "secret"
+    secret.write_text(SECRET)
+    bridge_app.main(["--secret-file", str(secret), "--api-base", "https://wh.example/api/v1",
+                     "--key-file", "/k/key", "--port", "9"])
+    assert built["args"] == ("https://wh.example/api/v1", "/k/key")
+    assert served["port"] == 9
+
+
+def test_main_refuses_to_start_on_a_bad_api_base(monkeypatch, tmp_path):
+    import uvicorn
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: pytest.fail("the server must not start"))
+    secret, key = tmp_path / "secret", tmp_path / "key"
+    secret.write_text(SECRET)
+    key.write_text(FAKE_KEY)
+    with pytest.raises(SystemExit) as exc:
+        bridge_app.main(["--secret-file", str(secret), "--key-file", str(key),
+                         "--api-base", "http://insecure.example/api/v1"])
+    message = str(exc.value.code)
+    assert "--api-base" in message and "https" in message
+    assert FAKE_KEY not in message and "insecure.example" not in message

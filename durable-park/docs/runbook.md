@@ -395,6 +395,7 @@ Argument values and the key are never logged.
 | `no-approved-park` | No park request matched: wrong tool name or arguments, not approved, not consumed yet, or consumed more than 120 s before the gateway call | See the two causes below; if the call was simply slow, ask again |
 | `ambiguous-park` | Two park requests matched the same call | Look in withHuman for a duplicate park of the same call; nothing runs twice, a person decides |
 | `already-used` | Another gateway request for the same call was created after the approval was consumed (a retry, or a replay) | Expected for a replay; for a first run, find the earlier gateway request |
+| `no-request-id` | The delivery carried no gateway request id (only real deliveries have one; a preview or test does not) | Nothing for a test; for a real call, tell the developer |
 | `no-key` | `/etc/durable-park/audit_key` is missing, empty or unreadable | [Store the key](#the-gateway-bridge) |
 | `http-403` | The key lacks `request.read` or `request.read.unrouted` | Mint a key with the three permissions |
 | `deadline`, `transport`, `shape` | withHuman was slow (the bridge gives up after 3.5 s), unreachable, or answered something unexpected | Check withHuman's status; the call went to a person, so nothing is lost |
