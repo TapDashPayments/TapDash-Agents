@@ -39,7 +39,8 @@ README) so it never depends on Hermes's Python environment.
 
       durable-park ALERT: the form checker is not working — <reason>. Risky actions will be refused until it is fixed.
 
-- The alert goes wherever the `durable-park-sweep` cron job delivers (today: Telegram). To change it,
+- The alert goes wherever the `durable-park-sweep` cron job delivers (Telegram) and, because
+  `TEAMS_ALERT_WEBHOOK_URL` is set, also to Teams as an Adaptive Card. To change the Telegram delivery,
   change that job's delivery target (Hermes cron `--deliver`; Hermes has email and Teams platforms, which
   must be configured first).
 

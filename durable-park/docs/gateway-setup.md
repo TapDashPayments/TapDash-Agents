@@ -1,8 +1,11 @@
 # QuickBooks behind the withHuman gateway (tunnel)
 
-By design the agent does not hold QuickBooks credentials (the v1 tool lockdown, re-applied 2026-10-21 03:16 UTC, enforces it as a
-configuration guard; since Clean Setup Phase 1 (2026-10-22) `hermes` has no sudo and cannot read the root-only
-`/etc/durable-park/tunnel.env`, but the ledger is still `hermes`-owned until Phase 2, so it is not yet a full permission boundary; see [architecture](architecture.md#the-three-guarantees)). A withHuman **tunnel** container
+In plain English: the AI agent never holds the keys to QuickBooks. A small container on the server (the tunnel) holds
+them and talks to QuickBooks. Every request goes through withHuman first, and the risky ones wait for a person. This
+page says how that is set up, what the pipeline rules are and how to check that it works.
+
+By design the agent does not hold QuickBooks credentials. How strong that guard is today:
+[architecture section 0](architecture.md#0-how-strong-is-it-today). A withHuman **tunnel** container
 (`wh-tunnel`) runs on the VM, makes one outbound HTTPS connection to
 `app.withhuman.ai`, and starts the Intuit QuickBooks MCP server as a child
 process. Every call goes through the withHuman approval pipeline first.
@@ -97,9 +100,8 @@ anywhere:
 - `docker exec wh-tunnel env` / `printenv` / `cat /proc/1/environ`
 - `docker compose run ... env`, `docker run --env-file ... env`
 - `sudo cat /etc/durable-park/tunnel.env`
-- `docker logs wh-tunnel` is probably safe, but this is **unverified** (the
-  tunnel's `run` mode has not been exercised with real values yet): skim it
-  yourself before sharing it.
+- `docker logs wh-tunnel` is probably safe, but nobody has checked its output for
+  secrets: skim it yourself before sharing it.
 
 Note that `QUICKBOOKS_ENVIRONMENT` and `QUICKBOOKS_TOKEN_STORE_PATH` are set in
 `tunnel.yaml` (the QuickBooks child process env), not in the `wh-tunnel`
@@ -210,15 +212,22 @@ the wizard layout is **unverified** on the live tenant.
 5. Approval step: leave for now (pipeline rules are set up later); nothing is
    saved on this step. If the **Tools** list is empty, click **Reload tools**.
 
+## Verified live
+
+- The tunnel's `run` mode connects with the real token, the tunnel shows **online** in withHuman, and QuickBooks calls
+  go through the gateway to the sandbox company. Evidence: [acceptance-2026-10-20.md](acceptance-2026-10-20.md)
+  (checks 1 to 5: sandbox payments 145 and 146, invoice 1016), [acceptance-2026-10-21-tool-search.md](acceptance-2026-10-21-tool-search.md)
+  (an approved payment run once through the bridge) and the live checks in the
+  [runbook](runbook.md#the-gateway-bridge).
+- Real QuickBooks calls against the **sandbox** company (not real books), same evidence.
+
 ## Unverified / open
 
 - Intuit portal click paths above (from memory).
-- Whether the tunnel's `run` mode connects cleanly with the real token (no token
-  yet; only `check` was exercised).
 - Where tunnel logs live beyond `docker logs wh-tunnel` (docs do not say).
-- `check` output format beyond `quickbooks: ok, 142 tools` (seen once, with a
-  dummy-credential run).
-- Real QuickBooks calls (needs real sandbox credentials).
+- `check` output format beyond `quickbooks: ok, 142 tools` (seen once, with a dummy-credential run).
+- Anything against a real (non-sandbox) QuickBooks company: not connected, by design, until the
+  [backlog's "Before real books"](backlog.md#before-real-books) list is done.
 
 ## Gateway bridge + approval pipeline (Task 7)
 
@@ -342,35 +351,34 @@ is **unverified** on the live tenant.
    run it again.
 3. systemd copies the secret to the bridge only when the service starts, so restart it (root):
    `sudo systemctl restart durable-park-bridge`. (The socket unit keeps the port during the restart. On a fresh VM
-   there is no bridge yet: store the secret and the org key first, then run `configure_hermes.sh`. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes.)
+   there is no bridge yet: store the secret and the org key first, then run `configure_hermes.sh`, after following [Before you run the configure script](runbook.md#before-you-run-the-configure-script).)
 4. Close the withHuman secret tab. Type `exit` to leave the VM.
 
-**C3. Pipeline rules (Approval pipelines -> the Entry pipeline), in this order**
+**C3. Pipeline rules (Approval pipelines -> the Entry pipeline)**
 
-1. **Rule 1: parked calls ask an approver.** Condition, exactly as live (revision 8): **All** of
-   (**Agent slug** *equals* `proto-agents`, **Any** of (**MCP server** *starts with* `park:`, **Tool name**
-   *starts with* `mcp__wh__`)). A park request's tool is the Hermes name (`mcp__wh__quickbooks__...`), so the
-   tool condition catches it even if the server condition does not match. Do **not** use the server condition
-   alone: if it does not match, park requests fall through to rule 3 and are auto-approved. Action: **Ask a
-   human**, with an escalation path whose **Notify** step names the approvers (create the path under Escalation paths
-   if none exists).
-2. **Rule 2: risky QuickBooks calls go to the bridge.** Add a **Branch** block with one **All** group. Tool
-   names are the gateway's own, without the `mcp__wh__<slug>__` prefix; use the anchored regex:
-   - **MCP server** *equals* `quickbooks`, and
-   - **Tool name** *matches regex*
-     `^(create|update|delete)[_-](payment|bill_payment|transfer|deposit|journal_entry|refund_receipt|sales_receipt|credit_memo|vendor_credit|purchase|invoice|bill)$`
+The live entry pipeline is **revision 9** (active since 2026-10-21 07:30 UTC). Its source of truth is the reviewed
+file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (10 blocks), and
+[architecture section 1](architecture.md#1-system-map) has the same list as a table. Do not rebuild it from this
+page: save the file's blocks as a new entry revision in withHuman and activate it (a save activates at once). Blocks
+run in order and the first one that decides ends the pipeline. Every block for `proto-agents` also tests the agent
+slug. Every "ask an approver" uses the escalation path `notify-yaakov-yehuda`.
 
-   (v1 is QuickBooks only. Later, if DocuSign is added, add a second **All** group inside an **Any**: server
-   `docusign` and tool regex `^(createEnvelope|updateEnvelope|triggerWorkflow|cancelWorkflowInstance|pauseNewWorkflowInstances|resumeWorkflow)$`.
-   Nothing about DocuSign is needed now.) Inside the branch add a **Webhook** block:
-   - Name `durable-park-bridge`; endpoint `durable-park-bridge`.
-   - Allowed outcomes: **Approve** and **Ask a human** only (untick Continue and Deny).
-   - Attempt timeout `5s`; max attempts `3` (as in `deploy/withhuman/entry-pipeline.json`).
-   - Include: leave agent reasoning, context and previous metadata **off** (not needed; less data leaves).
-   - Escalation path: the same approvers' path as rule 1, so a `human` answer asks an approver. Leave "agent's owner" off.
-   - Reason text, for example: `Approve only a call that matches an approved durable-park park`.
-3. **Rule 3: everything else is approved.** A final rule/default: **Approve**. Make sure the order is 1, 2, 3
-   (nothing above rule 1; rule 3 last).
+| # | Block (key) | When | Then |
+|---|---|---|---|
+| 1 | `pa-park-money` | server `park:quickbooks`, tool is one of the 12 money types (create, update or delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Ask an approver |
+| 2 | `block-06ebcdd6` | server `quickbooks`, same 12 money types (the gateway replay; the tool name has no `mcp__wh__<slug>__` prefix) | Webhook block `durable-park-bridge`: approve only a call that matches one approved, consumed park, otherwise ask an approver. Timeout 5 s, 3 attempts, allowed outcomes approve and ask a human only, no reasoning, context or previous metadata sent |
+| 3 | `pa-gateway-other` | server `quickbooks`, not a money move | Approve (already asked as `park:quickbooks`) |
+| 4 | `pa-park-quickbooks-other` | server `park:quickbooks`, not a money move | Approve |
+| 5 | `pa-hermes-read` | server `hermes`, one of 12 read-only tools (for example `web_search`, `memory`) | Approve |
+| 6 | `pa-hermes-local-deny` | server `hermes`, one of 12 local machine tools (for example `terminal`, `write_file`) | Deny, until Clean Setup Phase 2 |
+| 7 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
+| 8 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
+| 9 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
+| 10 | `approve-every-call` | everything else | Approve |
+
+The exact tool lists and regexes are in the JSON file; the file wins over this table. A tool that no block names
+falls to block 8, so a person decides. If DocuSign is ever added, its six write tools need their own block (their
+names are in `DEFAULT_FORM_CHECKED_TOOLS` in `park_hook.py`); until then a DocuSign call would reach block 8.
 
 If the bridge is down, answers `401` or times out, the webhook block fails and the call goes to a human
 (withHuman: "no accepted answer after the attempts -> human review"), so an outage never auto-approves. The same
@@ -389,7 +397,7 @@ holds when withHuman's own API is slow or down while the bridge asks it: the bri
 ### Known risks / unverified
 
 - Settled live: argument rewrites by the gateway (`withhuman_scope` added, `2.0` sent as `2`) are absorbed by
-  `ledger.normalize_args`; park requests are matched by rule 1 as written above (revision 8).
+  `ledger.normalize_args`; park requests are matched by block 1 of revision 9 (the money regex on the Hermes tool name).
 - The bridge relies on withHuman's request list (`GET /api/v1/requests`: `q` is a substring of the tool name, newest
   first, `limit` up to 200) and on the consumption record (`consumption.consumed_at`); both were read in withHuman's
   docs and source and verified live on 2026-10-22 ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).

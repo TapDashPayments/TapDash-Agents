@@ -1332,8 +1332,8 @@ that has to agree:
 
 1. **withHuman**: register the server (e.g. slug `docusign`) and grant it to agent `proto-agents`, granting only the
    gateway servers the agent needs (spec section 7, Q5) ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
-   sends its `park:docusign` request to a person, and add it to pipeline **rule 2**, so the bridge decides its
-   replays (it asks withHuman for the matching park, by the Hermes name `mcp__wh__<slug>__<tool>`) ([rule 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
+   sends its `park:docusign` request to a person, and add it to pipeline **block 2** (`block-06ebcdd6`), so the bridge decides its
+   replays (it asks withHuman for the matching park, by the Hermes name `mcp__wh__<slug>__<tool>`) ([block 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
    other `mcp__wh__` tool registers. Allow the new server there.
 3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify`,
