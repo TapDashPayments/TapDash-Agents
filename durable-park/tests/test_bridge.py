@@ -465,6 +465,31 @@ def test_model_args_park_matches_gateway_delivery_with_default_scope(client, lis
     assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
 
 
+def test_a_park_built_from_a_lifted_nested_note_matches_the_gateway_delivery(client, lister, tmp_path):
+    """End to end with the park hook's lift: the model nested the note inside ``params``; the hook lifted it, the
+    park request carries the note at the top level (and as ``agent_reasoning``), the gateway strips the top-level
+    note and delivers ``params`` without it: the bridge must still see the same call."""
+    from durable_park.gatecall import build_call, lift_gateway_context
+    from durable_park.ledger import Ledger
+
+    gw_schema = {"properties": {"params": {"type": "object"}, "withhuman_context": {"type": "string"}}}
+    params = {"CustomerRef": {"value": "58"}, "TotalAmt": 12.5}
+    nested = {"params": {**params, "withhuman_context": "paying invoice 42"}}
+    lifted = lift_gateway_context(nested, gw_schema)
+    assert lifted == {"params": params, "withhuman_context": "paying invoice 42"}
+    row = Ledger(str(tmp_path / "ledger.db")).park(
+        session_key="agent:main:telegram:dm:42", session_id="s", tool_call_id="c", tool=PARK_TOOL, args=lifted,
+        call_key="k" * 64, server=PARK_SERVER)
+    request = build_call(row)
+    assert request.reasoning == "paying invoice 42"
+    park = park_item(args=dict(request.arguments), tool=request.tool, server=request.server)
+    park["context"] = dict(request.context)
+    arm(lister, park=park, neighbours=[gateway_item(id="req_1", created=-5, args={"params": params,
+                                                                                 "withhuman_scope": "default"})])
+    resp = deliver(client, payload(arguments={"params": params, "withhuman_scope": "default"}))
+    assert resp.json() == {"outcome": "approve", "reason": "Matches approved park request park_req_1"}
+
+
 def test_bridge_matches_when_gateway_rewrites_2_point_0_as_2(client, lister):
     model_args = {"params": {"bill": {"Line": [{"Amount": 2.0, "DetailType": "AccountBasedExpenseLineDetail"}],
                                       "TotalAmt": 2.0, "VendorRef": {"value": "56"}}},
