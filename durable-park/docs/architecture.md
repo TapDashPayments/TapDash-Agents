@@ -19,13 +19,18 @@ the root README's [Built on](../../README.md#built-on) table.
 ## The three guarantees
 
 1. **Nothing risky runs without one human approval.** The plugin blocks the call before Hermes sends it; the
-   withHuman gateway asks the bridge, and the bridge says "approve" only for a call that matches an approved park.
-2. **An approved call runs at most once, exactly as approved.** The approval is consumed once; the bridge's pass is
-   used once; arguments must match the saved ones.
+   withHuman gateway asks the bridge, and the bridge says "approve" only after it has checked **in withHuman** that
+   the call matches one approved, consumed park request that no other gateway request has used ([the decision
+   rule](#the-bridges-decision-rule)).
+2. **An approved call runs at most once, exactly as approved.** The approval is consumed once; the bridge approves one
+   gateway call per consumed approval (withHuman's own request list shows whether another gateway request already
+   used it); arguments must match the saved ones.
 3. **A crash never causes a silent retry.** If the outcome is unclear the row becomes `unknown` and a person checks.
 
-How strong is the first guarantee today? **On proto-agents it is not a security boundary.** The plugin, the bridge
-and the ledger all trust the user `hermes`, which is also the user the agent runs as. The agent has **no file or
+How strong is the first guarantee today? **On proto-agents it is not a security boundary.** The plugin and the
+ledger trust the user `hermes`, which is also the user the agent runs as. The bridge no longer trusts the ledger: it
+keeps no state and asks withHuman with a read-only organization key, so a forged ledger row cannot get a gateway
+call approved. It still runs as `hermes`, from a root-owned copy that `hermes` can change with sudo. The agent has **no file or
 terminal tools** (the v1 tool lockdown, `deploy/hermes_tool_policy.py`); that holds the first guarantee against an
 agent that goes looking for a way round it, but it is a configuration guard, not a permission boundary.
 
@@ -44,7 +49,8 @@ What that means today:
 - The user `hermes` has **passwordless sudo**. If the agent ever got a terminal or file tool (a configuration change,
   a Hermes upgrade, a hijack), it could read everything in `/etc/durable-park/`, including the QuickBooks client
   secret, the refresh token and the withHuman tunnel token in `tunnel.env`; change the code in `/opt/durable-park`;
-  forge ledger rows; and call QuickBooks directly, **bypassing withHuman**.
+  forge ledger rows (they no longer get a gateway call approved: the bridge checks withHuman); and call QuickBooks
+  directly, **bypassing withHuman**.
 - Even so, durable-park asks withHuman about every tool call except `parked_action_execute`, `clarify` and the two
   read-only Tool Search catalog tools (`tool_search`, `tool_describe`, [section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)), and
   withHuman's pipeline decides which need a person; with the lockdown the only non-QuickBooks tool the agent reaches
@@ -88,7 +94,7 @@ flowchart LR
     bstatus[("breaker_status.json")]
     route["Hermes webhook route<br/>127.0.0.1:8644"]
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
-    bridge["bridge<br/>127.0.0.1:8791 - user hermes"]
+    bridge["bridge<br/>127.0.0.1:8791 - user hermes<br/>keeps no state"]
     sweep["sweep<br/>cron every 5 min"]
     tunnel["wh-tunnel container<br/>QuickBooks MCP server"]
     funnelA{{"Funnel /aap/events"}}
@@ -118,7 +124,7 @@ flowchart LR
   gw -->|"checks"| pipe
   pipe -->|"webhook block, signed"| funnelB
   funnelB --> bridge
-  bridge -->|"finds matching executing park,<br/>uses its pass once"| ledger
+  bridge -->|"lists requests (read-only org key):<br/>one consumed approved park, not used before"| aap
   bridge -->|"approve or human"| pipe
   gw -->|"forwards over the tunnel<br/>(tunnel dials out)"| tunnel
   tunnel -->|"QuickBooks API"| qbo
@@ -141,7 +147,7 @@ flowchart LR
 | approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key), and one shared gate that is rebuilt when the token file changes (the replaced gate's HTTP client is closed one rebuild later, as a call may still be using it). |
 | breaker | `plugin/durable_park/breaker.py` | Circuit breaker for withHuman outages: after 3 consecutive errors it stays open for 30 s (calls are refused without asking), then lets calls through again until an outcome is recorded; a failure re-opens, a success closes. It records open/close in `breaker_status.json` next to the ledger (written only on a change); it never calls withHuman itself. Started with a status file that still says open (a restart during an outage), it starts open but lets calls through at once, so the first success writes the close. |
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
-| bridge | `bridge/app.py` | Answers withHuman's pipeline: "is this exact gateway call an approved park?" |
+| bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. |
 | sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, and once each when withHuman becomes unreachable (breaker open) and answers again. Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
 
 ### Plugin settings
@@ -156,7 +162,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
-| `audit_key_file` | `/etc/durable-park/audit_key` | Optional. A withHuman org API key with only `audit.read`; read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
+| `audit_key_file` | `/etc/durable-park/audit_key` | Optional for the plugin (the bridge needs the same file). A withHuman org API key with `audit.read`, `request.read` and `request.read.unrouted` and nothing else; the plugin only uses `audit.read`. Read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
 | `audit_base_url` | `https://app.withhuman.ai` | Where that audit lookup (`GET /api/v1/audit`) goes. A bad `audit_*` setting (not a string, empty, a path that cannot be resolved) only switches the name off with a warning in the log; unlike the other settings it never refuses tool calls. |
 | `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json`, `formcheck_status.json` and `plugin_load.json` are written next to it. |
 | `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
@@ -242,7 +248,7 @@ configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 
 | Order | Block | When | Then |
 |---|---|---|---|
 | 1 | `pa-park-money` | server `park:quickbooks` and the tool is one of the 12 money types (create/update/delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Ask an approver |
-| 2 | `block-06ebcdd6` | server `quickbooks` and a money tool (the gateway replay) | Webhook block `durable-park-bridge`: approves only a call matching an approved park, otherwise asks an approver |
+| 2 | `block-06ebcdd6` | server `quickbooks` and a money tool (the gateway replay) | Webhook block `durable-park-bridge`: approves only a call matching one approved, consumed park request that nothing else has used (the bridge checks in withHuman; consumed in the last 120 s), otherwise asks an approver |
 | 3 | `pa-gateway-other` | server `quickbooks`, not a money move | Approve (already asked as `park:quickbooks`) |
 | 4 | `pa-park-quickbooks-other` | server `park:quickbooks`, not a money move | Approve (the gateway decides the real call again) |
 | 5 | `pa-hermes-read` | server `hermes` and a read-only tool (web_search, web_extract, vision_analyze, memory, session_search, todo_list, kanban_list, kanban_show, kanban_attachments, skills_list, skill_view, image_generate) | Approve |
@@ -258,8 +264,8 @@ hook goes live. A tool name missing from rules 5 and 6 falls through to rule 8, 
 **Who approves:** the people on the approvers' escalation path in withHuman (today `notify-yaakov-yehuda`, one
 approver). Adding or changing approvers is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
 request shows the tool as `mcp__wh__quickbooks__...` (server `park:quickbooks`) - that is the one to approve. A
-request with the plain tool name (`create_payment`, server `quickbooks`) means the bridge did not recognise a
-replay, so this is a second ask for the same action ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)).
+request with the plain tool name (`create_payment`, server `quickbooks`) means the bridge did not confirm a
+replay (or withHuman answered it too slowly), so this is a second ask for the same action ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)).
 
 Setup steps for the pipeline: [gateway-setup.md](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline).
 
@@ -300,7 +306,7 @@ sequenceDiagram
   E->>W: consume approval (works once)
   E->>Q: replay the saved call through the gateway
   W->>B: webhook block: is this call approved? (signed)
-  B->>L: find executing park with same tool and args, use its pass
+  B->>W: list requests (org key, read-only): one consumed approved park, same tool and args, no earlier use
   B-->>W: approve
   W->>Q: forward to QuickBooks
   Q-->>E: payment created
@@ -315,11 +321,32 @@ Notes:
   forged wake cannot approve anything.
 - Step 16: `parked_action_execute` replays with `ctx.dispatch_tool`, which does not run `pre_tool_call` hooks, so
   the replay is not parked again.
-- Step 18: the bridge matches on the Hermes tool name (built the way Hermes builds it, `bridge.app.hermes_tool_name`)
+- Step 18: the bridge matches on the Hermes tool name (built the way Hermes builds it, `bridge.verify.hermes_tool_name`)
   and a digest of the arguments (`ledger.normalize_args`: ignores `withhuman_context`, defaults `withhuman_scope`,
-  treats `2.0` as `2`). Anything that does not match goes to a person - never auto-approved. If withHuman
-  retries the **same** delivery (same idempotency key), the bridge repeats its earlier answer; that is the same
-  request, not a second run.
+  treats `2.0` as `2`). Anything that does not match goes to a person - never auto-approved. The bridge keeps no
+  record of its answers. A retried delivery of the **same** gateway request gets the same answer, because the
+  request never counts against itself.
+
+### The bridge's decision rule
+
+The bridge (`bridge/app.py` for the webhook, `bridge/verify.py` for the rule, `bridge/whapi.py` for the withHuman
+call) holds no state and never opens the ledger. For each signed delivery of the gateway request G it asks withHuman
+(`GET /api/v1/requests`, agent `proto-agents`, newest first, with the organization key `/etc/durable-park/audit_key`)
+twice, within a total budget of 3.5 s (withHuman's webhook block gives up at 5 s): once for park requests of the
+Hermes tool name, once for gateway requests of the tool. Then:
+
+1. A park request P **matches** only if all hold: same agent, tool = the Hermes tool name, server = `park:<slug>`,
+   status and decision `approved`, `consumed_at` present and within the last **120 s** (5 s of clock skew allowed),
+   consumed before the approval expired, no truncated arguments, and the digest of P's arguments equals G's.
+2. No match: ask a person (`no-approved-park`). Two matches: ask a person (`ambiguous-park`).
+3. **Single use:** any other gateway request (not G) for the same agent, server, tool and arguments that was created
+   at or after P was consumed - in any state, pending, denied or expired too - means the approval is used: ask a
+   person (`already-used`).
+4. Otherwise approve, naming P's id.
+
+Anything unexpected - withHuman slow or down, a missing or too-weak key, a bad answer - asks a person. That is a
+second ask for the same action (safe, only noisy). The bridge never raises to withHuman and never auto-approves on
+error. Spec: [bridge verifies approvals in withHuman](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md).
 
 ## 3. Ledger states
 
@@ -362,13 +389,13 @@ stateDiagram-v2
   outcome (`executed`, `failed`, `unknown`) or a human decision (`denied`, `expired`) are kept.
 - `unknown` is final on purpose: the approval was already used, so the call is never retried automatically. A
   person checks QuickBooks (runbook: [UNKNOWN outcome](runbook.md#outcome-unknown)).
-- `gateway_passed_at` is set when the bridge approves the gateway call (once per row). `notified_at` is set when the
-  chat was told about a decision.
+- `gateway_passed_at` is no longer written: the bridge does not open the ledger (it asks withHuman). The column
+  stays; old rows may have it set and nothing reads it. `notified_at` is set when the chat was told about a decision.
 - `decided_by` (nullable, `"Name (channel)"`) is written in the same single update as the decision, only for
   `approved`, `denied` and `cancelled`, and only when the withHuman audit log's newest `approval.decided` event for
   the request was made by a human. It is cosmetic: any failure of that lookup (no key file, HTTP error, 5 s timeout,
   bad JSON, a pipeline decision) leaves it empty and the message and the decision unchanged. An older ledger gets the
-  column added when any process (gateway, sweep, bridge) first opens it.
+  column added when any process (gateway, sweep) first opens it.
 
 ## 4. Tool call: form check, then one question to withHuman
 
@@ -451,7 +478,7 @@ and re-run against the real code on the VM (2026-10-21):
   (`hermes_cli/plugins.py:670-679`, `tools/registry.py:946-963`). Deferral only changes the tool list shown to the
   model; every tool stays in the registry under its real name, so a deferred MCP tool is replayed like any other.
 - **Unchanged:** the form check (it reads the schema from the registry, not from the model's tool list), the bridge's
-  tool-name matching (`bridge.app.hermes_tool_name`; withHuman's own call still names the real tool), the ledger and
+  tool-name matching (`bridge.verify.hermes_tool_name`; withHuman's own call still names the real tool), the ledger and
   the sweep. One model call is one ledger row because a batch of local tools is rejected by Hermes (one entry per
   `tool_call`), so no two real calls share an outer call id.
 - **`parked_action_execute` is deferred too** (it is a plugin tool). The model reaches it through `tool_describe` and
@@ -483,7 +510,7 @@ and re-run against the real code on the VM (2026-10-21):
 | Tool returns an unclear error (session expired, interrupted) | `unknown`, same as above. | Check QuickBooks |
 | Tool returns a clear error | `failed`, error stored; nothing to check. | Fix and ask again |
 | A decision's wake is lost (Hermes down, wake refused) | The sweep re-posts wakes every 5 minutes until the chat is told. | Nobody |
-| Bridge cannot match the gateway call (args changed, bridge down, bad signature) | withHuman asks a person instead. Never auto-approves. | An approver decides |
+| Bridge cannot confirm the gateway call (no matching consumed park, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
 | Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
@@ -493,8 +520,7 @@ and re-run against the real code on the VM (2026-10-21):
 | Another park is still waiting in the chat | A new call that withHuman sends to a person is blocked: "already waiting", and its request is cancelled. Calls withHuman answers at once still run or are refused. A park can wait up to 168 h. | Decide the waiting one |
 
 Known gaps (see the [backlog](backlog.md)): an inject Hermes accepted but
-dropped is never retried; the bridge's
-replay store is not tied to the withHuman request id.
+dropped is never retried.
 
 ## 6. Where everything runs
 
@@ -505,7 +531,7 @@ replay store is not tied to the withHuman request id.
 | Teams tunnel | `ubuntu` | Microsoft devtunnel `proto-agents-bot`, forwards to the gateway's `127.0.0.1:3978` | outbound only | systemd user unit `devtunnel-hermes` (user `ubuntu`) |
 | Claude connector "Proto-Agents" | `hermes` | `/home/hermes/hermes-shell-mcp` (shell access for Claude on this VM) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
-| bridge | `hermes` | `/opt/durable-park/bridge/` + `/opt/durable-park/plugin/durable_park/ledger.py` (root-owned copy) | `127.0.0.1:8791` `/wh/bridge` | system unit `durable-park-bridge` |
+| bridge | `hermes` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` | system unit `durable-park-bridge` |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
 | tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` | outbound only | Docker, container `wh-tunnel` |
 | Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
@@ -515,9 +541,10 @@ replay store is not tied to the withHuman request id.
 - The receiver and bridge run from **root-owned copies** in `/opt/durable-park`, so the agent's user could not change
   the code that says "approved" (today the user `hermes` has passwordless sudo, so these copies are not yet a boundary;
   that changes with Clean Setup Phase 1, [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1). Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
-- Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`, `bridge_deliveries.db`,
+- Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`,
   `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
-  `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`.
+  `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`. The bridge keeps nothing here: the
+  `bridge_deliveries.db` of the old bridge is unused and can be deleted once the new bridge is live.
 - Since 2026-10-21 03:16 UTC the v1 lockdown is applied (`deploy/hermes_tool_policy.py`: tools limited to
   `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`, plus Hermes's three Tool Search bridge tools (Tool Search has been on since
   2026-10-21 19:59 UTC) ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); on every platform key, `check` ok) and Hermes's own
@@ -541,7 +568,7 @@ the repo) and never printed by any script.
 | `bridge_secret` | 0640 root:dpwake | bridge | verifies withHuman's pipeline webhook signature |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
-| `audit_key` (optional) | 0640 root:hermes | plugin | withHuman org API key with only `audit.read`: names who decided in the chat message |
+| `audit_key` | 0640 root:hermes | bridge (every gateway call), plugin (optional) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
 
 The user `hermes` has passwordless sudo, so an agent that got a terminal or file tool could read every file in this table. The v1 lockdown withholds those tools today. See backlog item 0.
 
@@ -560,6 +587,8 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | 75 min | Form-check report older than this is treated as broken | `durable_park_sweep.py` |
 | 2 | Bad sweeps in a row before a form-checker alert | `durable_park_sweep.py` |
 | 300 s | Allowed clock difference on the bridge signature | `bridge/app.py` |
+| 120 s | A park approval can approve one gateway call only if it was consumed this recently (5 s of clock skew allowed) | `bridge/verify.py` |
+| 3.5 s | The bridge's total budget for its two withHuman lists (withHuman's webhook block gives up at 5 s; 3 s per call) | `bridge/app.py`, `bridge/whapi.py` |
 | 60 s | Hermes waits this long for the park hook | `plugins.hook_callback_timeout` |
 | 3 failures / 60 s | Hermes pauses an MCP server after 3 failed calls (blocked calls never reach it) | Hermes `tools/mcp_tool.py` |
 
@@ -573,7 +602,7 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | MCP | Model Context Protocol: how Hermes calls tools. QuickBooks tools arrive through withHuman's **MCP gateway**. |
 | park | Stopping a risky call before it runs and saving it in the ledger, with an open approval request. |
 | wake | A small signed message telling the plugin "look at this park again". It carries only the park id. |
-| gateway pass | The one-time "yes" the bridge gives for one approved park. Used once, then gone. |
+| gateway pass | The one-time "yes" the bridge gives for one consumed park approval. withHuman's request list is the record of whether it was used. |
 | digest | A fingerprint (sha256) of a call's arguments, used to check a replay is the exact approved call. |
 | sweep | The 5-minute cron script that catches anything missed and sends alerts. |
 | tunnel | withHuman's container that runs a tool server (here QuickBooks) on the VM and dials out to withHuman. |

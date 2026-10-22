@@ -36,6 +36,7 @@ flowchart LR
   plugin -->|"runs the saved call once"| gw["withHuman gateway"]
   gw -->|"is this the approved call?"| bridge["bridge"]
   bridge -->|"yes, once"| gw
+  bridge -->|"asks: was it approved<br/>and not used yet?"| wh
   gw --> qbo[("QuickBooks")]
 ```
 
@@ -44,7 +45,7 @@ flowchart LR
    The agent is told it is waiting.
 3. An approver approves in withHuman. A signed webhook wakes the plugin, which tells the original chat.
 4. The agent runs `parked_action_execute`; the plugin uses the approval once and replays the saved call.
-5. The withHuman gateway asks the bridge whether this exact call was approved; the bridge says yes once.
+5. The withHuman gateway asks the bridge whether this exact call was approved; the bridge checks in withHuman (not the ledger) and says yes once.
 6. QuickBooks gets the call. The ledger records the result.
 
 The full picture - every component, arrow, state and failure path: **[docs/architecture.md](docs/architecture.md)**.

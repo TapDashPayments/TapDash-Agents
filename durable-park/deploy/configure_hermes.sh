@@ -21,7 +21,9 @@
 #      files removed) under /opt/durable-park, system unit
 #      durable-park-bridge (User=hermes, 127.0.0.1:8791); it must answer 401 to an unsigned POST within 10 s of the
 #      restart or the script stops; it answers 401 until Yaakov stores
-#      /etc/durable-park/bridge_secret (never created here), and human while the ledger file is missing
+#      /etc/durable-park/bridge_secret (never created here), and human to every gateway call while
+#      /etc/durable-park/audit_key (the org key it asks withHuman with; never created here) is missing (a
+#      warning). The bridge is stateless: no ledger, no writable path
 #   4c. agent tool policy (deploy/hermes_tool_policy.py, run in Hermes's own Python): every platform key an
 #      agent can run under gets only durable_park + clarify + MCP server wh (QuickBooks tools); every toolset
 #      with local file/command/code access is disabled; model-named file delivery is limited to the Hermes
@@ -238,7 +240,7 @@ set_cfg "platforms.webhook.extra.routes.$ROUTE.prompt" \
     "durable-park wake event. The durable-park plugin handles it; if you see this, reply only: ignored."
 log "Hermes config set (plugin settings, hook timeout, webhook route $ROUTE, secret source)"
 
-as_hermes install -d -m 0750 "$(dirname "$LEDGER")"   # also the bridge unit's ReadWritePaths: must exist
+as_hermes install -d -m 0750 "$(dirname "$LEDGER")"   # the plugin's data directory (ledger and status files)
 
 # --- 4c. agent tool policy ---------------------------------------------------------------------------------
 # The one list of toolsets opened beyond the v1 lockdown (read by apply and check). Created empty if missing,
@@ -270,7 +272,8 @@ user_systemctl daemon-reload
 
 # --- 4b. gateway bridge ------------------------------------------------------------------------------------
 CHANGED=0
-# The bridge imports durable_park.ledger, which runs durable_park/__init__.py -> formcheck -> _vendor/fastjsonschema:
+# The bridge imports durable_park.ledger (args_digest) and durable_park.gatecall (gateway_slug), which run
+# durable_park/__init__.py -> formcheck -> _vendor/fastjsonschema:
 # copy the WHOLE package (every .py plus the vendored text files, subdirectories kept, no __pycache__), and
 # remove files the repo no longer has. Touches nothing outside $VENV/bridge and $VENV/plugin/durable_park.
 sync_tree() {
@@ -304,7 +307,8 @@ install_root "$REPO/deploy/$BRIDGE_UNIT.service" "/etc/systemd/system/$BRIDGE_UN
 systemctl enable --quiet "$BRIDGE_UNIT"
 restart_if_needed "$BRIDGE_UNIT"   # it reads its secret only at start: restart it by hand after storing one
 [[ -e "$ETC/bridge_secret" ]] || log "no $ETC/bridge_secret yet: the bridge answers 401 (Yaakov stores it)"
-[[ -f "$LEDGER" ]] || log "ledger $LEDGER does not exist yet: the bridge answers human until the plugin creates it"
+# The bridge is stateless: it asks withHuman with the organization key and reads it on every call (no restart on rotation).
+[[ -e "$ETC/audit_key" ]] || log "no $ETC/audit_key yet: the bridge answers human to every gateway call (Yaakov stores it)"
 # Health gate: `systemctl is-active` right after a restart passes before a crash-looping unit first dies, so also
 # demand a live app: an unsigned POST must be rejected with 401. Stop here (no gateway restart) if it is not.
 bridge_ok=0

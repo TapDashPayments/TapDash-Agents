@@ -225,20 +225,22 @@ the wizard layout is **unverified** on the live tenant.
 One human approval per action. The model's first call to a risky tool is parked (a withHuman AAP request on
 the pseudo-server `park:<slug>` that an approver approves). When the model then runs the approved park with
 `parked_action_execute`, the real call goes through the gateway, and the pipeline's **webhook block** asks the
-**gateway bridge** whether this exact call is an approved, now-executing park. The bridge answers `approve`
-exactly once for a matching call and `human` for everything else, so nothing that was not parked is ever
-auto-approved, and an approved park is not asked about a second time.
+**gateway bridge** whether this exact call is an approved park whose approval was just consumed. The bridge
+checks that in withHuman itself (it keeps no state and does not use the ledger), answers `approve` exactly once
+for a matching call and `human` for everything else, so nothing that was not parked is ever auto-approved, and
+an approved park is not asked about a second time.
 
 ### What the bridge does
 
 | Item | Value |
 | --- | --- |
-| Code | `bridge/app.py` (Starlette + uvicorn), POST `/wh/bridge` on `127.0.0.1:8791` |
-| Unit | `deploy/durable-park-bridge.service` (system unit, `User=hermes`, group `dpwake`, strict sandbox; see the comments at its top for deploy-time values) |
+| Code | `bridge/app.py` (Starlette + uvicorn), POST `/wh/bridge` on `127.0.0.1:8791`; `bridge/verify.py` (the decision rule), `bridge/whapi.py` (the withHuman request list) |
+| Unit | `deploy/durable-park-bridge.service` (system unit, `User=hermes`, group `dpwake`, strict sandbox, `ProtectHome=yes`, no writable path; see the comments at its top) |
 | Public URL | `https://proto-agents.taila95862.ts.net/wh/bridge` (Tailscale Funnel path, set up at deploy) |
 | Secret | `/etc/durable-park/bridge_secret` (0640 root:dpwake), read once at startup |
-| Ledger | `--ledger PATH` or env `DURABLE_PARK_LEDGER`; deployed path `/home/hermes/.hermes/plugin-data/durable-park/ledger.db`. The bridge never creates it: a missing file means every delivery gets `human` (logged once as `bridge ledger ... does not exist`). Retry records go to `bridge_deliveries.db` in the same directory |
-| Other options | `--secret-file`, `--host 127.0.0.1`, `--port 8791`, `--expected-agent proto-agents` (env `DURABLE_PARK_BRIDGE_SECRET_FILE`, `DURABLE_PARK_EXPECTED_AGENT`) |
+| Org key | `/etc/durable-park/audit_key` (`--key-file`, env `DURABLE_PARK_WH_KEY_FILE`; 0640 root:hermes), read on every call, never logged. Permissions `audit.read`, `request.read`, `request.read.unrouted` and nothing else: it can read requests and cannot approve, deny or read rules or members. Missing or too weak: every delivery gets `human` ([runbook](runbook.md#the-gateway-bridge)). API base `--api-base` (env `DURABLE_PARK_WH_API_BASE`, default `https://app.withhuman.ai/api/v1`) |
+| State | None. No ledger (the old `--ledger` option, `DURABLE_PARK_LEDGER` and `bridge_deliveries.db` are gone; the old file can be deleted once the new bridge is live) |
+| Other options | `--secret-file`, `--host 127.0.0.1`, `--port 8791`, `--expected-agent proto-agents` (env `DURABLE_PARK_BRIDGE_SECRET_FILE`, `DURABLE_PARK_EXPECTED_AGENT`). Budget: 3.5 s for the two withHuman lists (withHuman's webhook block gives up at 5 s) |
 
 Signature (confirmed against withHuman's open-source repo `internal/webhookdelivery`, and its webhook-endpoints
 docs): header `WithHuman-Signature: t=<unix>,v1=<hex>`; `v1` = HMAC-SHA256 over `"<t>." + raw body`, keyed with
@@ -246,26 +248,31 @@ the **whole** `whsec_...` string as text (not base64-decoded); 300 s tolerance e
 A missing, malformed, stale or wrong signature gets `401` with an empty body, which withHuman treats as a failed
 delivery (so the block falls back to a human).
 
-Decision, for a delivery with a valid signature:
+Decision, for a delivery with a valid signature (the rule itself is `bridge/verify.py`, a pure function; the full
+rule is in [architecture](architecture.md#the-bridges-decision-rule)):
 
-1. The body must be `type: request_approval_block.webhook`, not `preview: true`, and `agent.slug` must equal the
-   expected agent (`proto-agents`); otherwise `human` (and the ledger is not touched).
-2. The Hermes name is built the way Hermes registers MCP tools (`hermes_tool_name`):
+1. The body must be `type: request_approval_block.webhook`, not `preview: true`, `agent.slug` must equal the
+   expected agent (`proto-agents`), and `request.id` (the gateway request's own id) must be a non-empty string;
+   otherwise `human`.
+2. The Hermes name is built the way Hermes registers MCP tools (`hermes_tool_name`, now in `bridge/verify.py`):
    `mcp__wh__<server>__<tool>` with every character outside `[A-Za-z0-9_]` turned into `_` (so `create-bill`
    becomes `create_bill`), and names over 64 characters shortened with an 8-hex sha256 suffix. The arguments are
    digested after `ledger.normalize_args` (top-level `withhuman_context` dropped, `withhuman_scope` defaulted to
-   `"default"`, whole-number floats such as `2.0` treated as `2`), exactly as at park time. If an `executing`
-   park has that name and digest and its gateway pass is unused, the bridge marks the pass used and answers
-   `{"outcome":"approve","reason":"Matches approved park P-XXXXXXXX"}`.
-3. Anything else, or any error: `{"outcome":"human","reason":"No approved park for this exact call"}`.
-4. withHuman retries a delivery (same `WithHuman-Idempotency-Key`); the bridge stores its answer per key together
-   with the Hermes tool name, the arguments digest and the agent slug. A retry of an approved delivery gets
-   `approve` again only if all three still match (`why=replay`); a reused key with a different call gets `human`
-   (`why=replay-mismatch`), and a different delivery for the same call gets `human`.
+   `"default"`, whole-number floats such as `2.0` treated as `2`), exactly as at park time.
+3. The bridge asks withHuman (`GET /api/v1/requests?agent_slug=proto-agents&q=<name>&limit=...`, newest first)
+   for the park requests of that Hermes name. It approves only if exactly one is `approved`, on server
+   `park:<slug>`, **consumed** (`consumption.consumed_at`) within the last 120 s and before its approval expired,
+   not truncated, with the same argument digest. It then lists the gateway requests of that tool: any other
+   request for the same call created at or after the consumption means the approval is already used, so `human`.
+   The answer is `{"outcome":"approve","reason":"Matches approved park request <id>"}`.
+4. Anything else, or any error (no match, two matches, withHuman slow or down, key missing or too weak, bad answer):
+   `{"outcome":"human","reason":"No approved park for this exact call"}`. The bridge keeps no record of its
+   answers; withHuman retries a delivery and gets the same answer because the gateway request never counts
+   against itself.
 
 Logs (`journalctl -u durable-park-bridge`): one line per delivery with the delivery id, server, tool, the sorted
-argument **key names**, the arguments digest and the outcome, plus a short `why` tag. Argument values and the
-secret are never logged.
+argument **key names**, the arguments digest and the outcome, plus a short `why` tag. Argument values, the
+signing secret and the org key are never logged.
 
 ### HUMAN STEP C (Task 7 Step 5): endpoint, secret, pipeline
 
@@ -320,7 +327,7 @@ is **unverified** on the live tenant.
    Nothing about DocuSign is needed now.) Inside the branch add a **Webhook** block:
    - Name `durable-park-bridge`; endpoint `durable-park-bridge`.
    - Allowed outcomes: **Approve** and **Ask a human** only (untick Continue and Deny).
-   - Attempt timeout `5s`; max attempts `2`.
+   - Attempt timeout `5s`; max attempts `3` (as in `deploy/withhuman/entry-pipeline.json`).
    - Include: leave agent reasoning, context and previous metadata **off** (not needed; less data leaves).
    - Escalation path: the same approvers' path as rule 1, so a `human` answer asks an approver. Leave "agent's owner" off.
    - Reason text, for example: `Approve only a call that matches an approved durable-park park`.
@@ -328,7 +335,8 @@ is **unverified** on the live tenant.
    (nothing above rule 1; rule 3 last).
 
 If the bridge is down, answers `401` or times out, the webhook block fails and the call goes to a human
-(withHuman: "no accepted answer after the attempts -> human review"), so an outage never auto-approves.
+(withHuman: "no accepted answer after the attempts -> human review"), so an outage never auto-approves. The same
+holds when withHuman's own API is slow or down while the bridge asks it: the bridge answers `human`.
 
 **C4. Test**
 
@@ -336,17 +344,23 @@ If the bridge is down, answers `401` or times out, the webhook block fails and t
    `human` (a test delivery is not a block delivery and there is no park); the log line shows `why=type`.
    `journalctl -u durable-park-bridge -n 5` on the VM. Expect **no** `401` warning; a `401` means the secret
    file does not match the endpoint secret (redo C2, restart).
-2. A real end-to-end check (a parked call, then `parked_action_execute`) happens in Task 8.
+2. A real end-to-end check (a parked call, then `parked_action_execute`) happens in Task 8. After a change to the
+   bridge, run the [live checks](runbook.md#the-gateway-bridge) (the lister test, one payment that passes once, a
+   replay that gets a human).
 
 ### Known risks / unverified
 
 - Settled live: argument rewrites by the gateway (`withhuman_scope` added, `2.0` sent as `2`) are absorbed by
   `ledger.normalize_args`; park requests are matched by rule 1 as written above (revision 8).
+- The bridge relies on withHuman's request list (`GET /api/v1/requests`: `q` is a substring of the tool name, newest
+  first, `limit` up to 200) and on the consumption record (`consumption.consumed_at`); both were read in withHuman's
+  docs and source and verified live on 2026-10-22 ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).
 - UI names (Webhook endpoints menu location, Branch vs Delegate block, "Entry pipeline") are from the docs, not
   seen on the live tenant. Whether the endpoint **test** accepts a `human` answer for a non-block delivery type.
 - Deploy: `deploy/configure_hermes.sh` installs the bridge (Python `/opt/durable-park/bin/python`, the
   receiver's venv; code copied to `/opt/durable-park/bridge` and `/opt/durable-park/plugin`), enables and starts
-  the unit and adds the Funnel path `/wh/bridge`. Until `bridge_secret` exists every delivery gets `401`.
+  the unit and adds the Funnel path `/wh/bridge`. Until `bridge_secret` exists every delivery gets `401`; until
+  `audit_key` exists every delivery gets `human` (the script logs a warning for each).
 
 ## Hermes → gateway connection (MCP server `wh`, Task 3)
 

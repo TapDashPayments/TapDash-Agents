@@ -232,18 +232,24 @@ skill_manage. `read_file` is in the last group on purpose: it can read `instance
 
 The design is `receiver-setup.md` "v2: separate ledger owner"; this section lists only what changes for this spec.
 
-- New system user `dpledger`; ledger and bridge delivery DB in `/var/lib/durable-park` (0700); the ledger service on
+> **Update 2026-10-22, the bridge:** the bridge part of this section is superseded by
+> [2026-10-22-bridge-verifies-withhuman.md](2026-10-22-bridge-verifies-withhuman.md). The bridge no longer reads or
+> writes the ledger: it asks withHuman (`GET /api/v1/requests`) with the organization key and keeps no state. So
+> there is no bridge user (`dpbridge`), no socket for the bridge, no `find_executing_match` / `mark_gateway_passed`
+> and no bridge delivery DB to move. The rest (plugin, sweep, `dpledger`) stands, until "Option 2" (remove the
+> ledger, withHuman as the only state) in the backlog replaces it.
+
+- New system user `dpledger`; the ledger in `/var/lib/durable-park` (0700; the bridge keeps no delivery DB any more); the ledger service on
   `/run/durable-park/ledger.sock` with `SO_PEERCRED` checks; `instance_token` readable only by `dpledger`.
 - **Plugin:** `Ledger` is replaced by a `LedgerClient` with the same method surface; the hook's AAP open/consume for
   every call (§4.2 step 4) is done **by the service**, which holds the token. The plugin never reads `token_file`.
-- **Bridge:** runs as its own user (`dpbridge`), reads through the socket; `bridge_secret` becomes `root:dpbridge
-  640`. `hermes` leaves nothing but `dpwake` (it still needs `wake_secret` for the Hermes webhook route's HMAC; a
+- **Bridge (superseded, see the update above):** it stays `hermes` with a read-only org key and `ProtectHome=yes`; `bridge_secret` stays `root:dpwake 0640`. `hermes` leaves nothing but `dpwake` (it still needs `wake_secret` for the Hermes webhook route's HMAC; a
   wake carries only a park id, so this is harmless).
 - **Sweep:** moves from Hermes cron (uid `hermes`) to a system timer as `dpledger`, so "only the sweep may use
   stale-executing → unknown" is a uid check; its alerts go out through a narrow path (the existing Telegram script,
   later Teams).
-- Migration when no row is `parked|approved|executing`: checkpoint, copy, re-own, change `ledger_path` and the bridge
-  unit, restart in order receiver, service, bridge, gateway.
+- Migration when no row is `parked|approved|executing`: checkpoint, copy, re-own, change `ledger_path`, restart in
+  order receiver, service, gateway (the bridge has no ledger path).
 - Gateway access (Q5, decided 2026-10-21): the gateway's `wh` MCP bearer is the same instance token, so `hermes` can call
   the gateway directly. Accepted: that token cannot approve, so the worst case is denial of service (§7, Q5). When new gateway servers are added, per-agent grants (`set_agent_tool_access`) should list only the servers the agent needs.
 
@@ -304,7 +310,7 @@ Open questions (who decides):
 - Q2 (Yaakov): any amount threshold for sandbox money tools, and which field (`TotalAmt`) it tests. **Decided 2026-10-21:** keep all 12 QuickBooks money types on "human" for now; no amount threshold.
 - Q3 (Yaakov): keep rows for every call in the ledger (§4.2) with 30-day retention, or parks only. **Decided 2026-10-21: yes.** A ledger row for every call (allowed or refused), 30-day retention; the rows feed the dashboard trace.
 - Q4 (Yaakov, Tailscale admin console): restrict Tailscale SSH to `ubuntu` so no interactive login as `hermes` exists. **Decided 2026-10-21: yes.** Yaakov restricts Tailscale SSH to `ubuntu` in the admin console.
-- Q5 (withHuman): **Decided 2026-10-21: no separate gateway-only credential and no relay.** The AAP instance credential can only create a request, read it, cancel it, consume an approval a human already gave, and report an outcome (`agentapprovalprotocol/_client.py` lines 155-170: POST /v1/requests, GET /v1/requests/{id}, DELETE /v1/requests/{id}, POST /v1/requests/{id}/consume, POST /v1/requests/{id}/outcome). There is no endpoint to approve; only a person in withHuman or a pipeline rule decides. withHuman limits the agent's gateway access per agent: `proto-agents` is granted only the `quickbooks` gateway server (mode all, scope default; `list_agent_tool_access` 2026-10-21), and every gateway call is decided by the entry pipeline; risky QuickBooks calls also go through the durable-park bridge, which checks the ledger. So a compromised agent holding the credential can at worst create or cancel requests or spoil a pending approval (denial of service), never run a risky call without a human. The asset to protect is the ledger, which Phase 2 (§4.5) moves to its own user.
+- Q5 (withHuman): **Decided 2026-10-21: no separate gateway-only credential and no relay.** The AAP instance credential can only create a request, read it, cancel it, consume an approval a human already gave, and report an outcome (`agentapprovalprotocol/_client.py` lines 155-170: POST /v1/requests, GET /v1/requests/{id}, DELETE /v1/requests/{id}, POST /v1/requests/{id}/consume, POST /v1/requests/{id}/outcome). There is no endpoint to approve; only a person in withHuman or a pipeline rule decides. withHuman limits the agent's gateway access per agent: `proto-agents` is granted only the `quickbooks` gateway server (mode all, scope default; `list_agent_tool_access` 2026-10-21), and every gateway call is decided by the entry pipeline; risky QuickBooks calls also go through the durable-park bridge, which checks withHuman itself (since 2026-10-22; it used to check the ledger). So a compromised agent holding the credential can at worst create or cancel requests or spoil a pending approval (denial of service), never run a risky call without a human. The asset to protect is the ledger, which Phase 2 (§4.5) moves to its own user.
 - Q6 (Yaakov): whether the content agent (second agent) shares this pipeline with its own `/agent/slug` blocks or
   gets a delegated pipeline.
   **Decided 2026-10-21: defer.** Decide when the second agent is built.
@@ -334,7 +340,7 @@ Open questions (who decides):
     rows for every call plus withHuman's audit API) — the original ask — depends on 5 (rows) and Q3 (decided 2026-10-21: a row for every call).
 13. Backlog #1 rotate every secret — before real books — depends on 10 (rotate once, into the new owners).
 14. Backlog #2 retry a dropped decision message; #4 decide which other QuickBooks writes need approval (now a
-    pipeline rule, §4.3 row 3); #5 tie the bridge's stored answers to the request id — before real books — depend
+    pipeline rule, §4.3 row 3); #5 tie the bridge's stored answers to the request id (done 2026-10-22: the bridge keeps no stored answers) — before real books — depend
     on 5 (for #4) and nothing (for #2, #5).
 15. Sweep alerts to Teams instead of Telegram — Teams is where Yaakov works — depends on nothing.
 16. Decide the archived `ubuntu` Hermes install (`/home/ubuntu/.hermes`): delete after 3 and 8 pass, or keep as a

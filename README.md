@@ -63,7 +63,7 @@ running on the test VM.
 | Component | What it does | Where |
 |---|---|---|
 | durable-park plugin | Stops risky calls, checks their form, saves them in the ledger, opens the approval, wakes the chat, runs the approved call once | [`durable-park/plugin/`](durable-park/plugin/) |
-| Bridge | Our custom service that withHuman's pipeline calls: "is this exactly the approved call?" Answers yes once, else asks a person | [`durable-park/bridge/`](durable-park/bridge/) |
+| Bridge | Our custom service that withHuman's pipeline calls: "is this exactly the approved call?" It checks in withHuman itself (no ledger, no state), answers yes once, else asks a person | [`durable-park/bridge/`](durable-park/bridge/) |
 | Receiver | Takes withHuman's signed "decision made" webhook and wakes the plugin; also does one-time provisioning | [`durable-park/receiver/`](durable-park/receiver/) |
 | Sweep | Runs every 5 minutes: safety net for stuck rows, and the alerts | [`durable-park/scripts/`](durable-park/scripts/) |
 | Tool lockdown and deploy | The v1 lockdown that limits what the agent can call (re-applied on proto-agents 2026-10-21 03:16 UTC as a stopgap); systemd units; tunnel image build | [`durable-park/deploy/`](durable-park/deploy/) |
@@ -87,7 +87,7 @@ flowchart LR
   hermes -->|"risky action: ask first"| withhuman["withHuman<br/>approvals + gateway"]
   approver(["Approver"]) -->|"approve / deny"| withhuman
   withhuman -->|"approved call, once"| qbo[("QuickBooks")]
-  bridge["durable-park bridge"] -->|"confirms it is the approved call"| withhuman
+  bridge["durable-park bridge"] -->|"asks withHuman: was this call approved?"| withhuman
 ```
 
 Full detail, with every arrow labeled: [durable-park/docs/architecture.md](durable-park/docs/architecture.md).

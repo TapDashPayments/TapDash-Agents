@@ -1,11 +1,14 @@
 # durable-park gateway bridge: the withHuman pipeline webhook block (POST /wh/bridge on 127.0.0.1:8791).
 # System unit, installed, enabled and started by deploy/configure_hermes.sh (which also creates dpwake).
 #
-# LEDGER PATH: the deployed plugin's ledger is /home/hermes/.hermes/plugin-data/durable-park/ledger.db
-# (DURABLE_PARK_LEDGER below; ReadWritePaths is its directory, which also holds the -wal/-shm files and the
-# bridge's bridge_deliveries.db). The directory must exist before the unit starts, and the bridge refuses to
-# create a missing ledger file (it answers human and logs once), so a wrong path cannot create an empty one.
-# /opt/durable-park is the receiver's venv (starlette, uvicorn, agentapprovalprotocol) and holds root-owned
+# STATELESS: the bridge keeps no state and does not open the ledger (the ledger is a file the bot's user can
+# write, so a row in it proves nothing). For every gateway call it asks withHuman itself (GET /api/v1/requests)
+# with the organization key /etc/durable-park/audit_key (permissions audit.read, request.read,
+# request.read.unrouted: it can read requests and cannot approve, deny or change anything) and approves only a
+# call that matches one approved, consumed park request in the last 120 s that no other gateway request has
+# already used. Anything unclear answers human. The key is read on every call, so rotating it needs no restart.
+# That is why there is no DURABLE_PARK_LEDGER and no ReadWritePaths: the bridge writes nothing.
+# /opt/durable-park is the receiver's venv (starlette, uvicorn, agentapprovalprotocol, httpx) and holds root-owned
 # copies of this repo's bridge/ and plugin/durable_park/ (configure_hermes.sh).
 [Unit]
 Description=durable-park gateway bridge (withHuman approval webhook block)
@@ -13,7 +16,7 @@ After=network.target
 
 [Service]
 Type=simple
-# hermes: it must read and write the ledger (the bridge records the one-time gateway pass in it).
+# hermes: Group=hermes reads /etc/durable-park/audit_key (0640 root:hermes). It needs no write access anywhere.
 User=hermes
 Group=hermes
 # dpwake: read access to /etc/durable-park/bridge_secret (0640 root:dpwake).
@@ -21,16 +24,14 @@ SupplementaryGroups=dpwake
 WorkingDirectory=/opt/durable-park
 Environment=PYTHONPATH=/opt/durable-park/plugin:/opt/durable-park
 Environment=PYTHONUNBUFFERED=1
-Environment=DURABLE_PARK_LEDGER=/home/hermes/.hermes/plugin-data/durable-park/ledger.db
-ExecStart=/opt/durable-park/bin/python -B -m bridge.app --host 127.0.0.1 --port 8791 --secret-file /etc/durable-park/bridge_secret --expected-agent proto-agents
+ExecStart=/opt/durable-park/bin/python -B -m bridge.app --host 127.0.0.1 --port 8791 --secret-file /etc/durable-park/bridge_secret --key-file /etc/durable-park/audit_key --expected-agent proto-agents
 Restart=on-failure
 RestartSec=3
 
 # Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/home/hermes/.hermes/plugin-data/durable-park
+ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
