@@ -1,6 +1,6 @@
 # durable-park: acceptance record, Langfuse tracing (2026-10-22)
 
-**Result: PASSED. Langfuse tracing is live on the test VM `proto-agents` and does not change how approvals work.**
+**Result: PASSED. Langfuse tracing is live on the test VM `proto-agents` (the unpatched catalog `langfuse` plugin; TapDash's patched copy is not deployed) and does not change how approvals work.**
 Every chat message, model call and tool call is copied, with its full content, to Langfuse Cloud (US). A $1
 payment still asked a human once in withHuman and ran once. Four gaps need code (recommendations in the
 [backlog](backlog.md#langfuse-tracing-gaps-from-the-2026-10-22-audit)); none changes what runs. One more item, the

@@ -1,6 +1,7 @@
 > **TapDash patched copy.** This is not the catalog plugin. It is a copy of Nous Research's `langfuse` plugin
-> (v2.0.0 @ `c2a9596`) with TapDash's changes, listed in [`PATCHES.md`](PATCHES.md). On the test VM it is installed as
-> a symlink, `~/.hermes/plugins/tapdash-langfuse`, under the plugin name `tapdash-langfuse`. The rest of this file is
+> (v2.0.0 @ `c2a9596`) with TapDash's changes, listed in [`PATCHES.md`](PATCHES.md). At the deploy it is installed on the
+> test VM as a symlink, `~/.hermes/plugins/tapdash-langfuse`, under the plugin name `tapdash-langfuse` (until then the
+> VM runs the catalog `langfuse` plugin and there is no such link). The rest of this file is
 > upstream's text with TapDash notes; **do not follow its install, update or remove steps** (`hermes plugins install
 > langfuse`, `hermes update`, `hermes plugins remove langfuse`). Deploy, turn on, turn off and change it only with
 > the [runbook](../../durable-park/docs/runbook.md#tracing-langfuse). **Never enable, disable or reload any plugin

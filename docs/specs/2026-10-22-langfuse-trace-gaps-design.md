@@ -19,8 +19,9 @@ setting of Nous's `langfuse` plugin (v2.0.0 @ `c2a9596`) can fix:
   pattern as durable-park), and disable the catalog `langfuse` plugin (kept installed for rollback). No pull request
   to Nous (Yaakov, 2026-10-22). `PATCHES.md` lists every change against upstream.
 - **D2 — user id.** Trace `userId` = the chat sender id Hermes passes to the turn-scoped `pre_llm_call` hook
-  (`sender_id`). Langfuse requires US-ASCII and at most 200 characters for a user id: a sender id that is not is left
-  out (never altered). The sender's display name (`HERMES_SESSION_USER_NAME` via
+  (`sender_id`). Langfuse requires US-ASCII and at most 200 characters for a user id, and the code also requires at
+  least 1 character and no leading or trailing whitespace: a sender id that fails any of these is left out (never
+  altered; *amended after strong review: this states the rule `_ascii_attr` applies*). The sender's display name (`HERMES_SESSION_USER_NAME` via
   `gateway.session_context.get_session_env`) goes into the **root observation's** metadata as `user_name` (exported
   as `langfuse.observation.metadata.user_name`, not as trace metadata); it may be non-ASCII and is cut to 200
   characters. No sender (cron, some CLI turns) → no `userId` and no `user_name`. *Amended after strong review

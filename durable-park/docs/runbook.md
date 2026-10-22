@@ -204,7 +204,7 @@ PY
    | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger`, which runs `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (step 4b copies both trees recursively, removes files the repo no longer has, restarts the bridge, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge). By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401`. |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
-   | `tracing/tapdash_langfuse/` (the patched Langfuse plugin; the gateway loads it through a symlink into the live clone) | Run `bash tracing/run_tests.sh` as `hermes` first. The change is loaded at the next gateway restart **or the next plugin reload**, so follow [When the plugin changes](#when-the-plugin-changes) (hook re-review before the pull; pull with the gateway stopped) |
+   | `tracing/tapdash_langfuse/` (the patched Langfuse plugin; once it is deployed, the gateway loads it through a symlink into the live clone) | Run `bash tracing/run_tests.sh` as `hermes` first. The change is loaded at the next gateway restart **or the next plugin reload**, so follow [When the plugin changes](#when-the-plugin-changes) (hook re-review before the pull; pull with the gateway stopped) |
    | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
@@ -572,7 +572,9 @@ To allow one:
 3. **Confirm it never returns `modify`** (or any directive other than `None`, or `block`), on any path, including
    errors. For middleware: a `tool_request` one must never return `{"args": ...}`; a `tool_execution` one must
    call `next_call()` with no argument or with the exact `args` it was given, on every path. If you cannot confirm it, do not list it: remove or disable it instead.
-4. Add its exact name to `observer_hooks`, restart the gateway, and check one call is asked about normally again.
+4. Add its exact name to `observer_hooks` (a config edit: nothing changes until the next start), check that no row is
+   `parked`, `approved` or `executing` ([health check](#health-check)), restart the gateway, and check one call is asked
+   about normally again.
 5. Re-do this review whenever that plugin, script or command changes.
 
 Registration order does not make a foreign hook safe: Hermes merges `modify` from every `pre_tool_call` callback, so
@@ -662,7 +664,7 @@ match, so the patterns must only match non-secret ids (such as park ids), and mu
 **Status: built and tested, not deployed.** A copy of the Nous Research `langfuse` plugin (v2.0.0 @ commit `c2a9596`,
 MIT) lives in this repo at [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse), with TapDash's changes. Every
 change against upstream is listed in [`PATCHES.md`](../../tracing/tapdash_langfuse/PATCHES.md). Decisions and reasons:
-[design](../../docs/specs/2026-10-22-langfuse-trace-gaps-design.md) (D1 to D8). On the VM it is installed as a symlink,
+[design](../../docs/specs/2026-10-22-langfuse-trace-gaps-design.md) (D1 to D8). At the deploy it is installed on the VM as a symlink (there is none before then),
 `~/.hermes/plugins/tapdash-langfuse` to `/home/hermes/tapdash-agents/tracing/tapdash_langfuse` (the same pattern as
 durable-park), under the plugin name `tapdash-langfuse` and the import name `hermes_plugins.tapdash_langfuse`. The
 catalog `langfuse` plugin is disabled at the deploy but kept installed, for rollback.
@@ -710,7 +712,9 @@ step 3 write down which environment the gateway runs:
 `grep -o '/environments/[0-9a-f]*/venv' /proc/$(systemctl --user show hermes-gateway -p MainPID --value)/maps | sort -u`
 (one line; the "Check it works" block below has the same command). Step 4 checks it again.
 
-1. Back up `~/.hermes/.env` and `~/.hermes/config.yaml` (suffix `.bak-langfuse-gaps-<UTC time>`). Then add the new
+1. Back up `~/.hermes/.env` and `~/.hermes/config.yaml` with `cp -p` (suffix `.bak-langfuse-gaps-<UTC time>`; `-p` keeps
+   the owner and the mode, and the `.env` copy holds the Langfuse secret key, so check with `ls -l` that it is `600`,
+   `chmod 600` it if not). Then add the new
    setting once, quoted so the backslashes stay (it holds no secret):
    `printf '%s\n' 'HERMES_LANGFUSE_TAG_PATTERNS=park=\bP-[0-9A-F]{8}\b' >> ~/.hermes/.env`
    (end the last line first if it has no newline, as in [Turn it on](#turn-it-on-admin)).
@@ -795,9 +799,11 @@ after it was turned off (names as after the deploy; the plugin directory is the 
 
 3. Check that the non-secret settings in the table above are in `.env` (names only: `grep -c '^HERMES_LANGFUSE_' ~/.hermes/.env`
    counts the lines; `grep -o '^HERMES_LANGFUSE_[A-Z_]*' ~/.hermes/.env` lists the names). Add any that are missing.
-   Also check that `hermes config get plugins.entries.durable-park.settings.observer_hooks` still lists
-   `hermes_plugins.tapdash_langfuse.on_pre_tool_call` (it is taken out only under "remove for good" below). Without it,
-   durable-park refuses every tool call once the plugin is enabled (an outage, not a loss of safety).
+   Also check that `hermes config get plugins.entries.durable-park.settings.observer_hooks` lists
+   `hermes_plugins.tapdash_langfuse.on_pre_tool_call`. It is missing after "Remove for good" below: then **add it now**,
+   by hand in `config.yaml`, and read the list back, before step 4. While the gateway still runs this is only a config
+   edit and changes nothing until the next start; the name must be there before step 6 starts the gateway, because
+   without it durable-park refuses every tool call once the plugin is loaded (an outage, not a loss of safety).
 4. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)), then straight away
    `systemctl --user stop hermes-gateway`, so no approval can be parked in between and no plugin reload reaches a
    running gateway ([warning](#never-change-plugins-while-the-gateway-runs)).
@@ -982,11 +988,11 @@ The hook is listed in `observer_hooks` because of the code that was read: upstre
 copy's `on_pre_tool_call`, which is byte-identical to it. The listing is by name only, so a changed hook that now does
 something else would be allowed silently at the next load of the plugin: a gateway restart (a crash restart is
 enough) **or any plugin reload** (`hermes plugins enable|disable` of any plugin, the dashboard's plugin toggle), which
-loads the changed code too. Because the plugin is a symlink into the live clone, `git pull` in the live clone changes
+loads the changed code too. Because, once deployed, the plugin is a symlink into the live clone, `git pull` in the live clone changes
 the code that next load uses. So a change under `tracing/tapdash_langfuse/` goes live only like this:
 
 1. In your worktree: `bash tracing/run_tests.sh` passes, and `on_pre_tool_call` still matches the upstream function
-   (the diff in step 1 of the [deploy](#switch-to-the-patched-plugin-deploy) prints nothing), or the changed hook is
+   (the diff under "Before you start" in the [deploy](#switch-to-the-patched-plugin-deploy) prints nothing), or the changed hook is
    read again (steps 2 and 3 of [Allow another hook](#allow-another-hook-observer_hooks)). If you cannot confirm it
    never returns `modify`, do not merge it. List the change in `PATCHES.md`.
 2. Update its row in [Hooks reviewed so far](#hooks-reviewed-so-far) (a new date and what was read), and, for a new
@@ -1000,7 +1006,7 @@ the code that next load uses. So a change under `tracing/tapdash_langfuse/` goes
 To take a newer upstream version: copy it over the vendored files, re-apply the changes listed in `PATCHES.md`, and
 do steps 1 to 3. Never use `hermes plugins install langfuse` to update: it would change the catalog copy, not ours.
 
-After a **Hermes upgrade**, also set `HERMES_LANGFUSE_RELEASE` to the new version (`hermes-v<version>`) and restart, so
+After a **Hermes upgrade**, also set `HERMES_LANGFUSE_RELEASE` to the new version (`hermes-v<version>`) and restart (ledger check first: no row `parked`, `approved` or `executing`, [health check](#health-check)), so
 new traces carry the right release.
 
 ## Add a form-checked tool
@@ -1211,9 +1217,10 @@ Several secrets were pasted into chat during testing (approved for testing only)
   `facts.json` now points at venv `58c7a333` (the Teams packages) and the old venv `e74ec07b` still exists. Only with nothing `parked`, `approved` or
   `executing`. Plan: [docs/plans/2026-10-20-one-agent-merge.md](../../docs/plans/2026-10-20-one-agent-merge.md).
 - **The patched Langfuse plugin (once deployed)**: go back to the unpatched catalog plugin with the rollback in
-  [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy): enable `langfuse`, disable `tapdash-langfuse`,
+  [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy): enable `langfuse`, disable `tapdash-langfuse`
+  **with the gateway stopped** (never with it running, see the [warning](#never-change-plugins-while-the-gateway-runs)),
   and make `observer_hooks` match the plugin that is loaded (the old name goes back first, the new name comes off only
-  after a restart), each restart with nothing `parked`, `approved` or `executing`.
+  after a restart), each stop/start with nothing `parked`, `approved` or `executing`.
 - **Code**: `git revert <commit>` in the clone, push, then make it live as in [Deploy a change](#deploy-a-change).
   For the bridge and receiver that includes copying the reverted files to `/opt/durable-park` again: the root
   copies do not change by themselves.

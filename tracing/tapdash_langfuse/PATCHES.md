@@ -76,7 +76,7 @@ Keep this list complete: every difference from upstream goes here, in the commit
      the root's `langfuse.trace.tags` and the root's `user_name` metadata, so an SDK change that breaks them fails
      the suite.
    - Value on proto-agents: `HERMES_LANGFUSE_TAG_PATTERNS=park=\bP-[0-9A-F]{8}\b` (durable-park park ids).
-6. `README.md`: a TapDash banner at the top (patched copy, installed by symlink, do not follow upstream's install,
+6. `README.md`: a TapDash banner at the top (patched copy, installed by symlink at the deploy, do not follow upstream's install,
    update or remove steps, never reload plugins with the gateway running); upstream's `hermes update` migration
    paragraph and `hermes plugins remove langfuse` are marked as not applying here; the stale "Hermes turn" text
    now names the per-platform trace names; the tuning section documents `HERMES_LANGFUSE_TAG_PATTERNS`, marked as a
