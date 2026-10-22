@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -135,7 +136,7 @@ def declares_context(schema: Any) -> bool:
 
 MAX_SCHEMA_DEPTH = 10  # how deep ``$ref``/``allOf``/``anyOf``/``oneOf`` are followed before giving up
 MAX_PATTERN_CHARS = 200  # a longer ``patternProperties`` regex is not run (it comes from outside): unknown
-MAX_SCHEMA_NODES = 2000  # schema nodes visited per lift (a tool's whole rules): more is "cannot tell", and reported
+MAX_SCHEMA_NODES = 2000  # schema nodes visited per top-level key: more is "cannot tell", and reported
 _UNRESOLVED = object()
 
 
@@ -228,11 +229,12 @@ def is_note_key(key: Any) -> bool:
 def _key_declares(props: dict, key: Any, root: Any, budget: _Budget | None = None) -> bool | None:
     """Do the tool's rules for the top-level ``key`` declare their own ``withhuman_context``? A key the rules do not
     list (Hermes may show the model a sanitized spelling of a property name) is judged by every other property:
-    when any of them declares the field the key is left alone (when in doubt, skip, and say so)."""
+    when any of them declares the field the key is left alone; "cannot tell" stays "cannot tell" (the caller says so
+    when the budget ran out)."""
     if key in props:
         return _declares_context_in(props[key], root, budget=budget)
     found = [_declares_context_in(rules, root, budget=budget) for name, rules in props.items() if name != CONTEXT_FIELD]
-    return True if True in found else False
+    return True if True in found else (None if None in found else False)
 
 
 def lift_gateway_context(args: Any, schema: dict | None,
@@ -262,7 +264,6 @@ def lift_gateway_context(args: Any, schema: dict | None,
     out = copy.deepcopy(args)
     top_present = CONTEXT_FIELD in out
     note: str | None = None
-    budget = _Budget()
 
     def report(kind: str, key: str, detail: str = "") -> None:
         if on_problem is not None:
@@ -275,6 +276,7 @@ def lift_gateway_context(args: Any, schema: dict | None,
         value = out[key]
         if not isinstance(value, dict) or CONTEXT_FIELD not in value:
             continue
+        budget = _Budget()  # each key's rules get their own: a complex key must not decide its siblings
         try:
             declared = _key_declares(props, key, schema, budget)
         except Exception:  # noqa: BLE001 - never raise out of the lift; "cannot tell" lifts
@@ -418,11 +420,15 @@ def _flush_at_exit(ref: "weakref.ReferenceType[LiftStatus]") -> None:
 
 def _open_shared(path: str, flags: int, mode: int) -> int:
     """Open ``path`` creating it with exactly ``mode`` (the umask does not narrow it): files that several users read
-    or write (the report's lock, the markers) must work for a process running as another user."""
-    fd = os.open(path, flags | os.O_CREAT, mode)
+    or write (the report's lock, the markers) must work for a process running as another user. A symlink at
+    ``path`` is never followed (the open fails), and only a regular file this process's user owns gets its mode
+    set: a file another user created keeps the mode they gave it."""
+    fd = os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW, mode)
     try:
-        os.fchmod(fd, mode)
-    except OSError:  # a file another user created: its mode is theirs to set
+        info = os.fstat(fd)
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid():
+            os.fchmod(fd, mode)
+    except OSError:
         pass
     return fd
 
@@ -462,6 +468,8 @@ class LiftStatus:
         self._owner = owner
         self._lock = threading.Lock()  # guards the fields below; never held during file I/O
         self._io = threading.Lock()  # one writing thread at a time in this process
+        self._marker_lock = threading.Lock()  # a failure's marker and a success's cleanup never interleave
+        self._fail_gen = 0  # counts failures: a success only clears the outage if none happened since it began
         self._pending: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         self._known: set[tuple[str, str, str, str]] = set()
         self._last_write: float | None = None
@@ -569,18 +577,13 @@ class LiftStatus:
                     raise LockTimeout() from None
                 time.sleep(LIFT_LOCK_RETRY_SECONDS)
 
-    def _write_marker(self, exc: BaseException) -> None:
-        """Tell the sweep this process cannot write the report: UTC time and error type only. Best effort, once per
-        outage."""
-        with self._lock:
-            if self._marker_tried or not self._path:
-                return
-            self._marker_tried = True
+    def _write_marker_file(self, exc: BaseException) -> None:
+        """Tell the sweep this process cannot write the report: UTC time and error type only. Best effort."""
         try:
             fd = _open_shared(self.marker_path, os.O_WRONLY | os.O_TRUNC, 0o644)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(f"{datetime.now(timezone.utc).strftime(_MARKER_STAMP_FORMAT)} {type(exc).__name__}\n")
-        except OSError as err:  # the directory itself is unwritable: the form-check alert covers that case
+        except OSError as err:  # the directory itself is unwritable (the form-check alert covers that), or a planted link
             log.warning("could not write the lift unwritable marker (%s)", type(err).__name__)
 
     def _clear_marker(self) -> None:
@@ -592,12 +595,18 @@ class LiftStatus:
             log.error("could not remove %s (%s)", os.path.basename(self.marker_path), type(exc).__name__)
 
     def _failed(self, exc: BaseException) -> None:
-        with self._lock:
-            was_failed = self._write_failed
-            self._write_failed = True
-        if not was_failed:
-            log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
-        self._write_marker(exc)
+        """This process could not write: remember it and leave the marker (once per outage)."""
+        with self._marker_lock:
+            with self._lock:
+                was_failed = self._write_failed
+                self._write_failed = True
+                self._fail_gen += 1
+                write = not self._marker_tried and bool(self._path)
+                self._marker_tried = True
+            if not was_failed:
+                log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
+            if write:
+                self._write_marker_file(exc)
 
     def _flush(self, deadline: float) -> None:
         if not self._path:
@@ -611,6 +620,7 @@ class LiftStatus:
         try:
             with self._lock:
                 batch, self._pending = self._pending, {}
+                generation = self._fail_gen
             try:
                 kept = self._write(batch, deadline)
             except Exception as exc:  # noqa: BLE001 - keep the occurrences and retry
@@ -619,12 +629,18 @@ class LiftStatus:
                         self._add(ident, pending["delta"], pending["first_seen"], pending["last_seen"])
                 self._failed(exc)
                 return
-            with self._lock:
-                self._known = {_ident(e) for e in kept}
-                self._last_write = self._clock()
-                self._write_failed = False
-                self._marker_tried = False
-            self._clear_marker()
+            with self._marker_lock:
+                with self._lock:
+                    self._known = {_ident(e) for e in kept}
+                    self._last_write = self._clock()
+                    # The outage is over only if no thread failed since this write began and nothing is waiting:
+                    # otherwise this process still has entries it could not write, and its marker stays.
+                    over = self._fail_gen == generation and not self._pending
+                    if over:
+                        self._write_failed = False
+                        self._marker_tried = False
+                if over:
+                    self._clear_marker()
         finally:
             self._io.release()
 

@@ -21,9 +21,9 @@
   place and says "+N more places, e.g. ..." for others), again once per 24 h while a count keeps growing (never for
   ``declared``, which is intentional), one when the report itself is unreadable (until it reads again), and one
   when the check itself fails (``lift_check_alert_state.json``; a recovery line follows)
-* the marker ``lift_status.unwritable`` (the hook could not write ``lift_status.json``)
-                                                       -> print one alert line per outage (and one when the marker
-  is gone; state in ``lift_unwritable_alert_state.json``)
+* the markers ``lift_status.unwritable.<pid>`` (one per process that could not write ``lift_status.json``)
+                                                       -> print one alert line per marker (and one when the last
+  marker is gone; state in ``lift_unwritable_alert_state.json``)
 
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
@@ -66,7 +66,7 @@ POLICY_LOAD_STATE = "tool_policy_load_alert_state.json"
 LIFT_STATUS = "lift_status.json"  # what the park hook could not do with the agent's withhuman_context note
 LIFT_STATE = "lift_alert_state.json"
 LIFT_CHECK_STATE = "lift_check_alert_state.json"  # the lift check itself failed
-LIFT_UNWRITABLE = "lift_status.unwritable"  # exists while the hook cannot write the lift report
+LIFT_UNWRITABLE = "lift_status.unwritable"  # prefix: ``<prefix>.<pid>`` exists while that process cannot write the report
 LIFT_UNWRITABLE_STATE = "lift_unwritable_alert_state.json"
 LIFT_REALERT = timedelta(hours=24)  # a problem that keeps happening is said again this often
 LIFT_NO_REPEAT = frozenset({"declared"})  # intentional: said once, never again

@@ -1000,3 +1000,106 @@ def test_a_schema_inside_the_budget_is_judged_exactly_as_before():
     schema["$defs"]["D2"] = {"properties": {"withhuman_context": {"type": "string"}}}
     out, reports = lift_report({"params": {"withhuman_context": "x"}}, schema)
     assert out == {"params": {"withhuman_context": "x"}} and reports == [("declared", "params", "")]
+
+
+# ---- second review: races around the marker, a budget per key, unlisted keys, planted symlinks ----------------------
+
+
+def test_a_failure_while_another_thread_is_clearing_the_marker_still_leaves_a_marker(tmp_path):
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    real_clear = status._clear_marker
+    in_clear = threading.Event()
+
+    def slow_clear():
+        in_clear.set()
+        time.sleep(0.5)  # the writer is between "my write worked" and "remove the marker"
+        real_clear()
+
+    status._clear_marker = slow_clear
+    writer = threading.Thread(target=lambda: status.record("t", "declared", "a"))
+    writer.start()
+    assert in_clear.wait(10)
+    status.record("t", "lift_error", "b")  # cannot get the writer's turn in 0.2 s: its entry stays pending
+    writer.join(10)
+    assert markers(tmp_path) == [f"{MARKER}.me"]  # the outage is not silenced
+    status._clear_marker = real_clear
+    status.flush()
+    assert markers(tmp_path) == []
+    assert {e["kind"] for e in read_entries(tmp_path / "lift_status.json")} == {"declared", "lift_error"}
+
+
+def test_a_marker_stays_while_another_thread_still_has_entries_it_could_not_write(tmp_path):
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    real_write = status._write
+    written = threading.Event()
+
+    def slow_write(batch, deadline):
+        kept = real_write(batch, deadline)
+        written.set()
+        time.sleep(0.5)  # the write worked; the writer has not yet run its success path
+        return kept
+
+    status._write = slow_write
+    writer = threading.Thread(target=lambda: status.record("t", "declared", "a"))
+    writer.start()
+    assert written.wait(10)
+    status.record("t", "lift_error", "b")  # times out: marker, entry pending
+    writer.join(10)
+    assert markers(tmp_path) == [f"{MARKER}.me"]  # the writer's success must not remove it
+    status._write = real_write
+    status.flush()
+    assert markers(tmp_path) == []
+    assert {e["kind"] for e in read_entries(tmp_path / "lift_status.json")} == {"declared", "lift_error"}
+
+
+def test_a_complex_key_does_not_use_up_the_budget_of_its_sibling():
+    schema = fan_out_schema()
+    schema["properties"]["b"] = {"type": "object", "properties": {"withhuman_context": {"type": "string"}}}
+    args = {"a": {"withhuman_context": "x"}, "b": {"withhuman_context": "y"}}
+    out, reports = lift_report(args, schema)
+    assert ("declared", "b", "") in reports and ("schema_too_complex", "b", "") not in reports
+    assert ("schema_too_complex", "a", "") in reports
+    assert out["b"] == {"withhuman_context": "y"}  # b is left alone, exactly as when it is alone
+    alone, alone_reports = lift_report({"b": {"withhuman_context": "y"}}, schema)
+    assert alone["b"] == {"withhuman_context": "y"} and alone_reports == [("declared", "b", "")]
+
+
+def test_a_complex_schema_is_reported_for_a_key_the_rules_do_not_list():
+    args = {"zz": {"withhuman_context": "x"}}  # judged by every listed property: they run out of budget
+    out, reports = lift_report(args, fan_out_schema())
+    assert out == {"zz": {}, "withhuman_context": "x"}
+    assert reports == [("schema_too_complex", "zz", "")]
+
+
+def plant_symlink(tmp_path, name):
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    victim.chmod(0o600)
+    (tmp_path / name).symlink_to(victim)
+    return victim
+
+
+def test_a_symlink_planted_at_the_lock_is_never_followed_or_changed(tmp_path):
+    victim = plant_symlink(tmp_path, "lift_status.json.lock")
+    status = LiftStatus(str(tmp_path / "lift_status.json"), owner="me")
+    status.record("t", "declared", "params")
+    assert victim.read_text() == "keep" and victim.stat().st_mode & 0o777 == 0o600
+    assert not (tmp_path / "lift_status.json").exists()
+    (marker,) = markers(tmp_path)  # loud: the report cannot be written
+    assert (tmp_path / marker).read_text().split()[1] == "OSError"
+
+
+def test_a_symlink_planted_at_the_marker_is_never_followed_or_changed(tmp_path):
+    victim = plant_symlink(tmp_path, f"{MARKER}.me")
+    block_lock(tmp_path)  # the write fails, so the marker is attempted
+    LiftStatus(str(tmp_path / "lift_status.json"), owner="me").record("t", "declared", "params")
+    assert victim.read_text() == "keep" and victim.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_lock_owned_by_someone_else_is_used_but_its_mode_is_left_alone(tmp_path, monkeypatch):
+    lock = tmp_path / "lift_status.json.lock"
+    lock.write_text("")
+    lock.chmod(0o640)
+    monkeypatch.setattr(os, "geteuid", lambda: os.stat(lock).st_uid + 1)  # as if another user created it
+    LiftStatus(str(tmp_path / "lift_status.json")).record("t", "declared", "params")
+    assert lock.stat().st_mode & 0o777 == 0o640 and (tmp_path / "lift_status.json").exists()
