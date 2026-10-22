@@ -2,7 +2,10 @@ import copy
 import hashlib
 import json
 import logging
+import fcntl
+import re
 import threading
+import time
 
 import pytest
 
@@ -278,6 +281,29 @@ def test_build_call_cuts_reasoning_at_2000_characters(tmp_path):
     assert build_call(row).reasoning == "n" * 2000
 
 
+def utf16_units(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def test_build_call_cuts_reasoning_at_2000_utf16_units_not_characters(tmp_path):
+    """A character outside the BMP (an emoji) is two UTF-16 units: 1500 emoji are 3000 units and are cut to 1000."""
+    reasoning = build_call(park_with_args(tmp_path, {"withhuman_context": "\U0001F600" * 1500})).reasoning
+    assert reasoning == "\U0001F600" * 1000 and utf16_units(reasoning) == 2000
+
+
+def test_the_utf16_cut_never_splits_a_surrogate_pair(tmp_path):
+    reasoning = build_call(park_with_args(tmp_path, {"withhuman_context": "a" + "\U0001F600" * 1500})).reasoning
+    assert reasoning == "a" + "\U0001F600" * 999 and utf16_units(reasoning) == 1999  # the next pair would be 2001
+    reasoning.encode("utf-8")  # still well-formed text
+    exact = "\U0001F600" * 1000
+    (tmp_path / "x").mkdir()
+    assert build_call(park_with_args(tmp_path / "x", {"withhuman_context": exact})).reasoning == exact
+
+
+def test_a_short_non_bmp_note_is_not_cut(tmp_path):
+    assert build_call(park_with_args(tmp_path, {"withhuman_context": "pay \U0001F600 now"})).reasoning == "pay \U0001F600 now"
+
+
 @pytest.mark.parametrize("args", [
     {"params": {"criteria": "x"}},
     {"withhuman_context": ""},
@@ -458,25 +484,33 @@ def test_lift_judges_a_key_the_rules_do_not_list_by_the_other_properties():
 
 
 @pytest.mark.parametrize("name", ["withhuman_context", "WithHuman_Context", "_withhuman_context", "withhuman_context__",
-                                  "WITHHUMAN_CONTEXT"])
+                                  "WITHHUMAN_CONTEXT", "withHumanContext", "with-human-context", "_withhuman_context_",
+                                  "With Human Context", "withhuman.context"])
 def test_note_key_spellings(name):
     assert is_note_key(name)
 
 
-@pytest.mark.parametrize("name", ["withhuman_scope", "withhuman_context_x", "context", "", 5, None])
+@pytest.mark.parametrize("name", ["withhuman_scope", "withhuman_context_x", "withhuman_contexts", "context", "", 5, None])
 def test_other_keys_are_not_the_note(name):
     assert not is_note_key(name)
 
 
 @pytest.mark.parametrize("args,paths", [
     ({"params": {"criteria": {"withhuman_context": "x"}}}, ["params.criteria.withhuman_context"]),
-    ({"params": [{"a": 1, "withhuman_context": "x"}]}, ["params[0].withhuman_context"]),
-    ({"params": {"items": [{"a": 1}, {"b": {"withhuman_context": "x"}}]}}, ["params.items[1].b.withhuman_context"]),
+    ({"params": [{"a": 1, "withhuman_context": "x"}]}, ["params[*].withhuman_context"]),
+    ({"params": {"items": [{"a": 1}, {"b": {"withhuman_context": "x"}}]}}, ["params.items[*].b.withhuman_context"]),
     ({"params": "{'a':1,'withhuman_context':'x'}"}, ["params"]),  # not strict JSON, still contains the name
     ({"params": '{"a":1,"withhuman_context":"x"'}, ["params"]),  # truncated
     ({"params": '{"a":1,"withhuman_context":"x"}'}, ["params.withhuman_context"]),
     ({"params": '{"a":1,"_withhuman_context_":"x"}'}, ["params._withhuman_context_"]),
-    ({"params": '[{"withhuman_context":"x"}]'}, ["params[0].withhuman_context"]),
+    ({"params": '[{"withhuman_context":"x"}]'}, ["params[*].withhuman_context"]),
+    ({"params": {"lines": [{"withhuman_context": str(i)} for i in range(30)]}}, ["params.lines[*].withhuman_context"]),
+    ({"params": {"withHumanContext": "x"}}, ["params.withHumanContext"]),
+    ({"params": {"with-human-context": "x"}}, ["params.with-human-context"]),
+    ({"params": {"_withhuman_context_": "x"}}, ["params._withhuman_context_"]),
+    ({"withHumanContext": "x"}, ["withHumanContext"]),  # a top-level misspelling is not the gateway's field
+    ({"params": "see the withHumanContext field"}, ["params"]),  # prose that names it also counts
+    ({"params": "keep with-human-context handy"}, ["params"]),
     ({"params": '"{\\"withhuman_context\\": \\"x\\"}"'}, ["params.withhuman_context"]),  # double encoded
     ({"params": '{"\\u0077ithhuman_context": "x"}'}, ["params.withhuman_context"]),  # escaped spelling
     ({"params": {"WithHuman_Context": "x"}}, ["params.WithHuman_Context"]),
@@ -515,9 +549,11 @@ def test_find_leftover_notes_is_bounded_in_depth_nodes_and_hits():
     assert find_leftover_notes({"params": deep}) == ([], True)  # too deep: reported as incomplete, not silently fine
     wide = {"params": [{"i": i} for i in range(11_000)]}
     assert find_leftover_notes(wide)[1] is True
-    many = {"params": [{"withhuman_context": "x"} for _ in range(50)]}
+    many = {f"p{i}": {"withhuman_context": "x"} for i in range(50)}
     hits, incomplete = find_leftover_notes(many)
     assert len(hits) == 20 and incomplete is True
+    same_place = {"params": [{"withhuman_context": "x"} for _ in range(50)]}  # one place, however many list items
+    assert find_leftover_notes(same_place) == (["params[*].withhuman_context"], False)
 
 
 def test_find_leftover_notes_survives_absurd_json_nesting():
@@ -596,7 +632,7 @@ def test_lift_status_keeps_a_corrupt_old_file_aside_instead_of_losing_it(tmp_pat
     path = tmp_path / "lift_status.json"
     path.write_text("{not json")
     LiftStatus(str(path)).record("t", "lift_error")
-    assert [e["kind"] for e in read_entries(path)] == ["lift_error"]
+    assert sorted(e["kind"] for e in read_entries(path)) == ["lift_error", "report_reset"]  # the reset is reported
     assert (tmp_path / "lift_status.json.corrupt").read_text() == "{not json"
 
 
@@ -668,3 +704,141 @@ def test_lift_status_is_thread_safe(tmp_path):
     status.flush()
     (entry,) = read_entries(path)
     assert entry["count"] == 200
+
+
+# ---- final fix wave: blank notes, the unwritable marker, the lock, overflow --------------------------------
+
+
+def test_lift_treats_a_blank_nested_note_as_empty_not_as_the_approvers_reason():
+    args = {"params": {"a": 1, "withhuman_context": "   \n "}}
+    out, reports = lift_report(args, GW_SCHEMA)
+    assert out == {"params": {"a": 1}} and reports == [("note_dropped", "params", "empty")]
+
+
+MARKER = "lift_status.unwritable"
+
+
+def block_lock(tmp_path):
+    """Make ``lift_status.json.lock`` impossible to open (a directory of that name)."""
+    (tmp_path / "lift_status.json.lock").mkdir()
+
+
+def unblock_lock(tmp_path):
+    (tmp_path / "lift_status.json.lock").rmdir()
+
+
+def test_a_report_that_cannot_be_written_leaves_a_marker_with_time_and_error_type_only(tmp_path):
+    block_lock(tmp_path)
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    status.record("t", "declared", "params")
+    text = (tmp_path / MARKER).read_text()
+    stamp, error = text.split()
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp) and error == "IsADirectoryError"
+    assert "declared" not in text and "params" not in text
+
+
+def test_the_marker_is_removed_by_the_next_successful_write(tmp_path):
+    block_lock(tmp_path)
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    status.record("t", "declared", "params")
+    assert (tmp_path / MARKER).exists() and not (tmp_path / "lift_status.json").exists()
+    unblock_lock(tmp_path)
+    status.flush()
+    assert not (tmp_path / MARKER).exists()
+    assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+
+
+def test_no_marker_while_the_report_is_written_fine(tmp_path):
+    LiftStatus(str(tmp_path / "lift_status.json")).record("t", "declared", "params")
+    assert not (tmp_path / MARKER).exists()
+
+
+def test_a_report_in_a_missing_directory_makes_no_marker_and_no_error(tmp_path, caplog):
+    status = LiftStatus(str(tmp_path / "nope" / "lift_status.json"))
+    status.record("t", "declared", "params")  # the directory itself is unwritable: the form-check alert covers it
+    assert not (tmp_path / "nope").exists()
+
+
+def test_unwritten_entries_are_never_evicted_and_overflow_is_counted(tmp_path):
+    block_lock(tmp_path)
+    status = LiftStatus(str(tmp_path / "lift_status.json"))
+    for i in range(MAX_LIFT_ENTRIES + 5):
+        status.record(f"tool_{i}", "declared", "params")
+    assert (tmp_path / MARKER).exists()
+    unblock_lock(tmp_path)
+    status.flush()
+    entries = read_entries(tmp_path / "lift_status.json")
+    assert sum(e["count"] for e in entries) == MAX_LIFT_ENTRIES + 5  # nothing was lost, all occurrences counted
+    assert {"tool_0", "tool_1"} <= {e["tool"] for e in entries}  # the oldest unwritten entries were kept
+    assert any(e["tool"] == "*" and e["kind"] == "declared" and e["count"] == 5 for e in entries)
+    assert not (tmp_path / MARKER).exists()
+
+
+def test_a_written_entry_may_make_room_but_never_an_entry_of_the_same_write(tmp_path):
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path))
+    for i in range(MAX_LIFT_ENTRIES):
+        status.record(f"old_{i}", "declared", "params")
+    status.record("fresh", "lift_error")
+    tools = {e["tool"] for e in read_entries(path)}
+    assert "fresh" in tools and "old_0" not in tools and len(tools) == MAX_LIFT_ENTRIES
+
+
+def hold_lock(tmp_path):
+    """Another process holding the report's lock: an flock on a separate open file."""
+    handle = open(tmp_path / "lift_status.json.lock", "a")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
+
+
+def test_a_held_lock_never_blocks_the_caller_for_more_than_a_moment(tmp_path):
+    holder = hold_lock(tmp_path)
+    try:
+        status = LiftStatus(str(tmp_path / "lift_status.json"))
+        started = time.monotonic()
+        status.record("t", "declared", "params")
+        assert time.monotonic() - started < 1.0  # about 200 ms of retries, never an unbounded wait
+        assert not (tmp_path / "lift_status.json").exists()
+        assert not (tmp_path / MARKER).exists()  # a mere lock timeout is not an outage yet
+    finally:
+        holder.close()
+    status.flush()  # the next flush writes what was kept pending
+    assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+
+
+def test_a_lock_that_stays_held_past_the_next_flush_leaves_the_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr("durable_park.gatecall.LIFT_LOCK_WAIT_SECONDS", 0.02)
+    holder = hold_lock(tmp_path)
+    try:
+        status = LiftStatus(str(tmp_path / "lift_status.json"))
+        status.record("t", "declared", "params")
+        assert not (tmp_path / MARKER).exists()
+        status.flush()
+        assert (tmp_path / MARKER).read_text().split()[1] == "LockTimeout"
+    finally:
+        holder.close()
+    status.flush()
+    assert not (tmp_path / MARKER).exists()
+    assert [e["kind"] for e in read_entries(tmp_path / "lift_status.json")] == ["declared"]
+
+
+def test_a_report_that_was_unreadable_is_flagged_so_the_sweep_hears_of_the_reset(tmp_path):
+    path = tmp_path / "lift_status.json"
+    path.write_text("{not json")
+    LiftStatus(str(path)).record("t", "lift_error")
+    kinds = {(e["tool"], e["kind"]) for e in read_entries(path)}
+    assert kinds == {("t", "lift_error"), ("lift_status.json", "report_reset")}
+    assert (tmp_path / "lift_status.json.corrupt").read_text() == "{not json"
+
+
+def test_a_marker_left_by_an_earlier_run_is_cleared_by_the_first_flush_once_writing_works(tmp_path):
+    (tmp_path / MARKER).write_text("2026-10-22T10:00:00Z PermissionError\n")
+    LiftStatus(str(tmp_path / "lift_status.json")).flush()  # the gateway restarted; nothing to record yet
+    assert not (tmp_path / MARKER).exists() and (tmp_path / "lift_status.json").exists()
+
+
+def test_a_marker_stays_while_the_report_still_cannot_be_written(tmp_path):
+    (tmp_path / MARKER).write_text("2026-10-22T10:00:00Z PermissionError\n")
+    block_lock(tmp_path)
+    LiftStatus(str(tmp_path / "lift_status.json")).flush()
+    assert (tmp_path / MARKER).exists()

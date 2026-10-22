@@ -1963,6 +1963,8 @@ NOTHING_LISTED = {"type": "object", "properties": {"params": {"type": "object"}}
     {"params": [{"a": 1, "withhuman_context": "in a list"}]},
     {"params": "{'a': 1, 'withhuman_context': 'not strict json'}"},
     {"params": {"WithHuman_Context": "other spelling"}},
+    {"params": {"withHumanContext": "camel"}},
+    {"params": {"with-human-context": "hyphens"}},
 ])
 def test_a_note_that_stays_inside_a_deeper_shape_is_recorded_not_moved(env, nested):
     env.provider.auto = "approved"
@@ -2123,3 +2125,107 @@ def test_register_gives_the_selfcheck_thread_the_lift_flush(tmp_path, monkeypatc
     register(FakeCtx(tmp_path / "data"))
     (tick,) = ticks
     assert tick == captured["lift_status"].flush
+
+
+# ---- final fix wave -----------------------------------------------------------------------------------------
+
+RULES_CHANGED = ('durable-park: the rules for "{tool}" changed since this call was first checked, so it no longer '
+                 "matches the call that was parked; the call was not run.")
+
+
+def flaky_schema(env_ok):
+    """A schema lookup that works while ``env_ok[0]`` is true and fails otherwise."""
+    def lookup(tool):
+        if not env_ok[0]:
+            raise RuntimeError("registry gone")
+        return GW_SCHEMA
+
+    return lookup
+
+
+def test_a_replay_that_lifts_differently_is_blocked_with_an_accurate_message(env):
+    ok = [False]
+    hook = lifting_hook(env, schema_fn=flaky_schema(ok))
+    first = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))  # no rules: parked with the original arguments
+    assert first["message"].startswith("PARKED P-")
+    ok[0] = True  # the rules are back: the same call now lifts to different arguments
+    second = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    assert second == {"action": "block", "message": RULES_CHANGED.format(tool=GW_TOOL)}
+    assert len(env.ledger.list_by_status("parked")) == 1 and len(env.provider.requests) == 1  # nothing new asked
+
+
+def test_a_replay_whose_rules_went_missing_is_blocked_the_same_way(env):
+    ok = [True]
+    hook = lifting_hook(env, schema_fn=flaky_schema(ok))
+    call(hook, GW_TOOL, args=copy.deepcopy(NESTED))  # parked with the lifted arguments
+    ok[0] = False
+    second = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    assert second == {"action": "block", "message": RULES_CHANGED.format(tool=GW_TOOL)}
+    assert len(env.provider.requests) == 1
+
+
+def test_a_replay_that_lifts_differently_after_an_allow_never_runs_the_call(env):
+    env.provider.auto = "approved"
+    ok = [False]
+    hook = lifting_hook(env, schema_fn=flaky_schema(ok))
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None  # allowed with the original arguments
+    ok[0] = True
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED))["message"] == RULES_CHANGED.format(tool=GW_TOOL)
+    assert len(env.provider.requests) == 1
+
+
+def test_a_really_different_call_on_the_same_id_still_says_the_id_was_reused(env):
+    ok = [True]
+    hook = lifting_hook(env, schema_fn=flaky_schema(ok))
+    call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
+    other = {"params": {"customer_ref": "99", "withhuman_context": "Find customer 58"}}
+    assert call(hook, GW_TOOL, args=other)["message"] == REUSED
+    ok[0] = False
+    assert call(hook, GW_TOOL, args=other)["message"] == REUSED  # different content, whatever the rules say
+
+
+def test_an_unsafe_lift_with_an_extra_key_is_refused_too(env, monkeypatch):
+    """The merge guard also catches a key the lift invented: Hermes would merge it into the call."""
+    monkeypatch.setattr("durable_park.park_hook.lift_gateway_context",
+                        lambda work, schema, on_problem=None: {**work, "invented": 1})
+    env.provider.auto = "approved"
+    args = {"params": {"customer_ref": "58"}}
+    assert call(status_hook(env), GW_TOOL, args=copy.deepcopy(args)) is None
+    assert recorded(env) == {(GW_TOOL, "lift_error", "")}
+    assert env.provider.only().body["arguments"] == args
+
+
+PAYS = {"type": "object", "required": ["params"], "properties": {
+    "params": {"type": "object", "required": ["total"],
+               "properties": {"total": {"type": "number"}, "withhuman_context": {"type": "string"}}},
+    "withhuman_context": {"type": "string"}}}
+
+
+def test_problems_are_not_recorded_for_a_call_the_form_check_refused(env):
+    """A refused call never reaches a server, so a note problem on it is nothing to alert about; the same
+    call fixed and sent again is recorded."""
+    hook = make_hook(env, form_checker=FormChecker(lambda tool: PAYS), schema_fn=lambda tool: PAYS,
+                     lift_status_path=str(env.tmp_path / "lift_status.json"))
+    bad = {"params": {"customer_ref": "58", "withhuman_context": "owned by the server"}}
+    assert call(hook, GW_TOOL, args=bad)["message"].startswith(f'durable-park: "{GW_TOOL}" was NOT run')
+    assert recorded(env) == set()
+    good = {"params": {"total": 5, "withhuman_context": "owned by the server"}}
+    assert call(hook, GW_TOOL, args=good, tool_call_id="call-2")["message"].startswith("PARKED P-")
+    assert recorded(env) == {(GW_TOOL, "declared", "params")}
+
+
+def test_a_note_of_emoji_reaches_the_approver_cut_to_2000_utf16_units(env):
+    hook = lifting_hook(env)
+    nested = {"params": {"customer_ref": "58", "withhuman_context": "\U0001F600" * 1500}}
+    assert call(hook, GW_TOOL, args=nested)["message"].startswith("PARKED P-")
+    sent = env.provider.only().body["agent_reasoning"]
+    assert sent == "\U0001F600" * 1000 and len(sent.encode("utf-16-le")) // 2 == 2000
+
+
+def test_a_report_nobody_can_write_leaves_the_marker_and_never_stops_the_call(env):
+    env.provider.auto = "approved"
+    (env.tmp_path / "lift_status.json.lock").mkdir()
+    hook = status_hook(env, schema_fn=lambda tool: DECLARES)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None
+    assert len(env.ledger.list_by_status("allowed")) == 1
+    assert (env.tmp_path / "lift_status.unwritable").exists()

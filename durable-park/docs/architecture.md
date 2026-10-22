@@ -113,6 +113,7 @@ flowchart LR
     fstatus[("formcheck_status.json")]
     bstatus[("breaker_status.json")]
     lstatus[("lift_status.json")]
+    lmark[("lift_status.unwritable<br/>marker")]
     route["Hermes webhook route<br/>127.0.0.1:8644"]
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
     bridge["bridge<br/>127.0.0.1:8791 (held by systemd) - user dpbridge<br/>keeps no state"]
@@ -158,6 +159,8 @@ flowchart LR
   sweep -->|"reads"| bstatus
   sweep -->|"reads"| lstatus
   hook -->|"writes"| lstatus
+  hook -->|"writes only when lift_status.json<br/>cannot be written"| lmark
+  sweep -->|"reads"| lmark
   sweep -->|"alerts: UNKNOWN, form checker broken,<br/>withHuman unreachable, note not moved"| chat
 ```
 
@@ -170,12 +173,12 @@ flowchart LR
 | ledger | `plugin/durable_park/ledger.py` | SQLite record of every tool call that was asked about and its state. The single source of truth. |
 | wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. |
 | executor | `plugin/durable_park/executor.py` | The `parked_action_execute` tool. Consumes the approval and replays the saved call exactly once. Its schema gives no example park ID (a concrete one invited the model to call it with that ID): the tool description says to call it only after being told in this chat that the park was APPROVED, and the `park_id` description says to use the exact ID from a `[durable-park]` message in this chat and never guess or invent one. |
-| approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key), the agent's top-level `withhuman_context` as the request's reasoning (the `agent_reasoning` field, at most 2000 characters), and one shared gate that is rebuilt when the token file changes (the replaced gate's HTTP client is closed one rebuild later, as a call may still be using it). |
+| approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key), the agent's top-level `withhuman_context` as the request's reasoning (the `agent_reasoning` field, at most 2000 UTF-16 code units: an emoji counts as two, and a pair is never cut in the middle), and one shared gate that is rebuilt when the token file changes (the replaced gate's HTTP client is closed one rebuild later, as a call may still be using it). |
 | breaker | `plugin/durable_park/breaker.py` | Circuit breaker for withHuman outages: after 3 consecutive errors it stays open for 30 s (calls are refused without asking), then lets calls through again until an outcome is recorded; a failure re-opens, a success closes. It records open/close in `breaker_status.json` next to the ledger (written only on a change); it never calls withHuman itself. Started with a status file that still says open (a restart during an outage), it starts open but lets calls through at once, so the first success writes the close. |
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
 | bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). Its digest comparison (`ledger.normalize_args`) drops the top-level `withhuman_context`, which is why the note the park hook moved to the top level (and the gateway strips before forwarding) does not change the match: the park row and the delivered call agree. |
 | bridge check | `deploy/bridge_check.py` | Read-only isolation check, run as root by `configure_hermes.sh` right after the bridge answers 401 (the deploy stops if it fails) and by hand ([runbook](runbook.md#health-check)). Seven checks: the socket unit is active and listens on exactly `127.0.0.1:8791`; the service is active, its main process runs as `dpbridge` and the `Groups:` line of its `/proc/<pid>/status` is empty or only `dpbridge`'s own gid; only systemd and that process hold the port; no other process runs `bridge.app`; no user-level `durable-park-bridge*` unit exists for any user; `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; `bridge_secret` is `root:root 0600` (stat only, never read). |
-| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, and once per (tool, kind, key, detail) when the park hook reports that the agent's `withhuman_context` note was not moved, was dropped or could not be checked for (`lift_status.json`, [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
+| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, and once per (tool, kind, key, detail) when the park hook reports that the agent's `withhuman_context` note was not moved, was dropped or could not be checked for (`lift_status.json`; one line per tool and kind that names the first place and up to three more; a tool's own field is said once; and once when `lift_status.unwritable` says the report cannot be saved, with a line when it can again; [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
 
 ### Plugin settings
 
@@ -191,7 +194,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
 | `audit_key_file` | `/etc/durable-park/audit_key` | Optional for the plugin (the bridge needs the same key: systemd hands it a private copy when the bridge starts, so a rotation also needs `sudo systemctl restart durable-park-bridge`). A withHuman org API key with `audit.read`, `request.read` and `request.read.unrouted` and nothing else; the plugin only uses `audit.read`. Read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
 | `audit_base_url` | `https://app.withhuman.ai` | Where that audit lookup (`GET /api/v1/audit`) goes. A bad `audit_*` setting (not a string, empty, a path that cannot be resolved) only switches the name off with a warning in the log; unlike the other settings it never refuses tool calls. |
-| `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json`, `formcheck_status.json`, `lift_status.json` and `plugin_load.json` are written next to it. |
+| `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json`, `formcheck_status.json`, `lift_status.json` (and, only while that cannot be written, `lift_status.unwritable`) and `plugin_load.json` are written next to it. |
 | `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
 | `risky_tools` | (retired) | Renamed `form_checked_tools`. If still set, a warning `risky_tools is renamed form_checked_tools; ignoring it` is logged and its value is not used. |
 
@@ -474,7 +477,7 @@ flowchart TD
   foreign -->|"yes"| bforeign["Block: foreign hook<br/>(no row, nobody asked)"]
   foreign -->|"no"| ids{"Chat session and<br/>tool call id?"}
   ids -->|"no"| bids["Block: no chat session<br/>or no tool call id"]
-  ids -->|"yes"| lift["Lift a nested withhuman_context<br/>to the top level (gateway tools only;<br/>JSON text keys coerced first)<br/>from here on: the lifted args<br/>problems go to lift_status.json"]
+  ids -->|"yes"| lift["Lift a nested withhuman_context<br/>to the top level (gateway tools only;<br/>JSON text keys coerced first)<br/>from here on: the lifted args<br/>problems go to lift_status.json<br/>once the form check passed"]
   lift --> fc{"Form-checked tool,<br/>call id not seen before?"}
   fc -->|"yes"| rules{"Rules for this tool<br/>found and usable?"}
   rules -->|"no"| closed["Block: could not be checked<br/>(no row, nobody asked)"]
@@ -484,7 +487,7 @@ flowchart TD
   valid -->|"yes"| save["Save row, status parked<br/>(one per chat call id)"]
   fc -->|"no"| save
   save --> seen{"What is on the row?"}
-  seen -->|"another call with this id"| reused["Block: id reused"]
+  seen -->|"another call with this id"| reused["Block: id reused<br/>(or: the tool rules changed<br/>since it was parked)"]
   seen -->|"already decided"| again["Block: already allowed, refused,<br/>denied ...; not run again"]
   seen -->|"parked with a request"| repeat["Block: PARKED (repeat)"]
   seen -->|"parked, no request yet"| obj{"Arguments an object?"}
@@ -518,28 +521,46 @@ flowchart TD
   the same key name (Hermes renames sanitized keys back to wire names) leaves that key unread. Before a `modify` is
   returned the hook checks that Hermes's merge (`{**original, **lifted}`) equals the lifted call exactly (a modify
   can neither delete nor rename a key); if not, the original arguments are used.
-  **Every case where the note is not moved, is dropped, or the check could not run ends as a chat alert.** The hook
-  records it in `lift_status.json` (next to the ledger; `gatecall.LiftStatus`: tool, kind, key, detail, `first_seen`,
-  `last_seen`, `count`, never a value; at most 200 entries; written under a file lock that merges with other
-  processes' entries, and a failed write is kept in memory and retried on every later record and by the 30-minute
-  self-check thread). The sweep alerts once per (tool, kind, key, detail), again once per 24 hours while the count keeps
-  growing, and once when the report is unreadable or the check itself fails
-  ([runbook](runbook.md#the-agents-note-could-not-be-moved)). Kinds: `declared` (a key was left alone because its rules
-  declare the field; the note goes to the server, not the approver), `note_dropped` (a nested note was removed but not
-  shown to the approver: not text, empty, another note was already at the top, more than one note), `schema_unavailable`
-  (a gateway tool whose rules could not be read), `args_unreadable` (a JSON-text argument that Hermes's type fixing could
-  not turn into an object under the same key), `lift_error` (any other error, or a lift that failed the merge check),
-  `note_left_inside` (a note is still inside the final arguments, found by a bounded walk of dicts, lists and JSON text
-  at any depth; also for a gateway tool whose rules do not show the field) and `check_incomplete` (the walk hit its
-  bound: depth 50, 10 000 nodes or 20 hits). The call itself always goes on (with the original arguments when the lift
-  could not run), so approval is unaffected. What is still **not** covered: a note hidden somewhere the walk cannot read
-  (for example inside a string in another encoding), and a lift report nobody can write for longer than the gateway
-  runs (the ledger shares that directory, so a full or read-only disk fails loudly elsewhere). The lifted arguments are the
+  **Every case the hook can detect where the note is not moved, is dropped, or the check could not run ends as a chat
+  alert.** The hook records it once the call has passed its form check (a refused call never reaches a server) in
+  `lift_status.json` (next to the ledger; `gatecall.LiftStatus`: tool, kind, key, detail, `first_seen`, `last_seen`,
+  `count`; key names are chosen by the model and can themselves be data, but no value or note text is ever stored; every
+  list item is written `[*]`, so a note in each of 30 items is one place; at most 200 entries). Writing is careful:
+  the file is replaced under a lock file that merges with other processes' entries; the lock is only tried, never
+  waited for (a tool call waits at most 0.2 s, then the entries stay in memory and are written on the next record or
+  by the 30-minute self-check thread); an entry that has not been written yet is never dropped (past 200 waiting
+  entries the newcomers are counted in one `*` entry per kind); an unreadable report is kept as
+  `lift_status.json.corrupt` and the new one starts with a `report_reset` entry. When the report **cannot be written**
+  (wrong owner, a leftover path that is a directory, a lock that stays held past the next 30-minute tick), the hook
+  also writes a small marker file `lift_status.unwritable` next to the ledger (UTC time and error type, nothing
+  else); the next successful write removes it. The sweep reads the marker and alerts once per outage ("lift problems
+  could not be saved ...") and says when it is gone. A key spelling is the note when, with every character that is
+  not a letter or digit removed and lower-cased, it reads `withhumancontext`
+  (`withHumanContext`, `with-human-context`); only the exact `withhuman_context` is ever moved, the other spellings
+  are found and reported. The sweep alerts once per (tool, kind, key, detail) and prints one line per tool and kind
+  (the first place, then `(+N more places, e.g. a.b, c.d)` with at most three examples); it repeats a problem after 24
+  hours while its count keeps growing, except `declared`, which is said once; it also alerts once when the report is
+  unreadable or the check itself fails ([runbook](runbook.md#the-agents-note-could-not-be-moved)). Kinds: `declared`
+  (a key was left alone because its rules declare the field; the note goes to the server, not the approver),
+  `note_dropped` (a nested note was removed but not shown to the approver: not text, empty or blank, another note was
+  already at the top, more than one note), `schema_unavailable` (a gateway tool whose rules could not be read),
+  `args_unreadable` (a JSON-text argument that Hermes's type fixing could not turn into an object under the same key),
+  `lift_error` (any other error, or a lift that failed the merge check), `note_left_inside` (a note is still inside
+  the final arguments, found by a bounded walk of dicts, lists and JSON text at any depth, in any spelling; also for a
+  gateway tool whose rules do not show the field; text that is not JSON but merely mentions the field name is reported
+  too), `check_incomplete` (the walk hit its bound: depth 50, 10 000 nodes or 20 hits) and `report_reset`. The call goes
+  on with the lifted arguments, or with the original ones when the lift could not run (`schema_unavailable`,
+  `args_unreadable`, `lift_error`); approval is unaffected. A replay of the same `tool_call_id` whose lift comes out
+  differently from the stored row (the rules could be read on one attempt and not on the other) is blocked with its
+  own message (the tool's rules changed since the call was parked; the call was not run), never run. What is still
+  **not** covered: a note hidden somewhere the walk cannot read (for example inside a string in another encoding).
+  The remaining uncovered case is the ledger directory itself not being writable, which the existing form-check stale-status alert covers.
+  The lifted arguments are the
   only arguments from then on: the form check, the row (digest and stored args, so the executor later dispatches the
   lifted call), the request to withHuman, and, for an instant `Allow`, the `{"action": "modify", "args": ...}` the
   hook returns (Hermes shallow-merges it into the call; nothing is returned when nothing was lifted). The top-level
-  note goes to the approver as the request's reasoning (`gatecall.build_call`, cut to 2000 characters, a pure
-  function of the row).
+  note goes to the approver as the request's reasoning (`gatecall.build_call`, cut to 2000 UTF-16 code units and never
+  in the middle of a pair, a pure function of the row).
 - **Allow** means the SDK already consumed the approval. If the row cannot move to `allowed` (the sweep cancelled
   it meanwhile), the call is blocked and the spent approval is not used again.
 - **Deny** with status `error` (withHuman unreachable, credential refused, bad answer) counts as a breaker failure;
@@ -613,7 +634,9 @@ and re-run against the real code on the VM (2026-10-21):
 | Bridge cannot confirm the gateway call (no matching consumed park, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
 | The bridge process dies or is restarted | systemd keeps listening on `127.0.0.1:8791` (the socket unit holds the port) and restarts the service after 1 s (`Restart=always`); a delivery meanwhile waits in the socket's backlog or times out, and withHuman asks a person instead. Nobody else can bind the port and answer, for as long as the socket unit is neither stopped nor failed. systemd fails a socket unit when the service it activates trips its start limit (`service-start-limit-hit`, with `Accept=no`) and when the socket trips its own trigger limit, and either frees the port; so the service has `StartLimitIntervalSec=0` (systemd keeps retrying every second, however long the start keeps failing) and the socket has `TriggerLimitIntervalSec=0`. Only an admin's `systemctl stop` or `disable --now` of the socket frees the port, and `bridge_check.py` check 1 fails when it is not active. | Nobody; check the unit if it keeps restarting ([runbook](runbook.md#health-check)) |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
-| The agent's `withhuman_context` note was not moved to the top level, was dropped, or could not be checked for (rules or arguments unreadable, an error, a tool that declares its own field, a note left inside or removed, a search cut short) | The call goes on with the original arguments, approval is unaffected; the note may reach the server instead of the approver. The sweep alerts once per tool, kind and key. | See [runbook](runbook.md#the-agents-note-could-not-be-moved) |
+| The agent's `withhuman_context` note was not moved to the top level, was dropped, or could not be checked for (rules or arguments unreadable, an error, a tool that declares its own field, a note left inside or removed, a search cut short) | The call goes on (with the lifted arguments, or the original ones when the lift could not run); approval is unaffected; the note may reach the server instead of the approver. The sweep alerts once per tool, kind, key and detail (one line per tool and kind), again after 24 hours while it keeps growing (never for a tool's own field). | See [runbook](runbook.md#the-agents-note-could-not-be-moved) |
+| `lift_status.json` or its lock cannot be written (wrong owner, a path in the way, a lock held for long) | The hook keeps the problems in memory (never dropping an unwritten one), never blocks the tool call for more than 0.2 s, and leaves the marker `lift_status.unwritable`. The sweep alerts once and says when it is gone. If the ledger directory itself is not writable, the form-check report goes stale and that alert fires instead. | Fix the permissions ([runbook](runbook.md#the-agents-note-could-not-be-moved)) |
+| A replay of a tool call id lifts differently from the stored row | Blocked with "the rules for the tool changed since this call was first checked ... the call was not run"; the row is left alone. | Ask the model to make the call again |
 | Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
 | The plugin did not load at all (import error, missing dependency or `_vendor`, overran `plugins.load_timeout_seconds`, or disabled in `config.yaml`): Hermes drops every registration and runs with no `pre_tool_call` hook | `plugin_load_check.sh` (`ExecStartPost`) finds no `plugin_load.json` for the gateway's pid within the timeout and fails, so systemd stops the gateway; after 3 starts in 10 minutes it stays stopped. If the gateway is somehow running anyway, the sweep alerts once. | Fix the plugin ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)) |
@@ -658,8 +681,8 @@ System users behind that table:
   boundary for the code, [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1). Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
 - Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`,
   `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
-  `lift_status.json` (what the lift could not do; with `.lock` and, if ever needed, `.corrupt`), `lift_alert_state.json`,
-  `lift_check_alert_state.json`, `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`. The bridge
+  `lift_status.json` (what the lift could not do; with `.lock` and, if ever needed, `.corrupt`), `lift_status.unwritable` (only while that report cannot be written), `lift_alert_state.json`,
+  `lift_check_alert_state.json`, `lift_unwritable_alert_state.json`, `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`. The bridge
   keeps nothing here: the `bridge_deliveries.db` of the old bridge is unused and can be deleted once the new bridge is live.
 - Since 2026-10-21 03:16 UTC the v1 lockdown is applied (`deploy/hermes_tool_policy.py`: tools limited to
   `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`, plus Hermes's three Tool Search bridge tools (Tool Search has been on since

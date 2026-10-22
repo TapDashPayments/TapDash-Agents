@@ -56,14 +56,23 @@ Also found on the way:
   level and shows it to the approver ([architecture section 4](architecture.md#4-tool-call-form-check-then-one-question-to-withhuman)).
   After deploy, confirm in Langfuse that the warning is gone.
   **Deploy gate:** (1) before restarting the gateway with this change, run
-  `DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_reasoning_echo.py` on proto-agents (it sends a 2000-character
-  reasoning with spaces, newlines and non-ASCII to withHuman and expects an instant approval, which proves the AAP
-  exact-match check passes; if it fails, withHuman changes or caps `agent_reasoning`: lower `MAX_REASONING_CHARS`
-  and note the limit in `gateway-setup.md`). (2) Deploy only with no ledger row `parked`, `approved` or `executing`:
+  `DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_reasoning_echo.py` on proto-agents (it sends two reasonings to
+  withHuman and expects an instant approval for each, which proves the AAP exact-match check passes: one of 2000
+  characters with spaces, newlines and non-ASCII, one of 1000 emoji, which is 2000 UTF-16 code units but 4000 bytes; if
+  one fails, withHuman changes or caps `agent_reasoning`: lower `MAX_REASONING_UNITS` and note the limit in
+  `gateway-setup.md`). (2) Deploy only with no ledger row `parked`, `approved` or `executing`:
   this change alters the AAP request body for rows with a note, so a row parked by the old code would not match its
   approved request when the executor replays it.
   **When adding tools from a new provider,** lift problems arrive as chat alerts (`durable-park ALERT: ... the agent's
   note ...`, [runbook](runbook.md#the-agents-note-could-not-be-moved)); nothing needs to be checked in the journal.
+  **Known gaps of the note lift (not fixed, all safe):** (a) a top-level note that is empty or not text, and a note
+  longer than 2000 UTF-16 code units (the approver sees it cut), are not alerted: nothing is moved or lost by the
+  lift, the approver just sees less. (b) A note in text that is neither JSON nor mentions the field name, or inside a
+  deeply nested JSON text that fails to decode, is not found. (c) The form self-check thread retries a lift report
+  that could not be written only where it runs (a gateway with a form-checked tool); the next problem retries too.
+  (d) Arguments that are not JSON text are digested by the hook before Hermes's own dispatch coercion (`"5"` to `5`,
+  `arg_coercion.py`) runs, so the bridge can see a mismatch and a person is asked a second time (safe, noisy; older
+  than the lift).
 - `hermes plugins enable langfuse` created a new Hermes environment directory; the old ones remain. Clean up the old
   environments later, when disk space matters.
 

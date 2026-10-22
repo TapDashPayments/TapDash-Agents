@@ -439,27 +439,42 @@ the outage was shorter than 5 minutes, both lines may arrive together.
 
 The model puts a short reason in `withhuman_context`. The withHuman gateway expects it at the top level and shows it
 to the approver; the park hook moves it there when the model nests it inside `params`. When it cannot (or a note is
-dropped, or the hook could not even look), the call still goes on exactly as before (the original arguments, approval
-is unaffected) and the sweep sends one chat alert per tool, kind, key and detail (state in `lift_alert_state.json`).
-The report is `lift_status.json` next to the ledger (names, times and counts, never a value; the hook writes it under
-a lock, so the gateway and any other Hermes process share it; a write that fails is retried on the next problem and
-every 30 minutes). The same problem is said again once per 24 hours while it keeps happening
-(`durable-park ALERT (still happening, <n> times): ...`). The text tells you the kind:
+dropped, or the hook could not even look), the call goes on (with the lifted arguments, or with the original ones when
+the lift could not run; approval is unaffected) and the sweep sends one chat alert. Nothing here is only a log line:
+every case ends as a `durable-park ALERT` line in chat.
+
+How the alerts behave:
+
+- One alert per tool, kind, key and detail (state in `lift_alert_state.json`). When one tool and kind has several new
+  places in one sweep, you get ONE line: the first place in the usual text, then `(+N more places, e.g. a.b, c.d)` (at
+  most three examples). Every item of a list is written `[*]` in a path, so a note in each of 30 list items is one place.
+- The same problem is said again after 24 hours while it keeps happening (`durable-park ALERT (still happening, <n>
+  times): ...`), except `has its own withhuman_context field`, which is said once.
+- Calls that the form check refuses are not reported (nothing reaches a server).
+- The report is `lift_status.json` next to the ledger. It holds tool names, key names, times and counts, never an
+  argument value or note text. Key names are chosen by the model and can be data (for example a map keyed by customer
+  email), so they can show up in the alert. Text that is not JSON but only mentions the field name (any spelling:
+  `withHumanContext`, `with-human-context`) is reported too; that can be a harmless memo.
 
 | Alert | Meaning | What to do |
 |---|---|---|
-| `<tool> has its own withhuman_context field inside <key>` | The tool's own rules declare a `withhuman_context` inside that key, so the note is left there: it goes to the server and never reaches the approver | Fine if the server really has such a field (the approver then does not see the agent's reason for this tool). If not, look at the tool's rules in the withHuman tool catalog |
-| `the agent's note inside <key> for <tool> was removed but not shown to the approver (<reason>)` | A nested note was removed but could not be shown: `not text` (the model sent an object or number), `empty`, `another note was already at the top` (the top-level note, even an empty one, wins), `more than one note` | Usually a model slip; the approver saw the call without that reason. Repeats mean the model's instructions or the tool description need work |
-| `could not read <tool>'s tool rules` | A gateway tool's rules were not found (the registry lookup failed, or the tool is not registered): its arguments were still searched for a note | Same as a form-check problem: [Form checker not working](#form-checker-not-working); `hermes mcp test wh`; read `compat.py` after a Hermes upgrade |
-| `could not read <tool>'s arguments` | The arguments came as JSON text and Hermes's type fixing could not turn them into an object under the same key | Check Hermes's `tools/arg_coercion.py` after an upgrade (`formcheck.hermes_coerce`) |
-| `moving the agent's note failed for <tool>` | An unexpected error in the lift step, or the lifted call did not pass the merge check | `journalctl --user -u hermes-gateway` for `could not lift withhuman_context for tool=<tool> (<ErrorType>)`; fix and redeploy |
-| `the agent's note is still inside <key> for <tool> after the move` | A note is still inside the final arguments at that path (deeper than one level, inside a list, in JSON text, or another spelling of the name). A gateway tool whose rules do not list the top-level field is searched too | The note reaches the server (QuickBooks says "IGNORED"). Look at the tool's rules and at how the model nests it |
+| `<tool> has its own withhuman_context field inside <key>` | The tool's own rules declare a `withhuman_context` inside that key, so the note is left there: it goes to the server and never reaches the approver. Said once. | Fine if the server really has such a field (the approver then does not see the agent's reason for this tool). If not, look at the tool's rules in the withHuman tool catalog |
+| `the agent's note inside <key> for <tool> was removed but not shown to the approver (<reason>)` | A nested note was removed but could not be shown: `not text` (the model sent an object or number), `empty` (also blank text), `another note was already at the top` (the top-level note, even an empty one, wins), `more than one note` | Usually a model slip; the approver saw the call without that reason. Repeats mean the model's instructions or the tool description need work |
+| `could not read <tool>'s tool rules` | A gateway tool's rules were not found (the registry lookup failed, or the tool is not registered): its arguments were still searched for a note; the call went on with the original arguments | Same as a form-check problem: [Form checker not working](#form-checker-not-working); `hermes mcp test wh`; read `compat.py` after a Hermes upgrade |
+| `could not read <tool>'s arguments` | The arguments came as JSON text and Hermes's type fixing could not turn them into an object under the same key; the call went on with the original arguments | Check Hermes's `tools/arg_coercion.py` after an upgrade (`formcheck.hermes_coerce`) |
+| `moving the agent's note failed for <tool>` | An unexpected error in the lift step, or the lifted call did not pass the merge check (the original arguments were used) | `journalctl --user -u hermes-gateway` for `could not lift withhuman_context for tool=<tool> (<ErrorType>)`; fix and redeploy |
+| `the agent's note is still inside <key> for <tool> after the move` | A note is still inside the final arguments at that path (deeper than one level, inside a list, in JSON text, another spelling of the name, or prose that names the field). A gateway tool whose rules do not list the top-level field is searched too. The call went on with the lifted arguments | The note reaches the server (QuickBooks says "IGNORED"). Look at the tool's rules and at how the model nests it |
 | `could not finish checking <tool>'s arguments for the agent's note` | The arguments are too large or too deep for the bounded search | Look at what the model sent; the note may reach the server |
+| `more than 200 different note problems (<kind>) were waiting to be saved` | More than 200 distinct problems piled up while the report could not be written; the extra ones are only counted, not named | Fix the write problem below first, then read `lift_status.json` and what the agent sent |
+| `lift_status.json was unreadable and was replaced; the earlier lift problems are kept in lift_status.json.corrupt` | The report could not be parsed at write time; the hook moved it aside and started a new one | Read `lift_status.json.corrupt` for the earlier problems; find out what damaged the file |
+| `lift problems could not be saved (<ErrorType>); the agent's note may be reaching servers unreported` | The hook could not write `lift_status.json` or its lock (wrong owner, for example from a manual run as another user; a directory in the way; a lock held for a long time). Problems stay in the gateway's memory and the marker file `lift_status.unwritable` (UTC time and error type only) sits next to the ledger. A line `durable-park: lift problems can be saved again.` follows when the marker is gone | Check the owner and permissions of `lift_status.json`, `lift_status.json.lock` and the marker's folder (`ls -l` next to `ledger.db`; the files must belong to `hermes`). The next write removes the marker. If the ledger folder itself cannot be written, the form-check "stale report" alert fires instead |
 | `could not read lift_status.json (<reason>)` | The report is unreadable or not the expected shape | Look at the file next to the ledger; the hook keeps an unparseable one as `lift_status.json.corrupt` before writing a new one |
 | `could not check for lift problems (<ErrorType>)` | The sweep's own check failed (for example its state file cannot be written) | Read the sweep's stderr (`~/.hermes/logs`), fix, and a line `durable-park: lift problems can be checked again.` follows |
 
 A problem that goes away and comes back alerts again. When adding tools from a new provider, expect these alerts
-if its rules differ from the QuickBooks ones.
+if its rules differ from the QuickBooks ones. If the model replays a tool call id and the lift now comes out
+differently (the tool's rules could be read the first time and not the second), the model is told `durable-park: the
+rules for "<tool>" changed since this call was first checked ...; the call was not run.` Nothing ran; ask for the call again.
 
 ## Troubleshooting
 
@@ -525,6 +540,7 @@ The park hook answers a blocked call with one of these (the model sees them and 
 | `durable-park: withHuman could not be reached` | withHuman did not answer (or the breaker is open); row `refused`, nothing ran. | See [withHuman could not be reached](#withhuman-could-not-be-reached); ask again later |
 | `durable-park: P-... is already waiting for approval in this chat` | Another call of this chat waits for a person or is running; this call's request was cancelled. | Decide the waiting one ([below](#a-chat-says-already-waiting-but-nothing-is-pending-in-withhuman)) |
 | `durable-park: P-... is already <status>; this call was not run again` | The model replayed a call id that was already decided (`allowed`, `refused`, `denied`, ...). | Nothing |
+| `durable-park: the rules for "<tool>" changed since this call was first checked` | The model replayed a call id and the note-lift came out differently than when the call was parked (the tool's rules were readable on one attempt only). Nothing ran, the row is untouched. | Ask for the call again; if it repeats, see [The agent's note could not be moved](#the-agents-note-could-not-be-moved) |
 | `durable-park: another plugin hook could change tool arguments after approval (<names>)` | Something other than durable-park registered a `pre_tool_call` callback (a plugin's hook, a `config.yaml` `hooks:` shell hook or an outbound webhook) or `tool_request` / `tool_execution` middleware (or a registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-hook-observer_hooks)) |
 | `durable-park: no chat session; the tool call was refused` | The call came from outside a chat (e.g. `hermes chat -q`). | Use a chat |
 | `durable-park: no tool call id; the tool call was refused` | Hermes passed no session id or call id. | Check the Hermes version (`compat.py`) |
