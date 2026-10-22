@@ -84,6 +84,12 @@ Keep this list complete: every difference from upstream goes here, in the commit
 
 `on_pre_tool_call` is unchanged from upstream.
 
+Tool failures (addendum item 3, TAP2-125): **verified, not patched.** Upstream's `on_post_tool_call` already maps a
+tool result with status `error` to level ERROR and `blocked`/`cancelled` to WARNING, with the error type as
+`status_message`. `TestToolObservationKeying.test_failed_mcp_tool_call_ends_observation_at_error_level` drives a failed
+MCP call (`mcp_quickbooks_create_bill`, `McpError`) through `on_pre_tool_call` and `on_post_tool_call` and pins that
+result. It passes on the unpatched code, so no code change was made.
+
 ## Known upstream hints left unchanged
 
 - `__init__.py` (the missing-credentials warning in `_build_client`, about line 281) logs "... or disable the plugin
@@ -100,7 +106,7 @@ bash tracing/run_tests.sh            # as the hermes user on the test VM
 bash tracing/run_tests.sh -k attribution   # extra pytest arguments are added; the deselection below always stays
 ```
 
-Expected today: `167 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
+Expected today: `168 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
 through Hermes's dependency installer, which would run against the gateway's shared Hermes environment and drops the
 test path, so they cannot run from a checkout. The script deselects them with `--deselect` by node id, so a `-k` or
 `-m` of your own cannot bring them back. It runs under the Python of the Hermes environment the running gateway

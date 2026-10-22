@@ -847,6 +847,46 @@ class TestToolObservationKeying:
         assert ended.get("level") == level
         assert bool(ended.get("status_message")) is bool(level)
 
+    def test_failed_mcp_tool_call_ends_observation_at_error_level(self, monkeypatch):
+        """Addendum item 3 (TAP2-125): a failed MCP tool result ends its tool observation at level ERROR, with the
+        error type as status_message. Confirms stock behavior (verified, not patched): pre- then post-hook."""
+        mod = self._make_mod()
+        started: list = []
+
+        class _Obs:
+            def __init__(self, kw):
+                self.kw = kw
+                self.updates: list = []
+                self.ended = False
+
+            def update(self, **kw):
+                self.updates.append(kw)
+
+            def end(self, **kw):
+                self.ended = True
+
+        class _Root:
+            def start_observation(self, **kw):
+                obs = _Obs(kw)
+                started.append(obs)
+                return obs
+
+        state = mod.TraceState(trace_id="t", root_span=_Root())
+        monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "sess-1"), state)
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
+
+        mod.on_pre_tool_call(tool_name="mcp_quickbooks_create_bill", args={"amount": 10}, tool_call_id="call-7",
+                             task_id="task-1", session_id="sess-1")
+        mod.on_post_tool_call(tool_name="mcp_quickbooks_create_bill", args={"amount": 10},
+                              result='{"error": "QuickBooks rejected the bill"}', task_id="task-1",
+                              session_id="sess-1", tool_call_id="call-7", status="error", error_type="McpError")
+
+        [obs] = started
+        assert obs.kw["name"] == "Tool: mcp_quickbooks_create_bill" and obs.kw["as_type"] == "tool"
+        assert obs.ended
+        assert obs.updates[-1]["level"] == "ERROR"
+        assert obs.updates[-1]["status_message"] == "McpError"
+
 
     def test_threaded_post_calls_preserve_fifo_under_lock(self, monkeypatch):
         """The actual concurrency contract: when 8 threads race to drain
