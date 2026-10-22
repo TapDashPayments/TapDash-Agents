@@ -17,13 +17,17 @@
 #      deliver log, rate_limit 120) whose secret is ${DURABLE_PARK_WAKE_SECRET}, supplied at startup by
 #      the `command` secret source (the helper above reads wake_secret, and instance_token once it exists, for
 #      deploy/hermes_mcp.sh); no copy of a secret in config.yaml/.env
-#   4b. gateway bridge: root-owned copy of bridge/ + the whole plugin/durable_park package (incl. _vendor/, stale
-#      files removed) under /opt/durable-park, system unit
-#      durable-park-bridge (User=hermes, 127.0.0.1:8791); it must answer 401 to an unsigned POST within 10 s of the
-#      restart or the script stops; it answers 401 until Yaakov stores
+#   4b. gateway bridge: system user dpbridge (no login, no home, no other group: the bot cannot signal it);
+#      bridge_secret made root:root 0600 when it exists (systemd reads it as root, LoadCredential); root-owned copy of
+#      bridge/ + the whole plugin/durable_park package (incl. _vendor/, stale files removed) under /opt/durable-park;
+#      socket unit durable-park-bridge.socket (systemd holds 127.0.0.1:8791, also while the bridge restarts) and
+#      system unit durable-park-bridge (User=dpbridge, gets the socket from systemd); it must answer 401 to an
+#      unsigned POST within 10 s of the restart or the script stops; then deploy/bridge_check.py (root-owned copy
+#      under /opt/durable-park/deploy) must pass. It answers 401 until Yaakov stores
 #      /etc/durable-park/bridge_secret (never created here), and human to every gateway call while
 #      /etc/durable-park/audit_key (the org key it asks withHuman with; never created here) is missing (a
-#      warning). The bridge is stateless: no ledger, no writable path
+#      warning). Both are read at service start: restart durable-park-bridge after storing or rotating one.
+#      The bridge is stateless: no ledger, no writable path
 #   4c. agent tool policy (deploy/hermes_tool_policy.py, run in Hermes's own Python): every platform key an
 #      agent can run under gets only durable_park + clarify + MCP server wh (QuickBooks tools); every toolset
 #      with local file/command/code access is disabled; model-named file delivery is limited to the Hermes
@@ -300,15 +304,39 @@ sync_tree() {
     find "$dst" -mindepth 1 -type d -empty -not -name __pycache__ -delete
 }
 install -d -m 0755 -o root -g root "$VENV/plugin"
+# The bridge's own user: no login, no home, and no group but its own (NOT dpwake, NOT hermes), so nothing the bot
+# runs can signal the bridge or read its files.
+if ! getent passwd dpbridge >/dev/null; then
+    useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --user-group dpbridge
+    log "created system user dpbridge"
+fi
+# systemd reads bridge_secret as root (LoadCredential), so the bot (group dpwake) no longer needs to: root only.
+# Only an existing file is touched; Yaakov stores it, this script never creates it. A change restarts the bridge.
+[[ -e "$ETC/bridge_secret" ]] && { [[ "$(stat -c '%a %U:%G' "$ETC/bridge_secret")" == "600 root:root" ]] || { chown root:root "$ETC/bridge_secret"; chmod 0600 "$ETC/bridge_secret"; CHANGED=1; }; }
 sync_tree "$REPO/bridge" "$VENV/bridge"
 sync_tree "$REPO/plugin/durable_park" "$VENV/plugin/durable_park"
+install_root "$REPO/deploy/$BRIDGE_UNIT.socket" "/etc/systemd/system/$BRIDGE_UNIT.socket" 0644
 install_root "$REPO/deploy/$BRIDGE_UNIT.service" "/etc/systemd/system/$BRIDGE_UNIT.service" 0644
 [[ $CHANGED == 1 ]] && systemctl daemon-reload
 systemctl enable --quiet "$BRIDGE_UNIT"
-restart_if_needed "$BRIDGE_UNIT"   # it reads its secret only at start: restart it by hand after storing one
-[[ -e "$ETC/bridge_secret" ]] || log "no $ETC/bridge_secret yet: the bridge answers 401 (Yaakov stores it)"
-# The bridge is stateless: it asks withHuman with the organization key and reads it on every call (no restart on rotation).
-[[ -e "$ETC/audit_key" ]] || log "no $ETC/audit_key yet: the bridge answers human to every gateway call (Yaakov stores it)"
+# Until the socket is active, an earlier bridge unit (User=hermes) may still bind 127.0.0.1:8791 itself, and the
+# socket could not take the port: stop it first. Once the socket is active the service never holds the port.
+if ! systemctl is-active --quiet "$BRIDGE_UNIT.socket"; then
+    systemctl stop "$BRIDGE_UNIT"
+    log "stopped $BRIDGE_UNIT so that the socket unit can take over its port"
+fi
+systemctl enable --now "$BRIDGE_UNIT.socket" || die "could not start $BRIDGE_UNIT.socket (is something else bound to 127.0.0.1:8791?)"
+# The service reads both keys only at start (LoadCredential): restart it by hand after storing or rotating one.
+# The socket keeps the port meanwhile.
+restart_if_needed "$BRIDGE_UNIT"
+# The health check ships root-owned beside the other root-owned copies (when this checkout has it).
+if [[ -f "$REPO/deploy/bridge_check.py" ]]; then
+    install -d -m 0755 -o root -g root "$VENV/deploy"
+    install_root "$REPO/deploy/bridge_check.py" "$VENV/deploy/bridge_check.py" 0755
+fi
+[[ -e "$ETC/bridge_secret" ]] || log "no $ETC/bridge_secret yet: the bridge answers 401 (Yaakov stores it, then restarts $BRIDGE_UNIT)"
+# The bridge is stateless: it asks withHuman with the organization key, read from a credential copy made at start.
+[[ -e "$ETC/audit_key" ]] || log "no $ETC/audit_key yet: the bridge answers human to every gateway call (Yaakov stores it, then restarts $BRIDGE_UNIT)"
 # Health gate: `systemctl is-active` right after a restart passes before a crash-looping unit first dies, so also
 # demand a live app: an unsigned POST must be rejected with 401. Stop here (no gateway restart) if it is not.
 bridge_ok=0
@@ -324,6 +352,10 @@ if [[ $bridge_ok != 1 ]]; then
     die "bridge unit is not answering 401 on $BRIDGE_LOCAL within 10s (last 20 journal lines above); not continuing"
 fi
 log "bridge unit: $(systemctl is-active "$BRIDGE_UNIT"), answers 401 to an unsigned request"
+# Isolation check (own user, socket holds the port, no other listener or copy, secret modes): any FAIL stops here.
+if [[ -f "$VENV/deploy/bridge_check.py" ]]; then
+    python3 "$VENV/deploy/bridge_check.py" || die "bridge_check.py failed: the bridge is not isolated as designed (FAIL lines above); not continuing"
+fi
 
 # --- 5. sweep wrapper + cron -------------------------------------------------------------------------------
 as_hermes install -d -m 0700 "$HERMES_HOME/scripts"
