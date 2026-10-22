@@ -18,14 +18,15 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 | What | How |
 |---|---|
 | VM | `proto-agents` (OVH VPS, Ubuntu 26.04, Hermes v0.22.3). Admins: `tailscale ssh ubuntu@proto-agents` (passwordless sudo). |
-| AI agents (e.g. Claude) | Current route: the Proto-Agents connector (see the last row), which runs as `hermes` with passwordless sudo. Older route (jump host, production; not for this VM): through the Hermes Server connector, piping scripts into `/tmp/dp-tools/vm` (runs as `hermes`) or `/tmp/dp-tools/vmroot` (root) on the jump host. |
+| AI agents (e.g. Claude) | Current route: the Proto-Agents connector (see the last row), which runs as the admin user `ubuntu` (passwordless sudo) since 2026-10-22; it reaches Hermes files and units as `hermes` (next row). Older route (jump host, production; not for this VM): through the Hermes Server connector, piping scripts into `/tmp/dp-tools/vm` (runs as `hermes`) or `/tmp/dp-tools/vmroot` (root) on the jump host. |
+| Reaching Hermes as admin | The user `hermes` has no sudo (since 2026-10-22). As `ubuntu` run Hermes commands with `sudo -u hermes -H bash -lc '<command>'` (its home is 750 and `~/.hermes` is 700), and its user units with `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user <verb> <unit>`. Where this runbook says "as `hermes`" (health check, `systemctl --user ...`, `hermes cron ...`), use those forms. |
 | Repo on the VM | `/home/hermes/tapdash-agents` (a clone of this repo). `/home/hermes/durable-park` links to its `durable-park/` folder. |
-| GitHub CLI | `gh` 2.46.0 (apt). Signed in as the admin user `ubuntu` only; `hermes` is not signed in (`gh auth status` as `hermes` says so). Pull requests are opened as `ubuntu`: [Open a pull request from the VM](#open-a-pull-request-from-the-vm). |
+| GitHub CLI | `gh` 2.46.0 (apt). Signed in as the admin user `ubuntu` only, which is also the user the connector runs as, so `gh` works directly from the connector; `hermes` is not signed in (`gh auth status` as `hermes` says so). Pull requests are opened with that `gh`: [Open a pull request from the VM](#open-a-pull-request-from-the-vm). |
 | withHuman | app.withhuman.ai: agent `proto-agents`, gateway server `quickbooks`, webhook endpoint `durable-park-bridge`, entry pipeline. |
 | Telegram test bot | `@TapDashAgentsBot`, home channel = the admin's DM with the bot (where alerts go). |
 | Teams bot | "TapDash Agent", served by the same `hermes` gateway on `127.0.0.1:3978`; the devtunnel `proto-agents-bot` (user `ubuntu`, unit `devtunnel-hermes`) forwards to it. |
 | Web dashboard | <https://proto-agents.taila95862.ts.net:8443/> (HTTPS through Tailscale Serve; tailnet only, **not** Funnel), user `TapDash`; systemd user unit `hermes-dashboard` of user `hermes`. Fallback, plain HTTP by IP only: `http://100.99.171.75:9119/`. How it is wired and how to undo it: [Dashboard over HTTPS](#dashboard-over-https). |
-| Claude connector "Proto-Agents" | system service `hermes-shell-mcp` (`/home/hermes/hermes-shell-mcp`, `127.0.0.1:8792`, Tailscale Funnel path `/hermes-shell`, GitHub OAuth for one allowed account). Stopping it cuts Claude's access to the VM. |
+| Claude connector "Proto-Agents" | system service `hermes-shell-mcp`, runs as user `ubuntu` from `/home/ubuntu/hermes-shell-mcp` (own venv, fastmcp 4.1.1) since 2026-10-22 02:22 UTC; `127.0.0.1:8792`, Tailscale Funnel path `/hermes-shell`, GitHub OAuth for one allowed account. Stopping it cuts Claude's access to the VM. Backup of the previous unit file: `/root/hermes-shell-mcp.service.bak`. If a connector login ever fails with `PathSecurityError` (entries resolve outside the new root), do not copy fastmcp's OAuth store (`~/.local/share/fastmcp/oauth-proxy`) between users: move it aside and re-authorize the connector in Claude, which creates a fresh store. |
 
 Rules:
 
@@ -33,24 +34,27 @@ Rules:
 - When piping scripts through the connector, give every heredoc a **unique** delimiter (e.g. `<<'XEOF_7'`) and
   never reuse it inside. A reused `EOF` once ran the tail of a script on the production host.
 - **Never print a secret.** Secrets are typed in by an admin with `read -rs` (never pasted into chat).
-- Root steps (copying into `/opt`, restarting system units) should be done by an admin in their own terminal. That is
-  a convention, not a block: the agent has no terminal tool today, so only admins, and Claude through the
-  Proto-Agents connector (which runs as `hermes` with passwordless sudo), do root steps.
+- Root steps (copying into `/opt`, restarting system units) should be confirmed by the admin before they run. Since
+  2026-10-22 they no longer need the admin at a terminal: the connector runs as `ubuntu`, which has passwordless sudo, so
+  Claude can run them. Keep the rule that the admin confirms risky actions first (anything destructive, hard to undo, or
+  that touches secrets, sudoers, sshd, Tailscale or a running gateway). The agent (`hermes`) has no sudo and no terminal tool.
 - **One agent, v1 lockdown re-applied (since 2026-10-21 03:16 UTC).** The `hermes` install is the only agent on the VM.
   Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
   `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (on every platform key; `hermes_tool_policy.py check` prints the key count and ends `ok`).
-  Hermes approvals stay off. The user `hermes` still has passwordless sudo until Clean Setup Phase 1
-  ([spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1); the lockdown is a configuration guard,
-  not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
+  Hermes approvals stay off. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC, 2026-10-21 10:22 PM ET;
+  [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1): `hermes` no longer has sudo. The ledger is
+  still owned by `hermes` (Clean Setup Phase 2, §4.5, not done), so the lockdown is still a configuration guard for the
+  ledger, not a permission boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay
+  off until Phase 2. Re-running `configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
   row" rule applies.
   durable-park asks withHuman about every tool call except the exempt tools (`parked_action_execute`, `clarify`,
   `tool_search`, `tool_describe`); withHuman's
   pipeline decides which need a person; today that means the QuickBooks tools, since the agent has no terminal or
-  file tools. **This is not a security boundary today:** with passwordless sudo, an agent that got
-  such a tool could read `/etc/durable-park/*` (QuickBooks secret and refresh token, withHuman tunnel token), change
-  `/opt/durable-park`, forge ledger rows and call QuickBooks directly, bypassing withHuman. Accepted by Yaakov on
-  2026-10-20 for the exploration phase on a QuickBooks sandbox; containing the agent's tools comes before real
+  file tools. **This is not a full security boundary today:** `hermes` can no longer sudo, so an agent that got such a tool
+  could not read `tunnel.env` (QuickBooks secret and refresh token, withHuman tunnel token) or change `/opt/durable-park`,
+  but it still owns the ledger and could forge rows (Phase 2). Yaakov accepted the earlier, wider risk on 2026-10-20 for
+  the exploration phase on a QuickBooks sandbox; the rest of containing the agent's tools comes before real
   credentials ([backlog](backlog.md#before-real-books)). The old `ubuntu` user's
   Hermes install (gateway and dashboard units) is stopped and kept as an archive; do not start it next to this one.
 - **Restarting `hermes-gateway` also restarts the Teams bot** (and briefly drops Telegram). The dashboard is its own unit
@@ -124,7 +128,7 @@ front of it on the machine's Tailscale name, port 8443 (set up 2026-10-21):
 
 ## Health check
 
-As `hermes` on the VM:
+As `hermes` on the VM (from `ubuntu`: [how to reach Hermes as admin](#access-and-ground-rules)):
 
 ```sh
 systemctl --user is-active hermes-gateway hermes-dashboard         # active active
@@ -191,12 +195,12 @@ PY
 ### Open a pull request from the VM
 
 `hermes` has no GitHub login; `git push` works through the repo's deploy key. Pull requests are opened with the
-`gh` of the admin user `ubuntu`, which is signed in:
+`gh` of the admin user `ubuntu`, which is signed in. From the connector (which runs as `ubuntu`) that is just `gh`:
 
 ```sh
-git push -u origin my-branch          # as hermes, from the worktree
-sudo -u ubuntu -H gh pr create --repo TapDashPayments/TapDash-Agents --head my-branch --base main \
-  --title '...' --body-file /tmp/pr-body.md     # the file must be readable by ubuntu; delete it afterwards
+sudo -u hermes -H git -C /home/hermes/tapdash-agents-wt/my-worktree push -u origin my-branch   # the deploy key is hermes's
+gh pr create --repo TapDashPayments/TapDash-Agents --head my-branch --base main \
+  --title '...' --body-file /tmp/pr-body.md     # as ubuntu; delete the file afterwards
 ```
 
 Fill in `.github/pull_request_template.md` for the body. Never print `gh auth token`. The login is a classic OAuth
@@ -975,13 +979,14 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - **A pipeline rule sends everything to a human, or approves too much (withHuman)**: `activate_pipeline_revision`
   to the previous revision (seconds). Never activate rev 8 while the ask-every-call code is live: rev 8 with that
   code auto-approves `hermes`/`mcp:` calls. The audit entry shows which block decided, so fix that rule.
-- **Clean Setup Phase 1 (spec section 6, row 4.1; not yet run)**. Keep an open session for the whole change.
-  - Connector unit: over `tailscale ssh ubuntu@proto-agents`, restore the previous unit file, `sudo systemctl daemon-reload`,
-    then `sudo systemctl restart hermes-shell-mcp`.
-  - sshd: run `sudo sshd -t` before any reload; revert the one line in `/etc/ssh/sshd_config.d/50-cloud-init.conf`;
-    keep the open session until `sudo sshd -T` shows the right value.
-  - Temporary sudo for hermes: recreate `/etc/sudoers.d/90-hermes` with `sudo install -m 440`, fix the step so it runs
-    as ubuntu, then delete the file again.
+- **Clean Setup Phase 1 (spec section 6, row 4.1; done 2026-10-22 02:22 UTC; these are the steps to undo it)**. Keep an open session for the whole change.
+  - Connector unit: over `tailscale ssh ubuntu@proto-agents`, restore the previous unit file (`/root/hermes-shell-mcp.service.bak`),
+    `sudo systemctl daemon-reload`, then `sudo systemctl restart hermes-shell-mcp`. The old OAuth store is not reusable
+    across users: re-authorize the connector in Claude.
+  - sshd (password login is off: `sshd -T` says `passwordauthentication no`): run `sudo sshd -t` before any reload; revert the one line in
+    `/etc/ssh/sshd_config.d/50-cloud-init.conf`; keep the open session until `sudo sshd -T` shows the right value.
+  - Temporary sudo for hermes (`/etc/sudoers.d/90-hermes` was removed): recreate it with `sudo install -m 440`, fix the step
+    so it runs as ubuntu, then delete the file again.
 - **The one-agent merge (2026-10-21)**: the configs, units and ledger from before the cutover are in
   `/home/hermes/merge-backup-20261021T021246Z/` (`hermes/` and `ubuntu/`). To go back: `systemctl --user disable --now hermes-dashboard`, copy
   `hermes/config.yaml` and `hermes/.env` over `~/.hermes/`, restart `hermes-gateway` (locked-down tools again, no
