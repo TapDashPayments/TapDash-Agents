@@ -1012,3 +1012,21 @@ def test_a_fifo_planted_as_a_marker_does_not_hang_the_sweep_and_is_alerted(world
     out = capsys.readouterr().out
     assert out.startswith("durable-park ALERT: lift problems could not be saved (not a regular file)")
     assert len(out.splitlines()) == 1
+
+
+@pytest.mark.parametrize("kind, text", [
+    ("note_cut", "durable-park ALERT: the agent's note for {tool} was longer than 2000 characters and was shortened "
+                 "for the approver."),
+    ("note_not_text", "durable-park ALERT: the agent's note for {tool} was empty or not text, so the approver saw "
+                      "no reason.")], ids=["note_cut", "note_not_text"])
+def test_note_cut_and_note_not_text_are_said_once_per_tool_and_never_repeated(world, monkeypatch, capsys, tmp_path,
+                                                                             kind, text):
+    write_lift(tmp_path, (LIFT_TOOL, kind, ""), count=2)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [text.format(tool=LIFT_TOOL)] and second == ""
+    write_lift(tmp_path, (LIFT_TOOL, kind, ""), count=900)
+    set_alerted_at(tmp_path, 100)
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # no daily repeat
+    write_lift(tmp_path, (LIFT_TOOL, kind, ""), ("mcp__wh__quickbooks__get_bill", kind, ""), count=900)
+    other, = runs(world, monkeypatch, capsys, 1)
+    assert other.splitlines() == [text.format(tool="mcp__wh__quickbooks__get_bill")]  # another tool is new
