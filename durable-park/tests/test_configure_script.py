@@ -34,7 +34,7 @@ def _code_lines():
 def test_never_creates_the_bridge_secret_and_never_echoes_secret_files():
     for line in _code_lines():
         if "bridge_secret" in line:  # Yaakov stores it; the script may only check for it, or fix an existing file
-            assert line.startswith(('[[ -e "$ETC/bridge_secret" ]] ||', '[[ -e "$ETC/bridge_secret" ]] &&')), line
+            assert line.startswith(('[[ -e "$ETC/bridge_secret" ]] &&', '[[ -s "$ETC/bridge_secret" ]] || die')), line
             assert not re.search(r"\b(touch|tee|install|mktemp|cp|mv|cat|echo|printf)\b|>", line), line  # never created
         # the only reader of the wake secret is the secret-source helper, whose stdout goes to Hermes
         if "wake_secret" in line and ("cat " in line or "echo " in line):
@@ -151,10 +151,20 @@ def test_bridge_unit_is_stateless_and_cannot_touch_the_ledger():
     assert "ProtectHome=read-only" not in code
 
 
-def test_bridge_warns_about_a_missing_org_key_not_a_missing_ledger():
+def test_missing_or_empty_key_files_stop_the_script_before_anything_changes():
+    """LoadCredential makes the unit fail to start when a key file is missing, so the script says so up front
+    (and changes nothing), instead of stopping the old bridge and dying later at the 401 gate."""
     code = "\n".join(_code_lines())
-    warn = code.index('[[ -e "$ETC/audit_key" ]] || log "no $ETC/audit_key')
-    assert "answers human" in code[warn:warn + 300]
+    secret = next(l for l in _code_lines() if l.startswith('[[ -s "$ETC/bridge_secret" ]] || die'))
+    key = next(l for l in _code_lines() if l.startswith('[[ -s "$ETC/audit_key" ]] || die'))
+    for line in (secret, key):
+        assert "read -rs" in line and "docs/runbook.md" in line and "nothing was changed" in line, line
+    first_change = min(code.index(x) for x in (
+        "useradd --system --no-create-home", 'sync_tree "$REPO/bridge"', 'install_root "$REPO/deploy/$BRIDGE_UNIT.socket"',
+        'systemctl stop "$BRIDGE_UNIT"', 'chown root:root "$ETC/bridge_secret"', 'systemctl enable --now "$BRIDGE_UNIT.socket"'))
+    assert code.index(secret) < first_change and code.index(key) < first_change
+    # the old behaviour is gone: a missing key is no longer a warning
+    assert "the bridge answers 401 (Yaakov" not in code and "answers human to every gateway call (Yaakov" not in code
     assert "the bridge answers human until the plugin creates it" not in code
     assert "ReadWritePaths" not in SCRIPT.read_text()  # the ledger directory is no longer a bridge path
 
@@ -505,14 +515,24 @@ def test_a_service_that_still_holds_the_port_is_stopped_before_the_socket_takes_
     assert 0 < section.index(stop) - section.index(guard) < 120  # the stop sits directly under the guard
 
 
-def test_bridge_check_is_installed_root_owned_and_a_failure_stops_the_script():
+def test_bridge_check_is_installed_root_owned_run_isolated_and_a_failure_or_absence_stops_the_script():
+    code = "\n".join(_code_lines())
     section = _bridge_section()
+    absent = '[[ -f "$REPO/deploy/bridge_check.py" ]] || die'
+    assert absent in code and "nothing was changed" in next(l for l in _code_lines() if l.startswith(absent))
+    first_change = min(code.index(x) for x in ("useradd --system --no-create-home", 'sync_tree "$REPO/bridge"',
+                                               'systemctl stop "$BRIDGE_UNIT"'))
+    assert code.index(absent) < first_change  # a checkout without it is a broken deploy: stop before changing anything
+    assert 'if [[ -f "$REPO/deploy/bridge_check.py" ]]' not in code and 'if [[ -f "$VENV/deploy/bridge_check.py" ]]' not in code
     assert 'install -d -m 0755 -o root -g root "$VENV/deploy"' in section
-    assert 'install_root "$REPO/deploy/bridge_check.py" "$VENV/deploy/bridge_check.py" 0755' in section
-    run = 'python3 "$VENV/deploy/bridge_check.py" || die '
-    assert run in section
-    guard = 'if [[ -f "$VENV/deploy/bridge_check.py" ]]; then'  # only when present
-    assert section.index(guard) < section.index(run)
+    install = 'install_root "$REPO/deploy/bridge_check.py" "$VENV/deploy/bridge_check.py" 0755'
+    run = 'python3 -I "$VENV/deploy/bridge_check.py" || die '
+    assert install in section and run in section
     gate = section.index("bridge unit: $(systemctl is-active")
-    assert gate < section.index(run)  # runs after the 401 health gate passed
-    assert section.index('install_root "$REPO/deploy/bridge_check.py"') < section.index(run)
+    assert section.index(install) < gate < section.index(run)  # always runs, after the 401 health gate passed
+    assert "--- 5." not in section
+
+
+def test_bridge_health_gate_curl_has_a_time_limit():
+    code = "\n".join(_code_lines())
+    assert "curl -s -m 3 -o /dev/null -w '%{http_code}' -X POST \"$BRIDGE_LOCAL\"" in code
