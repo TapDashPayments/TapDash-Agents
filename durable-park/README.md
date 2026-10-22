@@ -19,7 +19,7 @@ still owned by `hermes` (Clean Setup Phase 2, §4.5, not done), so the lockdown 
 ledger, not a permission boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay off
 until Phase 2. Re-running `configure_hermes.sh` or
 `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
-row" rule applies.
+row" rule applies. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](docs/runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes.
 
 **Known risk, narrowed on 2026-10-22:** `hermes` no longer has sudo (Clean Setup Phase 1), so a hijacked agent that
 found a way to run code as that user can no longer read `/etc/durable-park/` (the QuickBooks credentials) through sudo,

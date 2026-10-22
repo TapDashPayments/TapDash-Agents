@@ -53,7 +53,7 @@ Rules:
   ledger, not a permission boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay
   off until Phase 2. Re-running `configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
-  row" rule applies. **Stop `hermes-gateway` before running `configure_hermes.sh`**: its `hermes plugins enable`
+  row" rule applies. **Before you run `configure_hermes.sh`, check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway`** ([Before you run the configure script](#before-you-run-the-configure-script)): its `hermes plugins enable`
   step would otherwise reload every plugin in the running gateway ([warning](#never-change-plugins-while-the-gateway-runs),
   [backlog](backlog.md#before-real-books), item 12). With the gateway stopped, step 7 of the script finds no gateway process (`MainPID` 0) and restarts `user@1001.service` instead of the gateway alone, which restarts **all** of `hermes`'s user units, `hermes-dashboard` included (it starts the gateway again too).
   durable-park asks withHuman about every tool call except the exempt tools (`parked_action_execute`, `clarify`,
@@ -184,11 +184,11 @@ and what to do (the bridge runs as `dpbridge` and systemd's socket holds its por
 | `FAIL` about | Meaning | What to do |
 |---|---|---|
 | the socket (`durable-park-bridge.socket` is not active, or listens on something other than `127.0.0.1:8791`) | systemd no longer holds the port, so anything running as `hermes` could bind it and answer withHuman | Check no other process holds the port (`sudo ss -ltnp 'sport = :8791'`), then `sudo systemctl enable --now durable-park-bridge.socket`. If the start fails because the port is taken, treat it as the impostor listener below. |
-| the service (not active, its main process runs as a user other than `dpbridge`, or it carries a supplementary group other than `dpbridge`'s own: the line names the groups, e.g. `hermes (gid 1001)` or `dpwake`) | The wrong unit file is installed (for example the old `User=hermes` one restored, or one with `SupplementaryGroups=`), or someone started the bridge another way | `systemctl cat durable-park-bridge` must show `User=dpbridge` and no `SupplementaryGroups=`. Re-install the units with `sudo bash deploy/configure_hermes.sh` (only when no row is `parked`, `approved` or `executing`) and read `sudo journalctl -u durable-park-bridge -n 20`. |
+| the service (not active, its main process runs as a user other than `dpbridge`, or it carries a supplementary group other than `dpbridge`'s own: the line names the groups, e.g. `hermes (gid 1001)` or `dpwake`) | The wrong unit file is installed (for example the old `User=hermes` one restored, or one with `SupplementaryGroups=`), or someone started the bridge another way | `systemctl cat durable-park-bridge` must show `User=dpbridge` and no `SupplementaryGroups=`. Re-install the units with `sudo bash deploy/configure_hermes.sh` (only when no row is `parked`, `approved` or `executing`, and with `hermes-gateway` stopped first: see [Before you run the configure script](#before-you-run-the-configure-script)) and read `sudo journalctl -u durable-park-bridge -n 20`. |
 | the listener (a process other than systemd or the bridge holds `127.0.0.1:8791`, or nothing listens) | An impostor answers withHuman's webhook, or the port is down. The line names the pid and its user | Security incident: tell the admin. After the admin confirms, stop that process, then `sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service`, and run the check again. Nothing listening: start the socket as in the first row. |
 | another process runs `bridge.app` | A second copy of the bridge (for example one started by hand as `hermes`) exists next to the real one | Same as the impostor listener: the admin confirms, then stop that process. |
 | a user-level unit named `durable-park-bridge*` exists | A leftover or planted `systemd --user` unit (for example under `~hermes/.config/systemd/user/`) could be started by the bot to run its own bridge | The admin confirms, then disable it as that user (`sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user disable --now <unit>`) and delete the file. |
-| the `dpbridge` account (missing, a login shell, or a member of `dpwake` or `hermes`) | The bridge's user is not isolated from the bot | Re-run `sudo bash deploy/configure_hermes.sh` for a missing user. For a group, `sudo gpasswd -d dpbridge <group>`; for the shell, `sudo usermod -s /usr/sbin/nologin dpbridge`. Then restart the bridge. |
+| the `dpbridge` account (missing, a login shell, or a member of `dpwake` or `hermes`) | The bridge's user is not isolated from the bot | Re-run `sudo bash deploy/configure_hermes.sh` for a missing user (check the ledger and stop `hermes-gateway` first: see [Before you run the configure script](#before-you-run-the-configure-script)). For a group, `sudo gpasswd -d dpbridge <group>`; for the shell, `sudo usermod -s /usr/sbin/nologin dpbridge`. Then restart the bridge. |
 | `/etc/durable-park/bridge_secret` (not `root:root` mode `0600`) | The bot's side can read, or can no longer be kept from reading, the webhook secret | `sudo chown root:root /etc/durable-park/bridge_secret && sudo chmod 0600 /etc/durable-park/bridge_secret`, then `sudo systemctl restart durable-park-bridge`. `configure_hermes.sh` also sets it. Missing: [store it](#store-or-rotate-the-bridges-keys). |
 
 Waiting or stuck rows:
@@ -229,11 +229,11 @@ PY
    | You changed | Make it live with |
    |---|---|
    | `plugin/` (park hook, form check, wake, executor, ledger) | `systemctl --user restart hermes-gateway` (as hermes) |
-   | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger` for `args_digest` and `durable_park.gatecall` for `gateway_slug`, which run `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (after the ledger check, **stop `hermes-gateway` first**: see the [warning](#never-change-plugins-while-the-gateway-runs); the script's last step then restarts the whole `hermes` user manager, the dashboard included). It first refuses to start, changing nothing, if `bridge_secret` or `audit_key` is missing or empty ([store them first](#store-or-rotate-the-bridges-keys)). Step 4b then creates the user `dpbridge` if needed, copies both trees recursively, removes files the repo no longer has, installs the socket unit and the service unit, restarts the bridge when something changed, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge; it then runs `bridge_check.py`, and a `FAIL` stops it too. By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401` and run [`bridge_check.py`](#health-check). The script does not restart the socket: a change to `durable-park-bridge.socket` needs `sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service` (the port is free for a moment, so no row `parked`, `approved` or `executing`). The very first move from the old bridge that ran as `hermes`: [first deploy](#store-or-rotate-the-bridges-keys). Rollback of a bridge change: [below](#roll-back-a-bridge-change). |
+   | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger` for `args_digest` and `durable_park.gatecall` for `gateway_slug`, which run `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (after the ledger check, **stop `hermes-gateway` first**: see [Before you run the configure script](#before-you-run-the-configure-script) and the [warning](#never-change-plugins-while-the-gateway-runs); the script's last step then restarts the whole `hermes` user manager, the dashboard included). It first refuses to start, changing nothing, if `bridge_secret` or `audit_key` is missing or empty ([store them first](#store-or-rotate-the-bridges-keys)). Step 4b then creates the user `dpbridge` if needed, copies both trees recursively, removes files the repo no longer has, installs the socket unit and the service unit, restarts the bridge when something changed, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge; it then runs `bridge_check.py`, and a `FAIL` stops it too. By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401` and run [`bridge_check.py`](#health-check). The script does not restart the socket: a change to `durable-park-bridge.socket` needs `sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service` (the port is free for a moment, so no row `parked`, `approved` or `executing`). The very first move from the old bridge that ran as `hermes`: [first deploy](#store-or-rotate-the-bridges-keys). Rollback of a bridge change: [below](#roll-back-a-bridge-change). |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
    | `tracing/tapdash_langfuse/` (the patched Langfuse plugin; once it is deployed, the gateway loads it through a symlink into the live clone) | Run `bash tracing/run_tests.sh` as `hermes` first. The change is loaded at the next gateway restart **or the next plugin reload**, so follow [When the plugin changes](#when-the-plugin-changes) (hook re-review before the pull; pull with the gateway stopped) |
-   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`, and with the gateway stopped first ([warning](#never-change-plugins-while-the-gateway-runs), [backlog](backlog.md#before-real-books) item 12). With the gateway stopped, step 7 of the script finds no gateway process (`MainPID` 0) and restarts `user@1001.service` instead of the gateway alone, which restarts **all** of `hermes`'s user units, `hermes-dashboard` included (it starts the gateway again too). Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
+   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`, and with the gateway stopped first ([Before you run the configure script](#before-you-run-the-configure-script), [warning](#never-change-plugins-while-the-gateway-runs), [backlog](backlog.md#before-real-books) item 12). With the gateway stopped, step 7 of the script finds no gateway process (`MainPID` 0) and restarts `user@1001.service` instead of the gateway alone, which restarts **all** of `hermes`'s user units, `hermes-dashboard` included (it starts the gateway again too). Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
    Rollback: revert the code first (git checkout the previous `main`, restart the gateway with 0 active rows); never
@@ -241,6 +241,15 @@ PY
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
    `formcheck_status.json` within about a minute.
+
+### Before you run the configure script
+
+Do this every time you run `sudo bash deploy/configure_hermes.sh` (or tell someone to). The script runs `hermes plugins enable`, and a plugin change while the gateway runs reloads every plugin, durable-park included ([why](#never-change-plugins-while-the-gateway-runs)).
+
+1. Check the ledger: no row may be `parked`, `approved` or `executing` ([health check](#health-check)).
+2. Stop `hermes-gateway` (as `hermes`: `systemctl --user stop hermes-gateway`; from `ubuntu`: `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user stop hermes-gateway`).
+3. Run `sudo bash deploy/configure_hermes.sh`. The script starts everything again when it finishes: with the gateway stopped it restarts `user@1001.service`, so **all** of `hermes`'s user units start again, `hermes-dashboard` included.
+4. Run the normal checks: the [health check](#health-check), and the check the procedure you are following names.
 
 ### Open a pull request from the VM
 
@@ -335,7 +344,7 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 
 | Problem | Likely cause | Fix |
 |---|---|---|
-| `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
+| `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`, but check the ledger and stop `hermes-gateway` first: see [Before you run the configure script](#before-you-run-the-configure-script)), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
 | `hermes python not found` | Not exactly one `~/.hermes/installs/*/facts.json`, or its Python is missing | Check that directory; the same lookup is `hermes_python()` in `deploy/configure_hermes.sh` |
 | `the tool policy check did not write a report` | The check was killed (the 60 s timeout), crashed, or could not write its report; the wrapper then wrote this failing report itself | `journalctl --user -u hermes-gateway` for `tool_policy_check:` lines; run `deploy/hermes_tool_policy.py check --status-file /tmp/x.json` by hand as `hermes` in Hermes's Python and read the error |
 | `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
@@ -381,7 +390,7 @@ bot going silent (Telegram, Teams) is the signal; look at `systemctl --user stat
 ### Gateway will not start: the plugin did not load
 
 Deploy order for this check: update the clone, install the drop-in and `systemctl --user daemon-reload`
-(`configure_hermes.sh` does both), then restart the gateway promptly with no `parked`, `approved` or `executing`
+(`configure_hermes.sh` does both; check the ledger and stop `hermes-gateway` before you run it: see [Before you run the configure script](#before-you-run-the-configure-script)), then restart the gateway promptly with no `parked`, `approved` or `executing`
 row. Between the clone update and the restart the running gateway has no `plugin_load.json` yet, so expect one
 transient sweep ALERT ("no durable-park load proof"); it recovers after the restart. Each start deletes the
 previous proof first (`ExecStartPre`), so a proof from an earlier process can never match a reused pid.
@@ -397,8 +406,8 @@ the live gateway loads the plugin in about 2 s, well inside systemd's default 90
    Look for `Failed to load plugin 'durable-park': ...` (an import error, a missing dependency or `_vendor`, or a
    load timeout: `plugins.load_timeout_seconds`, default 10 s), or no durable-park line at all (the plugin is
    disabled or missing: `hermes config get plugins.enabled` must list `durable-park`; re-run
-   `deploy/configure_hermes.sh`).
-2. Fix it (restore the file, fix the syntax, re-run `configure_hermes.sh`, raise `plugins.load_timeout_seconds`).
+   `deploy/configure_hermes.sh` after you check the ledger and stop `hermes-gateway`: see [Before you run the configure script](#before-you-run-the-configure-script)).
+2. Fix it (restore the file, fix the syntax, re-run `configure_hermes.sh` (check the ledger and stop `hermes-gateway` first: see [Before you run the configure script](#before-you-run-the-configure-script)), raise `plugins.load_timeout_seconds`).
 3. Confirm the plugin loads: after the start, `cat ~/.hermes/plugin-data/durable-park/plugin_load.json` shows
    `"pid"` equal to `systemctl --user show hermes-gateway -p MainPID --value`, and the journal says
    `durable-park plugin loaded (mode=asking, pid=N)`. A mode of `refusing-policy` or `refusing-error` means the
@@ -676,7 +685,7 @@ neither is created by any script:
    ([warning](#never-change-plugins-while-the-gateway-runs)), because the script runs `hermes plugins enable`; its last
    step then starts the gateway again. A gateway call in that moment goes to a person, never an auto-approve, but a parked or approved row
    would be left waiting on a bridge that is not answering.
-3. With `hermes-gateway` stopped (see step 2), run `sudo bash deploy/configure_hermes.sh` ([deploy table](#deploy-a-change)). It creates `dpbridge`, sets
+3. With `hermes-gateway` stopped (see step 2), run `sudo bash deploy/configure_hermes.sh` ([deploy table](#deploy-a-change), [Before you run the configure script](#before-you-run-the-configure-script)). It creates `dpbridge`, sets
    `bridge_secret` to `root:root 0600`, installs both units, starts the socket and the service, and runs
    `bridge_check.py`. If it stops with `could not start durable-park-bridge.socket: something else may hold
    127.0.0.1:8791`, **treat it as a possible security incident**: the old bridge was stopped just before, so another
@@ -936,7 +945,7 @@ arguments you add. One new test runs the real Langfuse SDK in memory, with no ne
 Not done yet. Do it only after the pull requests with `tracing/` and these docs are merged and the live clone is up to
 date (`git -C /home/hermes/tapdash-agents pull --ff-only`, as in [Deploy a change](#deploy-a-change)). The pull also
 brings the `bridge/` and `deploy/` changes merged with it: `/opt/durable-park` (the bridge's copy) stays at the old code
-until an admin runs `configure_hermes.sh` as [Deploy a change](#deploy-a-change) says for the bridge; this deploy does
+until an admin runs `configure_hermes.sh` as [Deploy a change](#deploy-a-change) says for the bridge (ledger check and `hermes-gateway` stopped first: [Before you run the configure script](#before-you-run-the-configure-script)); this deploy does
 not need that. As `hermes`:
 
 **Before you start.** `bash tracing/run_tests.sh` in the live clone: all tests pass. Diff `on_pre_tool_call` against
@@ -1250,7 +1259,7 @@ the code that next load uses. So a change under `tracing/tapdash_langfuse/` goes
    `systemctl --user start hermes-gateway`, then run [Check it works](#check-it-works) (the `durable-park loaded` line
    must still count 2 observer hooks and show no `foreign pre_tool_call` line). The pull also brings any `bridge/` and
    `deploy/` changes merged meanwhile: `/opt/durable-park` stays at the old code until an admin runs
-   `configure_hermes.sh` ([Deploy a change](#deploy-a-change)); a plugin update does not need that.
+   `configure_hermes.sh` ([Deploy a change](#deploy-a-change); check the ledger and stop `hermes-gateway` first: [Before you run the configure script](#before-you-run-the-configure-script)); a plugin update does not need that.
 
 To take a newer upstream version: copy it over the vendored files, re-apply the changes listed in `PATCHES.md`, and
 do steps 1 to 3. Never use `hermes plugins install langfuse` to update: it would change the catalog copy, not ours.

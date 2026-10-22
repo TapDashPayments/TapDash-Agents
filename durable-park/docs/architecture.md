@@ -46,7 +46,7 @@ Hermes approvals stay off. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC, 20
 by `hermes` (Phase 2, §4.5, not done), so the lockdown is still a configuration guard for the ledger, not a permission
 boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay off until Phase 2. Re-running `configure_hermes.sh` or
 `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
-row" rule applies.
+row" rule applies. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes.
 
 What that means today:
 
@@ -621,7 +621,7 @@ System users behind that table:
   approvals are off (`approvals.mode: off`). `gateway.strict: true` and `gateway.trust_recent_files: false` are set;
   while `hermes` owns the ledger (Phase 2 not done) they do not protect it. Re-running `deploy/configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies this state and restarts the gateway, so the "no parked/approved/executing row"
-  rule applies. Tools open again only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4.
+  rule applies. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes. Tools open again only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4.
 - Two agents ran on the VM until 2026-10-21 (this install and an `ubuntu` user install for Teams and the
   dashboard). Now it is **one**: the `hermes` install. The `ubuntu` install is stopped, its gateway and dashboard units are disabled (2026-10-21 02:37:47 UTC) and it is kept as an archive.
 
