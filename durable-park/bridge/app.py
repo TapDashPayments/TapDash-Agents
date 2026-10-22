@@ -56,7 +56,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8791
 ROUTE = "/wh/bridge"
 NO_PARK_REASON = "No approved park for this exact call"
-LIST_LIMIT = 50
+PARK_LIST_LIMIT = 50
+NEIGHBOUR_LIST_LIMIT = 200  # withHuman's maximum page; ``decide`` refuses a full page that cuts off the recent past
 LIST_BUDGET_SECONDS = 3.5  # both withHuman calls together; withHuman's webhook block gives up at 5 s
 
 _SIGNATURE_HEX = re.compile(r"[0-9a-fA-F]{64}")
@@ -167,12 +168,14 @@ class Bridge:
         park_tool, _ = expected_park(server, tool)
         deadline = self.monotonic() + LIST_BUDGET_SECONDS
         try:
-            parks = self.lister.list(agent_slug=slug, q=park_tool, limit=LIST_LIMIT, deadline=deadline)
-            neighbours = self.lister.list(agent_slug=slug, q=tool, limit=LIST_LIMIT, deadline=deadline)
+            parks = self.lister.list(agent_slug=slug, q=park_tool, limit=PARK_LIST_LIMIT, deadline=deadline)
+            # every recent request of the agent, whatever its tool: Hermes folds "-" into "_" in tool names, so a
+            # filter on the tool name would miss a second use under the other spelling
+            neighbours = self.lister.list(agent_slug=slug, q=None, limit=NEIGHBOUR_LIST_LIMIT, deadline=deadline)
         except ListError as exc:  # withHuman slow, unreachable or unhappy: a person decides
             return "human", None, exc.code
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
-        verdict = decide(call, parks, neighbours, now)
+        verdict = decide(call, parks, neighbours, now, neighbours_limit=NEIGHBOUR_LIST_LIMIT)
         if verdict.approve:
             return "approve", verdict.park_request_id, verdict.why
         return "human", None, verdict.why
