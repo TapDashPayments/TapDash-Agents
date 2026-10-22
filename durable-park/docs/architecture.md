@@ -46,7 +46,7 @@ Hermes approvals stay off. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC, 20
 by `hermes` (Phase 2, §4.5, not done), so the lockdown is still a configuration guard for the ledger, not a permission
 boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay off until Phase 2. Re-running `configure_hermes.sh` or
 `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
-row" rule applies.
+row" rule applies. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes.
 
 What that means today:
 
@@ -160,7 +160,7 @@ flowchart LR
 
 | Part | Code | What it does |
 |---|---|---|
-| Langfuse plugin (not ours) | Nous Research's `langfuse` plugin, in `~/.hermes/plugins/langfuse`, loaded by the gateway | Sends traces to Langfuse Cloud: one per turn, one generation per model call, one observation per tool call, full content ([runbook](runbook.md#tracing-langfuse)). Its `pre_tool_call` hook only observes and is listed in `observer_hooks`. A one-way arrow out: Langfuse sends nothing back and cannot change a call. Live since 2026-10-22 04:37 UTC. |
+| Langfuse plugin (Nous Research's, patched by us) | Live today: Nous Research's unpatched `langfuse` plugin, in `~/.hermes/plugins/langfuse`, loaded by the gateway. Built and tested, **not deployed yet**: TapDash's patched copy `tapdash-langfuse`, in [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse) of this repo (changes listed in its `PATCHES.md`), which replaces it by a symlink `~/.hermes/plugins/tapdash-langfuse` into the live clone | Sends traces to Langfuse Cloud: one per turn, one generation per model call, one observation per tool call, full content ([runbook](runbook.md#tracing-langfuse)). The patched copy also sets the chat sender id as `userId`, names traces by platform and tags traces by configured patterns such as `park:P-...`. Its `pre_tool_call` hook only observes and is listed in `observer_hooks` (`hermes_plugins.langfuse.on_pre_tool_call` today, `hermes_plugins.tapdash_langfuse.on_pre_tool_call` after the deploy; the function is byte-identical to upstream's). No durable-park code or approval behaviour changes. A one-way arrow out: Langfuse sends nothing back and cannot change a call. Live (unpatched) since 2026-10-22 04:37 UTC. |
 | plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook and middleware registries on every call for other plugins' `pre_tool_call` hooks and `tool_request` / `tool_execution` middleware (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
 | park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); checks the form (form-checked tools only), saves the call, and asks withHuman once. An instant approval lets the tool run (row `allowed`); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
@@ -621,7 +621,7 @@ System users behind that table:
   approvals are off (`approvals.mode: off`). `gateway.strict: true` and `gateway.trust_recent_files: false` are set;
   while `hermes` owns the ledger (Phase 2 not done) they do not protect it. Re-running `deploy/configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies this state and restarts the gateway, so the "no parked/approved/executing row"
-  rule applies. Tools open again only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4.
+  rule applies. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes. Tools open again only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4.
 - Two agents ran on the VM until 2026-10-21 (this install and an `ubuntu` user install for Teams and the
   dashboard). Now it is **one**: the `hermes` install. The `ubuntu` install is stopped, its gateway and dashboard units are disabled (2026-10-21 02:37:47 UTC) and it is kept as an archive.
 

@@ -341,7 +341,7 @@ is **unverified** on the live tenant.
    run it again.
 3. systemd copies the secret to the bridge only when the service starts, so restart it (root):
    `sudo systemctl restart durable-park-bridge`. (The socket unit keeps the port during the restart. On a fresh VM
-   there is no bridge yet: store the secret and the org key first, then run `configure_hermes.sh`.)
+   there is no bridge yet: store the secret and the org key first, then run `configure_hermes.sh`. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes.)
 4. Close the withHuman secret tab. Type `exit` to leave the VM.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline), in this order**
@@ -415,7 +415,7 @@ written bare, not as `${env:VAR}`: the two resolve alike, but the `env:` form ma
 a missing secret is still noticed: [receiver-setup.md](receiver-setup.md#files-and-owners)).
 
 `deploy/hermes_mcp.sh` (as root or hermes, after provisioning; it refuses while
-`/etc/durable-park/instance_token` is missing) writes this entry with `hermes config set`:
+`/etc/durable-park/instance_token` is missing) writes this entry with `hermes config set`. Check the ledger first (no `parked`, `approved` or `executing` rows): the script restarts `hermes-gateway` ([health check](runbook.md#health-check)):
 
 ```yaml
 mcp_servers:

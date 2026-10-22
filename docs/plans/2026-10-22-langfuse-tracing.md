@@ -1,5 +1,7 @@
 # Langfuse tracing on proto-agents — Implementation Plan
 
+> **Note 2026-10-22:** steps that run `hermes plugins enable/disable` with the gateway running reload every plugin live (durable-park's check is briefly absent, then it refuses everything until a restart). Today's procedure stops the gateway first: see the [runbook warning](../../durable-park/docs/runbook.md#never-change-plugins-while-the-gateway-runs).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Every message to and from the agent, every model call and every tool call on `proto-agents` is visible in Langfuse Cloud with full content, without weakening durable-park (one human approval, never twice, unclear never retried).

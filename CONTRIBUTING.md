@@ -13,6 +13,9 @@ cd durable-park && python3 -m venv .venv && .venv/bin/pip install -r requirement
    sweep load code from it ([runbook](durable-park/docs/runbook.md#deploy-a-change)).
 2. Change the code **and the docs it affects** (next section).
 3. Run the tests: `cd durable-park && .venv/bin/pytest -q -W error`. New behaviour needs a test.
+   For a change under `tracing/` (the patched Langfuse plugin), run `bash tracing/run_tests.sh` as `hermes` on the test
+   VM instead; it needs the Hermes environment's Python, so CI does not run it yet
+   ([backlog](durable-park/docs/backlog.md#langfuse-tracing-gaps-from-the-2026-10-22-audit)).
 4. Push. Open a pull request for anything beyond operations fixes; the template has the checklist.
 5. Make it live on the VM as the [runbook](durable-park/docs/runbook.md#deploy-a-change) says.
 
@@ -59,6 +62,9 @@ rule: change either, update the runbook's "Tool policy check failed" and "Open a
 The gateway-start load check (`durable-park/deploy/plugin_load_check.sh`, run by the same drop-in as `ExecStartPost`)
 is covered by the same rule (`deploy/*.sh`): change it, update the runbook's "Gateway will not start: the plugin did
 not load" section.
+The vendored Langfuse plugin (`tracing/tapdash_langfuse/` and `tracing/run_tests.sh`) is mapped to the runbook and to
+`tracing/tapdash_langfuse/PATCHES.md` in the "Tracing plugin (tapdash-langfuse)" rule: every difference from upstream
+goes into `PATCHES.md` in the same commit. Its tests run with `bash tracing/run_tests.sh`, not the durable-park pytest.
 The gateway bridge's own user and port (`durable-park/deploy/durable-park-bridge.service`, `durable-park-bridge.socket`
 and `bridge_check.py`) are mapped to `architecture.md` and `gateway-setup.md` in the "Gateway bridge isolation" rule (and,
 like the other deploy files, to the runbook and the two setup guides in "Deploy scripts and service units"): change one,

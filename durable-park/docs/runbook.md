@@ -53,7 +53,9 @@ Rules:
   ledger, not a permission boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay
   off until Phase 2. Re-running `configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
-  row" rule applies.
+  row" rule applies. **Before you run `configure_hermes.sh`, check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway`** ([Before you run the configure script](#before-you-run-the-configure-script)): its `hermes plugins enable`
+  step would otherwise reload every plugin in the running gateway ([warning](#never-change-plugins-while-the-gateway-runs),
+  [backlog](backlog.md#before-real-books), item 12). With the gateway stopped, step 7 of the script finds no gateway process (`MainPID` 0) and restarts `user@1001.service` instead of the gateway alone, which restarts **all** of `hermes`'s user units, `hermes-dashboard` included (it starts the gateway again too).
   durable-park asks withHuman about every tool call except the exempt tools (`parked_action_execute`, `clarify`,
   `tool_search`, `tool_describe`); withHuman's
   pipeline decides which need a person; today that means the QuickBooks tools, since the agent has no terminal or
@@ -64,9 +66,31 @@ Rules:
   credentials ([backlog](backlog.md#before-real-books)). The old `ubuntu` user's
   Hermes install (gateway and dashboard units) is stopped and kept as an archive; do not start it next to this one.
 - **Restarting `hermes-gateway` also restarts the Teams bot** (and briefly drops Telegram). The dashboard is its own unit
-  and keeps running. The "no `parked`, `approved` or `executing` row" rule below still applies before any restart.
+  and keeps running when only the gateway is restarted (not when `configure_hermes.sh` runs with the gateway stopped: it
+  restarts the whole `hermes` user manager, see above). The "no `parked`, `approved` or `executing` row" rule below still applies before any restart.
 - QuickBooks is a **sandbox** company. Never connect real books before the [rotation](#rotate-secrets-before-production)
   and the open v2 items are done.
+
+### Never change plugins while the gateway runs
+
+> **WARNING: never enable, disable, install, remove or reload any plugin while `hermes-gateway` is running.** That is
+> `hermes plugins enable <name>`, `hermes plugins disable <name>` (any plugin, not only Langfuse) and the plugin
+> toggle in the dashboard. Hermes does **not** wait for a restart: it tells the running gateway to unload and load
+> **every** plugin again, durable-park included. For a fraction of a second (about 0.1 s) durable-park's check is
+> missing, so a tool call that starts in that instant runs without it (QuickBooks calls are still held by withHuman's
+> gateway and the bridge). Right after, durable-park judges its tool-policy report `stale` and **refuses every tool
+> call until the gateway is restarted**. This happened on 2026-10-22 at 04:37:28 UTC, when the Langfuse plugin was
+> enabled ([record](acceptance-2026-10-22-langfuse.md)). It is a backlog item to make durable-park safe against it
+> ([backlog](backlog.md#before-real-books), item 11); until that is built and reviewed, follow this rule.
+>
+> Do it this way instead, as `hermes` ([how to reach Hermes as admin](#access-and-ground-rules)):
+>
+> 1. Check that no ledger row is `parked`, `approved` or `executing` ([health check](#health-check)).
+> 2. `systemctl --user stop hermes-gateway` (use `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user stop hermes-gateway` from `ubuntu`). Telegram and the Teams bot are offline until step 4.
+> 3. Run the `hermes plugins enable|disable ...` command or edit the config. The command prints that no running
+>    gateway answered: that is **expected**. Nothing is reloaded, because nothing is running.
+> 4. `systemctl --user start hermes-gateway`, then run the check the procedure names (for Langfuse,
+>    [Check it works](#check-it-works)).
 
 ### Agent persona (SOUL.md)
 
@@ -102,7 +126,7 @@ or `~/.hermes/.env`: they hold secrets).
 | Secret references (`platforms.webhook.extra.routes.durable-park-wake.secret`, `mcp_servers.wh.headers.Authorization`) | bare `${VAR}` form | PR #28; no `${env:...}` is left in `config.yaml`. See [Config ref is not set](#every-hermes-command-prints-config-ref---is-not-set). |
 | Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *` | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). |
 | `hermes-dashboard` unit | `RestartPreventExitStatus=78` in the main unit file | See [Dashboard over HTTPS](#dashboard-over-https). |
-| Langfuse tracing: plugin `langfuse` enabled, `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | on since 2026-10-22 04:37 UTC; settings last changed 13:42 UTC | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
+| Langfuse tracing: plugin `langfuse` (Nous Research's unpatched catalog plugin) enabled, `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | on since 2026-10-22 04:37 UTC; settings last changed 13:42 UTC. The patched `tapdash-langfuse` is built and tested but **not deployed**: this row changes when it is ([deploy](#switch-to-the-patched-plugin-deploy)) | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
 
 If `hermes-gateway` reports `DEGRADED` after a Hermes update, read `~/.hermes/logs/gateway.log` for the platform
 that failed to start before changing anything. To use `api_server` later, an admin sets `API_SERVER_KEY` in the
@@ -160,11 +184,11 @@ and what to do (the bridge runs as `dpbridge` and systemd's socket holds its por
 | `FAIL` about | Meaning | What to do |
 |---|---|---|
 | the socket (`durable-park-bridge.socket` is not active, or listens on something other than `127.0.0.1:8791`) | systemd no longer holds the port, so anything running as `hermes` could bind it and answer withHuman | Check no other process holds the port (`sudo ss -ltnp 'sport = :8791'`), then `sudo systemctl enable --now durable-park-bridge.socket`. If the start fails because the port is taken, treat it as the impostor listener below. |
-| the service (not active, its main process runs as a user other than `dpbridge`, or it carries a supplementary group other than `dpbridge`'s own: the line names the groups, e.g. `hermes (gid 1001)` or `dpwake`) | The wrong unit file is installed (for example the old `User=hermes` one restored, or one with `SupplementaryGroups=`), or someone started the bridge another way | `systemctl cat durable-park-bridge` must show `User=dpbridge` and no `SupplementaryGroups=`. Re-install the units with `sudo bash deploy/configure_hermes.sh` (only when no row is `parked`, `approved` or `executing`) and read `sudo journalctl -u durable-park-bridge -n 20`. |
+| the service (not active, its main process runs as a user other than `dpbridge`, or it carries a supplementary group other than `dpbridge`'s own: the line names the groups, e.g. `hermes (gid 1001)` or `dpwake`) | The wrong unit file is installed (for example the old `User=hermes` one restored, or one with `SupplementaryGroups=`), or someone started the bridge another way | `systemctl cat durable-park-bridge` must show `User=dpbridge` and no `SupplementaryGroups=`. Re-install the units with `sudo bash deploy/configure_hermes.sh` (only when no row is `parked`, `approved` or `executing`, and with `hermes-gateway` stopped first: see [Before you run the configure script](#before-you-run-the-configure-script)) and read `sudo journalctl -u durable-park-bridge -n 20`. |
 | the listener (a process other than systemd or the bridge holds `127.0.0.1:8791`, or nothing listens) | An impostor answers withHuman's webhook, or the port is down. The line names the pid and its user | Security incident: tell the admin. After the admin confirms, stop that process, then `sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service`, and run the check again. Nothing listening: start the socket as in the first row. |
 | another process runs `bridge.app` | A second copy of the bridge (for example one started by hand as `hermes`) exists next to the real one | Same as the impostor listener: the admin confirms, then stop that process. |
 | a user-level unit named `durable-park-bridge*` exists | A leftover or planted `systemd --user` unit (for example under `~hermes/.config/systemd/user/`) could be started by the bot to run its own bridge | The admin confirms, then disable it as that user (`sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user disable --now <unit>`) and delete the file. |
-| the `dpbridge` account (missing, a login shell, or a member of `dpwake` or `hermes`) | The bridge's user is not isolated from the bot | Re-run `sudo bash deploy/configure_hermes.sh` for a missing user. For a group, `sudo gpasswd -d dpbridge <group>`; for the shell, `sudo usermod -s /usr/sbin/nologin dpbridge`. Then restart the bridge. |
+| the `dpbridge` account (missing, a login shell, or a member of `dpwake` or `hermes`) | The bridge's user is not isolated from the bot | Re-run `sudo bash deploy/configure_hermes.sh` for a missing user (check the ledger and stop `hermes-gateway` first: see [Before you run the configure script](#before-you-run-the-configure-script)). For a group, `sudo gpasswd -d dpbridge <group>`; for the shell, `sudo usermod -s /usr/sbin/nologin dpbridge`. Then restart the bridge. |
 | `/etc/durable-park/bridge_secret` (not `root:root` mode `0600`) | The bot's side can read, or can no longer be kept from reading, the webhook secret | `sudo chown root:root /etc/durable-park/bridge_secret && sudo chmod 0600 /etc/durable-park/bridge_secret`, then `sudo systemctl restart durable-park-bridge`. `configure_hermes.sh` also sets it. Missing: [store it](#store-or-rotate-the-bridges-keys). |
 
 Waiting or stuck rows:
@@ -205,10 +229,11 @@ PY
    | You changed | Make it live with |
    |---|---|
    | `plugin/` (park hook, form check, wake, executor, ledger) | `systemctl --user restart hermes-gateway` (as hermes) |
-   | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger` for `args_digest` and `durable_park.gatecall` for `gateway_slug`, which run `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh`. It first refuses to start, changing nothing, if `bridge_secret` or `audit_key` is missing or empty ([store them first](#store-or-rotate-the-bridges-keys)). Step 4b then creates the user `dpbridge` if needed, copies both trees recursively, removes files the repo no longer has, installs the socket unit and the service unit, restarts the bridge when something changed, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge; it then runs `bridge_check.py`, and a `FAIL` stops it too. By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401` and run [`bridge_check.py`](#health-check). The script does not restart the socket: a change to `durable-park-bridge.socket` needs `sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service` (the port is free for a moment, so no row `parked`, `approved` or `executing`). The very first move from the old bridge that ran as `hermes`: [first deploy](#store-or-rotate-the-bridges-keys). Rollback of a bridge change: [below](#roll-back-a-bridge-change). |
+   | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger` for `args_digest` and `durable_park.gatecall` for `gateway_slug`, which run `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (after the ledger check, **stop `hermes-gateway` first**: see [Before you run the configure script](#before-you-run-the-configure-script) and the [warning](#never-change-plugins-while-the-gateway-runs); the script's last step then restarts the whole `hermes` user manager, the dashboard included). It first refuses to start, changing nothing, if `bridge_secret` or `audit_key` is missing or empty ([store them first](#store-or-rotate-the-bridges-keys)). Step 4b then creates the user `dpbridge` if needed, copies both trees recursively, removes files the repo no longer has, installs the socket unit and the service unit, restarts the bridge when something changed, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge; it then runs `bridge_check.py`, and a `FAIL` stops it too. By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401` and run [`bridge_check.py`](#health-check). The script does not restart the socket: a change to `durable-park-bridge.socket` needs `sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service` (the port is free for a moment, so no row `parked`, `approved` or `executing`). The very first move from the old bridge that ran as `hermes`: [first deploy](#store-or-rotate-the-bridges-keys). Rollback of a bridge change: [below](#roll-back-a-bridge-change). |
    | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it |
-   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`. Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
+   | `tracing/tapdash_langfuse/` (the patched Langfuse plugin; once it is deployed, the gateway loads it through a symlink into the live clone) | Run `bash tracing/run_tests.sh` as `hermes` first. The change is loaded at the next gateway restart **or the next plugin reload**, so follow [When the plugin changes](#when-the-plugin-changes) (hook re-review before the pull; pull with the gateway stopped) |
+   | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`, and with the gateway stopped first ([Before you run the configure script](#before-you-run-the-configure-script), [warning](#never-change-plugins-while-the-gateway-runs), [backlog](backlog.md#before-real-books) item 12). With the gateway stopped, step 7 of the script finds no gateway process (`MainPID` 0) and restarts `user@1001.service` instead of the gateway alone, which restarts **all** of `hermes`'s user units, `hermes-dashboard` included (it starts the gateway again too). Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
 
    Rollback: revert the code first (git checkout the previous `main`, restart the gateway with 0 active rows); never
@@ -216,6 +241,15 @@ PY
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
    `formcheck_status.json` within about a minute.
+
+### Before you run the configure script
+
+Do this every time you run `sudo bash deploy/configure_hermes.sh` (or tell someone to). The script runs `hermes plugins enable`, and a plugin change while the gateway runs reloads every plugin, durable-park included ([why](#never-change-plugins-while-the-gateway-runs)).
+
+1. Check the ledger: no row may be `parked`, `approved` or `executing` ([health check](#health-check)).
+2. Stop `hermes-gateway` (as `hermes`: `systemctl --user stop hermes-gateway`; from `ubuntu`: `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user stop hermes-gateway`).
+3. Run `sudo bash deploy/configure_hermes.sh`. The script starts everything again when it finishes: with the gateway stopped it restarts `user@1001.service`, so **all** of `hermes`'s user units start again, `hermes-dashboard` included.
+4. Run the normal checks: the [health check](#health-check), and the check the procedure you are following names.
 
 ### Open a pull request from the VM
 
@@ -310,7 +344,7 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 
 | Problem | Likely cause | Fix |
 |---|---|---|
-| `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
+| `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`, but check the ledger and stop `hermes-gateway` first: see [Before you run the configure script](#before-you-run-the-configure-script)), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
 | `hermes python not found` | Not exactly one `~/.hermes/installs/*/facts.json`, or its Python is missing | Check that directory; the same lookup is `hermes_python()` in `deploy/configure_hermes.sh` |
 | `the tool policy check did not write a report` | The check was killed (the 60 s timeout), crashed, or could not write its report; the wrapper then wrote this failing report itself | `journalctl --user -u hermes-gateway` for `tool_policy_check:` lines; run `deploy/hermes_tool_policy.py check --status-file /tmp/x.json` by hand as `hermes` in Hermes's Python and read the error |
 | `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
@@ -319,7 +353,7 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 | `BRIDGE incomplete: <names> missing` | Only some of the three bridge tools are visible | A Hermes change; read `tools/tool_search.py` `bridge_tool_schemas` and `compat.py` |
 | `MISSING parked_action_execute` | The executor is not reachable: not in the tool list and, with Tool Search on, not behind a complete bridge | Check the plugin loaded (`durable-park loaded`), then the two rows above |
 | `LEAK <other name>` while Tool Search is on | The tool is in the session's catalog even if the model's list hides it behind the bridge: `tool_call` could run it | Remove it as for any other leak (`apply`, then `check`) |
-| `stale` | The report was written more than 15 minutes **before the gateway process started** (the gateway started without the drop-in, so no fresh report). The gateway's uptime no longer matters, and a plugin reload inside the running gateway stays fine. A process started more than 15 minutes after the last gateway start (for example a manual `hermes` run) is refused, which is correct: the start check did not run for it (it fails closed but does not write the verdict) | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). Visible through the `tool_policy_load.json` alert above. **In a side process this is not an error:** the cron sweep (every 5 minutes) and CLI runs log `durable-park: tool policy report predates this side process (expected for the cron sweep and CLI runs); refusing every tool call in this process` once, at INFO (it does not reach `errors.log`; look for it in `agent.log`), and still refuse every tool call. Only the gateway's own `stale` is an ERROR |
+| `stale` | The report was written more than 15 minutes **before the gateway process started** (the gateway started without the drop-in, so no fresh report). The gateway's uptime no longer matters. **A plugin reload inside the running gateway is not fine:** on 2026-10-22 at 04:37:28 UTC the log showed durable-park judging the report `stale` right after a reload (`hermes plugins enable` of another plugin) and refusing every call until the next restart, so never reload plugins while the gateway runs ([warning](#never-change-plugins-while-the-gateway-runs)). A process started more than 15 minutes after the last gateway start (for example a manual `hermes` run) is refused, which is correct: the start check did not run for it (it fails closed but does not write the verdict) | Install the drop-in if missing; otherwise restart the gateway (the start writes a fresh report). Visible through the `tool_policy_load.json` alert above. **In a side process this is not an error:** the cron sweep (every 5 minutes) and CLI runs log `durable-park: tool policy report predates this side process (expected for the cron sweep and CLI runs); refusing every tool call in this process` once, at INFO (it does not reach `errors.log`; look for it in `agent.log`), and still refuse every tool call. Only the gateway's own `stale` is an ERROR |
 | `unreadable checked_at` | The report's `checked_at` is missing or not a `YYYY-MM-DDTHH:MM:SSZ` time. Not a normal aging effect: the report was edited, truncated or written by something else. **ERROR in every process** (the sweep and CLI runs too) | Re-run the start check: `systemctl --user restart hermes-gateway` (only when nothing is waiting or running) writes a fresh report; if it comes back, find what wrote the file |
 | `checked_at in the future` | The report is dated more than a minute ahead of this process's clock: clock skew (check `timedatectl`) or a hand-written report. **ERROR in every process**, never downgraded to the side-process INFO line | Fix the clock, then restart the gateway as above so the start check writes a fresh report |
 
@@ -356,7 +390,7 @@ bot going silent (Telegram, Teams) is the signal; look at `systemctl --user stat
 ### Gateway will not start: the plugin did not load
 
 Deploy order for this check: update the clone, install the drop-in and `systemctl --user daemon-reload`
-(`configure_hermes.sh` does both), then restart the gateway promptly with no `parked`, `approved` or `executing`
+(`configure_hermes.sh` does both; check the ledger and stop `hermes-gateway` before you run it: see [Before you run the configure script](#before-you-run-the-configure-script)), then restart the gateway promptly with no `parked`, `approved` or `executing`
 row. Between the clone update and the restart the running gateway has no `plugin_load.json` yet, so expect one
 transient sweep ALERT ("no durable-park load proof"); it recovers after the restart. Each start deletes the
 previous proof first (`ExecStartPre`), so a proof from an earlier process can never match a reused pid.
@@ -372,8 +406,8 @@ the live gateway loads the plugin in about 2 s, well inside systemd's default 90
    Look for `Failed to load plugin 'durable-park': ...` (an import error, a missing dependency or `_vendor`, or a
    load timeout: `plugins.load_timeout_seconds`, default 10 s), or no durable-park line at all (the plugin is
    disabled or missing: `hermes config get plugins.enabled` must list `durable-park`; re-run
-   `deploy/configure_hermes.sh`).
-2. Fix it (restore the file, fix the syntax, re-run `configure_hermes.sh`, raise `plugins.load_timeout_seconds`).
+   `deploy/configure_hermes.sh` after you check the ledger and stop `hermes-gateway`: see [Before you run the configure script](#before-you-run-the-configure-script)).
+2. Fix it (restore the file, fix the syntax, re-run `configure_hermes.sh` (check the ledger and stop `hermes-gateway` first: see [Before you run the configure script](#before-you-run-the-configure-script)), raise `plugins.load_timeout_seconds`).
 3. Confirm the plugin loads: after the start, `cat ~/.hermes/plugin-data/durable-park/plugin_load.json` shows
    `"pid"` equal to `systemctl --user show hermes-gateway -p MainPID --value`, and the journal says
    `durable-park plugin loaded (mode=asking, pid=N)`. A mode of `refusing-policy` or `refusing-error` means the
@@ -647,9 +681,11 @@ neither is created by any script:
    script stops it before systemd's socket can take the port, and for a moment nothing listens. **Keep the gateway
    idle for the whole first migration**: check that no ledger row is `parked`, `approved` or `executing`
    ([waiting rows](#health-check)), and do not start a new tool call in the chat until `bridge_check.py` has passed
-   (step 3). A gateway call in that moment goes to a person, never an auto-approve, but a parked or approved row
+   (step 3). Idle is not enough for the script itself: stop `hermes-gateway` before step 3, after the ledger check
+   ([warning](#never-change-plugins-while-the-gateway-runs)), because the script runs `hermes plugins enable`; its last
+   step then starts the gateway again. A gateway call in that moment goes to a person, never an auto-approve, but a parked or approved row
    would be left waiting on a bridge that is not answering.
-3. Run `sudo bash deploy/configure_hermes.sh` ([deploy table](#deploy-a-change)). It creates `dpbridge`, sets
+3. With `hermes-gateway` stopped (see step 2), run `sudo bash deploy/configure_hermes.sh` ([deploy table](#deploy-a-change), [Before you run the configure script](#before-you-run-the-configure-script)). It creates `dpbridge`, sets
    `bridge_secret` to `root:root 0600`, installs both units, starts the socket and the service, and runs
    `bridge_check.py`. If it stops with `could not start durable-park-bridge.socket: something else may hold
    127.0.0.1:8791`, **treat it as a possible security incident**: the old bridge was stopped just before, so another
@@ -789,7 +825,9 @@ To allow one:
 3. **Confirm it never returns `modify`** (or any directive other than `None`, or `block`), on any path, including
    errors. For middleware: a `tool_request` one must never return `{"args": ...}`; a `tool_execution` one must
    call `next_call()` with no argument or with the exact `args` it was given, on every path. If you cannot confirm it, do not list it: remove or disable it instead.
-4. Add its exact name to `observer_hooks`, restart the gateway, and check one call is asked about normally again.
+4. Add its exact name to `observer_hooks` (a config edit: nothing changes until the next start), check that no row is
+   `parked`, `approved` or `executing` ([health check](#health-check)), restart the gateway, and check one call is asked
+   about normally again.
 5. Re-do this review whenever that plugin, script or command changes.
 
 Registration order does not make a foreign hook safe: Hermes merges `modify` from every `pre_tool_call` callback, so
@@ -801,7 +839,8 @@ observer may be listed.
 | Name | Source | What it does | Reviewed (date) | Result |
 |---|---|---|---|---|
 | `platforms__raft.adapter._on_pre_tool_call` (full name `hermes_plugins.platforms__raft.adapter._on_pre_tool_call`) | Hermes Raft platform plugin, on `proto-agents` | Records telemetry about each call; always returns `None`, on every path including errors. Never returns `modify`, `block` or any other directive. | 2026-10-21 | Listed in `observer_hooks`; gateway restarted; calls asked about normally again |
-| `hermes_plugins.langfuse.on_pre_tool_call` | Nous Research official `langfuse` plugin v2.0.0 @ commit `c2a9596`, on `proto-agents` | Starts a Langfuse tool observation from a copy of the call's arguments (`_capture_content` builds new structures with `_safe_value`). Returns `None` on every path and never changes the arguments. Its `on_post_tool_call` only changes the plugin's own copies. | 2026-10-22 | Listed in `observer_hooks`. The plugin was switched on 2026-10-22 04:37 UTC ([Tracing (Langfuse)](#tracing-langfuse)); after that restart calls were asked about normally and a $1 payment ran once after one approval ([record](acceptance-2026-10-22-langfuse.md)) |
+| `hermes_plugins.langfuse.on_pre_tool_call` | Nous Research official `langfuse` plugin v2.0.0 @ commit `c2a9596`, on `proto-agents` | Starts a Langfuse tool observation from a copy of the call's arguments (`_capture_content` builds new structures with `_safe_value`). Returns `None` on every path and never changes the arguments. Its `on_post_tool_call` only changes the plugin's own copies. | 2026-10-22 | Listed in `observer_hooks`. The plugin was switched on 2026-10-22 04:37 UTC ([Tracing (Langfuse)](#tracing-langfuse)); after that restart calls were asked about normally and a $1 payment ran once after one approval ([record](acceptance-2026-10-22-langfuse.md)). **Retired at the `tapdash-langfuse` deploy** (the catalog plugin is disabled and restarted out first; this entry is removed from `observer_hooks` in a second, ledger-checked restart); the row stays for history |
+| `hermes_plugins.tapdash_langfuse.on_pre_tool_call` | TapDash patched copy of the Nous `langfuse` v2.0.0 @ commit `c2a9596` (`tracing/tapdash_langfuse`), on `proto-agents` | The same function as the upstream one reviewed on 2026-10-22 (row above): byte-identical, checked by a diff when the copy was built. Starts a Langfuse tool observation from a copy of the call's arguments. Returns `None` on every path and never changes the arguments. The patches only touch `on_post_tool_call` (pattern tags) and the start of the root trace (user id, name), never this hook | 2026-10-22 | To be listed in `observer_hooks` at the deploy (not listed yet: the plugin is not deployed). Calls must still be asked about normally after that restart ([deploy](#switch-to-the-patched-plugin-deploy)) |
 
 `<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook or middleware
 registry (e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
@@ -817,11 +856,19 @@ at 04:37:45 and the gateway restarted; the Langfuse keys were typed in by Yaakov
 13:42 UTC the same day (`HERMES_LANGFUSE_MAX_DEPTH` 16). What was checked, and the audit of what Langfuse shows:
 [acceptance-2026-10-22-langfuse.md](acceptance-2026-10-22-langfuse.md).
 
+**Patched plugin: built and tested, NOT deployed yet.** The three gaps in that audit (no `userId`, every trace named
+`Hermes turn`, no way to find the traces of one approval) are fixed in TapDash's patched copy,
+[`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse) ([The patched plugin](#the-patched-plugin-tapdash-langfuse)).
+It goes live in [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy), after its pull requests are
+merged. **Until then, what is live is still the unpatched catalog plugin `langfuse`.** The rest of this section names
+the plugin `tapdash-langfuse` and its hook `hermes_plugins.tapdash_langfuse.on_pre_tool_call`, as they are after the
+deploy; before it, read `langfuse` and `hermes_plugins.langfuse.on_pre_tool_call`.
+
 What it records (a hooks-only plugin, no tools):
 
 | Level in Langfuse | What it is |
 |---|---|
-| Trace | One per message turn, named `Hermes turn`. Input = the user's message, output = the final reply. All turns of one chat share a session id, including the turn after an approval |
+| Trace | One per message turn. Input = the user's message, output = the final reply. All turns of one chat share a session id, including the turn after an approval. Named `Hermes turn` while the unpatched plugin is live; with the patched plugin `telegram-turn`, `teams-turn`, `cli-turn` (`<platform>-turn`), `cron-run` for a cron job, or `hermes-turn` when the platform is unknown. `userId` = the chat sender id (patched plugin; none for a turn without a sender). The sender's display name is in the **root observation's** metadata as `user_name` (exported as `langfuse.observation.metadata.user_name`; not trace metadata, so a trace-metadata filter will not find it; it may be non-ASCII and is cut to 200 characters). Tags: any pattern tags such as `park:P-XXXXXXXX` |
 | Generation | One per model call (`LLM call 1`, `LLM call 2`, ...). Input = the system prompt + the last 12 messages; output = the answer; model name and token counts are filled in |
 | Observation | One per tool call (type `TOOL`: arguments and result) and one per subagent. A call that was parked shows level `WARNING` with status message `plugin_block` |
 
@@ -845,6 +892,7 @@ starts. A change needs a restart (ledger check first, see [Turn it off](#turn-it
 | `HERMES_LANGFUSE_MAX_DEPTH` | `16` | no | How many levels of nested data are kept per field. The plugin default (4) cut 16 observations, including the arguments of `create_payment`. 10 still cut the payment's `linked_txn` (11 levels deep inside the tool-call envelope) and the QuickBooks tool schemas. At 16 nothing is cut (checked with the plugin's own serializer: 10 gave 1 + 5 cut-offs, 16 gave none). Cut-off data shows as `<max-depth>` |
 | `HERMES_LANGFUSE_MAX_CHARS` | `50000` | no | Characters kept per field. The default (12000) cut root outputs of about 14,000 characters |
 | `HERMES_LANGFUSE_RELEASE` | `hermes-v0.22.3` | no | The release label on each trace. **Update it when Hermes is upgraded** (`hermes-v<version>`), then restart, so traces can be told apart by version |
+| `HERMES_LANGFUSE_TAG_PATTERNS` | to be added at the deploy (patched plugin only; the catalog plugin ignores it): `park=\bP-[0-9A-F]{8}\b` | no | Trace tags from patterns, `label=regex` pairs separated by `;`. Every match in the turn's original user message (as the person sent it, without the memory and plugin context Hermes adds to the model's copy), a tool call's arguments or a tool's result adds the trace tag `label:value` (value = group 1 if the regex has a group, else the whole match). With this value a trace that mentions park id `P-1A2B3C4D` gets the tag `park:P-1A2B3C4D`. Limits: at most 10 pattern tags per trace; a tag over 200 characters or not US-ASCII is skipped; only the first 200 000 characters of each text are scanned; arguments and results that are not plain strings are scanned as JSON text, so a JSON escape written right before an id (`\n` then `P-...`) hides it from the `\b` ([README](../../tracing/tapdash_langfuse/README.md)); with `HERMES_LANGFUSE_CAPTURE=metadata` no pattern tags are added (a tag would carry content; `userId` and the root observation's metadata `user_name` are still sent in that mode). **Pattern tags are taken from the raw text and are not passed through secret redaction, even in `sanitized` mode**: use only patterns that match non-secret ids. A pattern runs on up to 200 000 characters of each text, so it must not backtrack catastrophically (the root scan runs while the plugin holds its state lock, so a runaway pattern would stall every hook). A bad entry (no `=`, a label that is not `[a-z0-9_-]{1,40}`, or a regex that does not compile) logs one warning and is ignored; the other entries still work |
 | `HERMES_LANGFUSE_PUBLIC_KEY` | the project's public key (`pk-lf-...`) | typed in | Half of the key pair. An identifier rather than a secret on its own, but handled like the other key |
 | `HERMES_LANGFUSE_SECRET_KEY` | the project's secret key (`sk-lf-...`) | yes, typed in | Reads and writes the project's traces |
 
@@ -859,9 +907,140 @@ type in a chat, everything the model is sent and answers, and every tool's argum
 amounts, ids) leaves the VM and sits at Langfuse. That is acceptable for the QuickBooks **sandbox** on the test VM. It
 is a decision to make again before real books ([backlog](backlog.md#before-real-books), item 9).
 
+**What `metadata` and `sanitized` still send.** With the patched plugin, `HERMES_LANGFUSE_CAPTURE=metadata` adds no
+pattern tags, but the trace `userId` (the chat sender id) and the root observation's metadata `user_name` (the sender's
+display name) are still sent, because they are not content. In `sanitized` mode, pattern tags are not redacted: a tag carries the raw
+match, so the patterns must only match non-secret ids (such as park ids), and must not backtrack catastrophically.
+
+### The patched plugin (`tapdash-langfuse`)
+
+**Status: built and tested, not deployed.** A copy of the Nous Research `langfuse` plugin (v2.0.0 @ commit `c2a9596`,
+MIT) lives in this repo at [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse), with TapDash's changes. Every
+change against upstream is listed in [`PATCHES.md`](../../tracing/tapdash_langfuse/PATCHES.md). Decisions and reasons:
+[design](../../docs/specs/2026-10-22-langfuse-trace-gaps-design.md) (D1 to D8). At the deploy it is installed on the VM as a symlink (there is none before then),
+`~/.hermes/plugins/tapdash-langfuse` to `/home/hermes/tapdash-agents/tracing/tapdash_langfuse` (the same pattern as
+durable-park), under the plugin name `tapdash-langfuse` and the import name `hermes_plugins.tapdash_langfuse`. The
+catalog `langfuse` plugin is disabled at the deploy but kept installed, for rollback.
+
+| What changes | How |
+|---|---|
+| `userId` on each trace | The chat sender id Hermes passes to the turn's `pre_llm_call` hook (`sender_id`). Left out when there is none (cron, some CLI turns) or when it is not US-ASCII or is over 200 characters (Langfuse's limits); never altered. The sender's display name goes in the root observation's metadata as `user_name` (it may be non-ASCII; cut to 200 characters; not trace metadata) |
+| Trace names | `<platform>-turn`, `cron-run`, `hermes-turn` (see [the table above](#tracing-langfuse)). The root observation has the same name. Model calls are still `LLM call N` |
+| Trace tags from patterns | `HERMES_LANGFUSE_TAG_PATTERNS` (settings table). A tag found late in a turn (in a tool result) is put on the trace before the root ends, so the filter finds it. Generic: the plugin knows nothing about durable-park |
+
+**No durable-park code and no approval behaviour changes.** The hook durable-park cares about, `on_pre_tool_call`, is
+the same function as upstream's, byte for byte (checked with a diff when the copy was built). The patches scan text in
+`on_post_tool_call` and when the root trace starts, never in `on_pre_tool_call`; the plugin still only observes, returns
+`None` and never changes a call's arguments. Its row is in [Hooks reviewed so far](#hooks-reviewed-so-far).
+
+**Tests.** `bash tracing/run_tests.sh`, as `hermes` on the VM (it uses the Python of the Hermes environment the running gateway uses, falling back to the first environment that
+has `langfuse` and saying which it used; it installs `pytest` into a cache directory outside the repo, and runs with
+warnings as errors). It is upstream's suite plus the new tests,
+without upstream's four `TestSystemPromptCrossesHookBoundary` tests, which re-run Hermes core's request builder (and
+its dependency installer) and cannot run from a checkout (design D8); the script always deselects them, whatever
+arguments you add. One new test runs the real Langfuse SDK in memory, with no network. CI does not run them yet ([backlog](backlog.md#langfuse-tracing-gaps-from-the-2026-10-22-audit), item 6).
+
+### Switch to the patched plugin (deploy)
+
+Not done yet. Do it only after the pull requests with `tracing/` and these docs are merged and the live clone is up to
+date (`git -C /home/hermes/tapdash-agents pull --ff-only`, as in [Deploy a change](#deploy-a-change)). The pull also
+brings the `bridge/` and `deploy/` changes merged with it: `/opt/durable-park` (the bridge's copy) stays at the old code
+until an admin runs `configure_hermes.sh` as [Deploy a change](#deploy-a-change) says for the bridge (ledger check and `hermes-gateway` stopped first: [Before you run the configure script](#before-you-run-the-configure-script)); this deploy does
+not need that. As `hermes`:
+
+**Before you start.** `bash tracing/run_tests.sh` in the live clone: all tests pass. Diff `on_pre_tool_call` against
+upstream: check out <https://github.com/NousResearch/hermes-official-plugins> at commit
+`c2a95963c442f3f23e4bc6fe0da898e1dd1fb63d` into a temporary directory (the plugin is its subdirectory `langfuse`), then
+`diff <(sed -n '/^def on_pre_tool_call/,/^def /p' <temp dir>/langfuse/__init__.py) <(sed -n '/^def on_pre_tool_call/,/^def /p' tracing/tapdash_langfuse/__init__.py)`
+must print nothing.
+
+**Why this order has no unsafe moment.** durable-park refuses calls only when a loaded plugin has a hook that is not on
+`observer_hooks`, and a name on the list whose plugin is not loaded is harmless, so the new name goes on the list first
+and the old name comes off only after the catalog plugin has stopped loading: at every start, planned or after a
+crash, the list is never shorter than the hooks that are loaded. The plugin switch itself (step 3) is done with the
+gateway **stopped**, because `hermes plugins enable|disable` would otherwise reload every plugin inside the running
+gateway ([warning](#never-change-plugins-while-the-gateway-runs)).
+
+**The Hermes environment.** Enabling a plugin that lists `python_dependencies` (this one: `langfuse==4.15.2`) can make
+Hermes create a new environment under `~/.hermes/installs/*/environments/` or switch the gateway to another one (on
+2026-10-22 enabling the catalog plugin created a new directory, [record](acceptance-2026-10-22-langfuse.md)). Before
+step 3 write down which environment the gateway runs:
+`grep -o '/environments/[0-9a-f]*/venv' /proc/$(systemctl --user show hermes-gateway -p MainPID --value)/maps | sort -u`
+(one line; the "Check it works" block below has the same command). Step 4 checks it again.
+
+1. Back up `~/.hermes/.env` and `~/.hermes/config.yaml` with `cp -p` (suffix `.bak-langfuse-gaps-<UTC time>`; `-p` keeps
+   the owner and the mode, and the `.env` copy holds the Langfuse secret key, so check with `ls -l` that it is `600`,
+   `chmod 600` it if not). Then add the new
+   setting once, quoted so the backslashes stay (it holds no secret):
+   `printf '%s\n' 'HERMES_LANGFUSE_TAG_PATTERNS=park=\bP-[0-9A-F]{8}\b' >> ~/.hermes/.env`
+   (end the last line first if it has no newline, as in [Turn it on](#turn-it-on-admin)).
+2. Add `hermes_plugins.tapdash_langfuse.on_pre_tool_call` to `observer_hooks` by hand in `config.yaml`
+   ([Plugin settings](#plugin-settings)), **next to** the existing entries, so the list has three:
+   `hermes_plugins.platforms__raft.adapter._on_pre_tool_call`, `hermes_plugins.langfuse.on_pre_tool_call` and
+   `hermes_plugins.tapdash_langfuse.on_pre_tool_call`. An entry whose plugin is not loaded does no harm
+   (`observer_hooks` is only an allow-list), so this changes nothing for the running gateway. Read it back with
+   `hermes config get plugins.entries.durable-park.settings.observer_hooks` (a list of 3 strings).
+3. Switch the plugin **with the gateway stopped**. Check that no row is `parked`, `approved` or `executing`
+   ([health check](#health-check)), then straight away `systemctl --user stop hermes-gateway`. Then
+   `ln -s /home/hermes/tapdash-agents/tracing/tapdash_langfuse ~/.hermes/plugins/tapdash-langfuse`,
+   `hermes plugins disable langfuse`, `hermes plugins enable tapdash-langfuse`. Each of the two commands prints that no
+   running gateway answered: that is expected (nothing is running to reload).
+4. `systemctl --user start hermes-gateway`, then run [Check it works](#check-it-works): `hermes plugins list` shows
+   `tapdash-langfuse` enabled and `langfuse` disabled, the `durable-park loaded` line counts **3** observer hooks, there
+   is no `foreign pre_tool_call` line, the tool policy is `"ok": true`, and `plugin_load.json` is present. Also check
+   the environment (see above): the `grep` on the new gateway's memory map prints the same single environment as
+   before step 3 (if it printed another one, note which and why before going on), and that environment's Python
+   imports the SDK at the pinned version:
+   `<that venv>/bin/python -c 'import langfuse; print(langfuse.__version__)'` prints `4.15.2`. If either is wrong,
+   roll back (below).
+5. Now the catalog plugin is no longer loaded, so take `hermes_plugins.langfuse.on_pre_tool_call` out of
+   `observer_hooks` (by hand; leave Raft and `hermes_plugins.tapdash_langfuse.on_pre_tool_call`), **in a second
+   stop/start with its own ledger check**: check the ledger, `systemctl --user stop hermes-gateway`, edit the list,
+   read it back (a list of 2 strings), `systemctl --user start hermes-gateway`, and run
+   [Check it works](#check-it-works): the `durable-park loaded` line counts **2** observer hooks and there is still no
+   `foreign pre_tool_call` line.
+6. Send a chat message, then a $1 payment that parks, and approve it. Find the traces by the tag
+   ([Find everything about one approval](#find-everything-about-one-approval)): the parking turn, the approval turn and
+   the run are returned, and the trace names are `telegram-turn` (or the platform's name). `userId` on the parking turn
+   is the sender's chat id. **Check, and write down, the `userId` and name of the approval turn and the run too:** they
+   are started by a message durable-park injects into the chat (`ctx.inject_message`), and whether that turn's agent
+   carries the sender's id was not verified. A missing or different `userId` there is **not** a failure of the deploy
+   and no reason to roll back; the park-id tag is what joins the three traces. The payment must still ask once and run
+   once.
+
+**If the gateway restarts on its own** (a crash restart) at any point above, nothing is refused: before step 3 the
+catalog plugin is loaded and its name is listed; between steps 4 and 5 `tapdash-langfuse` is loaded and both names are
+listed; after step 5 only the new name is needed and listed. Check the ledger and carry on, or roll back (below).
+**Never run the `hermes plugins` commands of step 3 or of the rollback with the gateway running**
+([warning](#never-change-plugins-while-the-gateway-runs)).
+
+**Why the old entry is removed only in the second restart.** **Removing the name of an observer whose plugin is still
+loaded makes durable-park refuse every tool call** (an outage, not a loss of safety; [Allow another
+hook](#allow-another-hook-observer_hooks)). The old name is removed in step 5, after the restart of step 4 has stopped
+loading the catalog plugin, never before. The same holds in reverse for the rollback.
+
+**Rollback** (any failure above). Put back only what the deploy changed, in this order:
+
+1. Make sure `observer_hooks` has Raft, `hermes_plugins.langfuse.on_pre_tool_call` **and**
+   `hermes_plugins.tapdash_langfuse.on_pre_tool_call`: re-add the old name if step 5 already removed it. Read it back.
+2. Check the ledger, `systemctl --user stop hermes-gateway`, then `hermes plugins enable langfuse` and
+   `hermes plugins disable tapdash-langfuse` (each prints that no running gateway answered: expected), then
+   `systemctl --user start hermes-gateway`, and run [Check it works](#check-it-works) with the old names (`langfuse`
+   enabled, 3 observer hooks).
+3. Only now, with `tapdash-langfuse` disabled and that start done, take
+   `hermes_plugins.tapdash_langfuse.on_pre_tool_call` out of `observer_hooks` (Raft and the old name stay; read it back),
+   in another stop/start with its own ledger check: check the ledger, stop `hermes-gateway`, edit, start it: 2 observer
+   hooks.
+
+Restoring the backups from step 1 instead is possible only if nothing else in `.env` or `config.yaml` has changed since
+they were taken; it also needs the ledger check and a stop/start of the gateway. The symlink and the `HERMES_LANGFUSE_TAG_PATTERNS` line can stay (the catalog plugin
+ignores the setting, and a disabled plugin is not loaded).
+
 ### Turn it on (admin)
 
-This is how it was switched on on 2026-10-22; use the same steps to switch it on again after it was turned off.
+This is how the catalog plugin was switched on on 2026-10-22; use the same steps to switch the tracing plugin on again
+after it was turned off (names as after the deploy; the plugin directory is the symlink from step 3 of the
+[deploy](#switch-to-the-patched-plugin-deploy)).
 
 1. In Langfuse (project `proto-agents`, Settings, API keys), create a key pair. The secret key is shown once.
 2. Type the keys in on the VM as `hermes`. Nothing is echoed, nothing goes in chat or the repo:
@@ -876,39 +1055,53 @@ This is how it was switched on on 2026-10-22; use the same steps to switch it on
 
 3. Check that the non-secret settings in the table above are in `.env` (names only: `grep -c '^HERMES_LANGFUSE_' ~/.hermes/.env`
    counts the lines; `grep -o '^HERMES_LANGFUSE_[A-Z_]*' ~/.hermes/.env` lists the names). Add any that are missing.
-   Also check that `hermes config get plugins.entries.durable-park.settings.observer_hooks` still lists
-   `hermes_plugins.langfuse.on_pre_tool_call` (it is taken out only under "remove for good" below). Without it,
-   durable-park refuses every tool call once the plugin is enabled (an outage, not a loss of safety).
-4. `hermes plugins enable langfuse`.
-5. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)), and restart `hermes-gateway`
-   straight after, so no approval can be parked in between. Then run [Check it works](#check-it-works).
+   Also check that `hermes config get plugins.entries.durable-park.settings.observer_hooks` lists
+   `hermes_plugins.tapdash_langfuse.on_pre_tool_call`. It is missing after "Remove for good" below: then **add it now**,
+   by hand in `config.yaml`, and read the list back, before step 4. While the gateway still runs this is only a config
+   edit and changes nothing until the next start; the name must be there before step 6 starts the gateway, because
+   without it durable-park refuses every tool call once the plugin is loaded (an outage, not a loss of safety).
+4. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)), then straight away
+   `systemctl --user stop hermes-gateway`, so no approval can be parked in between and no plugin reload reaches a
+   running gateway ([warning](#never-change-plugins-while-the-gateway-runs)).
+5. `hermes plugins enable tapdash-langfuse` (and the catalog `langfuse` plugin must stay disabled: with both enabled
+   every turn is traced twice, and the second hook needs its own `observer_hooks` entry). The command prints that no
+   running gateway answered: that is expected.
+6. `systemctl --user start hermes-gateway`, then run [Check it works](#check-it-works).
 
 ### Check it works
 
 ```sh
-hermes plugins list | grep -i -e langfuse -e durable-park      # langfuse enabled, durable-park enabled
+hermes plugins list | grep -i -e langfuse -e durable-park      # tapdash-langfuse enabled, langfuse disabled, durable-park enabled
 grep -i -e 'durable-park loaded' -e 'foreign pre_tool_call' ~/.hermes/logs/agent.log | tail
 grep -e 'Langfuse plugin:' -e 'Langfuse tracing:' ~/.hermes/logs/agent.log | tail     # nothing dated after the last start (older lines also match)
-grep 'plugin=langfuse' ~/.hermes/logs/agent.log | tail -3
+grep 'plugin=.*langfuse' ~/.hermes/logs/agent.log | tail -3
 cat ~/.hermes/plugin-data/durable-park/tool_policy_status.json       # "ok": true
 cat ~/.hermes/plugin-data/durable-park/plugin_load.json            # present, pid = the gateway's MainPID
+# which Hermes environment the gateway runs (one line), and that its Python has the pinned SDK (4.15.2):
+V=$(grep -o '/environments/[0-9a-f]*/venv' /proc/$(systemctl --user show hermes-gateway -p MainPID --value)/maps | sort -u)
+echo "$V"; ~/.hermes/installs/*"$V"/bin/python -c 'import langfuse; print(langfuse.__version__)'
 ```
 
 What good looks like (seen on 2026-10-22):
 
-- `hermes plugins list` shows `langfuse` enabled.
-- The `durable-park loaded: ... 2 observer hook(s) ...` line (two: Raft and Langfuse), and **no**
-  `foreign pre_tool_call hook(s) present` line. If there is one, the Langfuse hook name is not listed, and durable-park
-  refuses every call ([Allow another hook](#allow-another-hook-observer_hooks)).
+- `hermes plugins list` shows `langfuse` enabled (seen on 2026-10-22, before the patched plugin). After the deploy it
+  must show `tapdash-langfuse` enabled and `langfuse` disabled.
+- The `durable-park loaded: ... 2 observer hook(s) ...` line (two: Raft and Langfuse; 3 between steps 4 and 5 of the deploy, while both Langfuse names are listed), and **no**
+  `foreign pre_tool_call hook(s) present` line. If there is one, the Langfuse hook name is not listed (or the other
+  Langfuse plugin is still loaded), and durable-park refuses every call ([Allow another hook](#allow-another-hook-observer_hooks)).
 - The Langfuse plugin writes **no "loaded" line**, so do not look for one. A missing or placeholder key is the only thing
   it complains about, with a warning that starts `Langfuse plugin:` or `Langfuse tracing:`. None must appear after the
-  last start.
-- Every start logs `capability_check plugin=langfuse capability=tools.override decision=deny`. That is normal and
+  last start. The patched plugin also logs one warning for each bad entry of `HERMES_LANGFUSE_TAG_PATTERNS`: there
+  must be none for the live value.
+- Every start logs `capability_check plugin=<plugin name> capability=tools.override decision=deny`
+  (`langfuse` seen on 2026-10-22; not yet seen for `tapdash-langfuse`). That is normal and
   harmless: the plugin asks for a capability it does not need and is refused.
 - `tool_policy_status.json` has `"ok": true` and `plugin_load.json` exists.
-- Send one chat message. After a short delay a trace named `Hermes turn` appears in Langfuse (project
-  `proto-agents`, environment `proto-agents`, release as in the table) with the full text. See
+- Send one chat message. After a short delay a trace appears in Langfuse (project `proto-agents`, environment
+  `proto-agents`, release as in the table) with the full text: named `Hermes turn` with the unpatched plugin, and
+  with the patched plugin named `telegram-turn` (or the platform's name) with `userId` = the sender's chat id. See
   [Read traces](#read-traces).
+- With the patched plugin: a message or tool result that contains a park id gives the trace the tag `park:P-...`.
 - Make one QuickBooks call. It must still be asked about in withHuman as before, and a parked payment must still run
   at most once. Tracing changes none of that.
 
@@ -949,6 +1142,40 @@ Change `fromStartTime` (UTC) to the start of the window you want. Print only wha
 level, trace id): the rows hold full chat and tool content. With `npx langfuse-cli`, export the keys into the
 process environment the same way (from the `.env` lines, without echoing) and do not pass them as arguments.
 
+### Find everything about one approval
+
+With the patched plugin (and `HERMES_LANGFUSE_TAG_PATTERNS` set as in the settings table) every trace that mentions
+a park id carries the tag `park:P-XXXXXXXX`: the turn that parked the call (the id is in the tool result), the turn
+after the approval (`[durable-park] P-... was APPROVED ...`) and the run (`"park_id": "P-..."`, in the same trace as
+the approval turn). **Filter the traces by that tag.** In the Langfuse web app: Tracing, Filter, Tags, pick
+`park:P-XXXXXXXX` (the exact menu path in the web app has not been checked). From the VM, call the v2 observations
+endpoint with `fields=core,basic,trace_context` and a `filter` that is the URL-encoded JSON list below. The keys are
+loaded into the process only, as in [Read traces](#read-traces), and never printed. The park id comes from the ledger or
+the approval message.
+
+```sh
+python3 - <<'PY'
+import base64, json, os, urllib.parse, urllib.request
+env = {}
+for line in open(os.path.expanduser("~/.hermes/.env")):
+    if line.startswith("HERMES_LANGFUSE_"):
+        k, _, v = line.rstrip("\n").partition("=")
+        env[k] = v.strip().strip("'\"")
+auth = base64.b64encode(
+    (env["HERMES_LANGFUSE_PUBLIC_KEY"] + ":" + env["HERMES_LANGFUSE_SECRET_KEY"]).encode()).decode()
+flt = [{"type": "arrayOptions", "column": "traceTags", "operator": "any of", "value": ["park:P-XXXXXXXX"]}]
+url = (env["HERMES_LANGFUSE_BASE_URL"] + "/api/public/v2/observations?fields=core,basic,trace_context&limit=100&filter="
+       + urllib.parse.quote(json.dumps(flt)))
+body = json.load(urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": "Basic " + auth}), timeout=30))
+for r in body.get("data", []):
+    print(r["traceId"], r.get("type"), r.get("name"))   # ids and names only: the rows hold full content
+PY
+```
+
+It returns the observations of every trace that carries the tag: the parking turn, the approval turn and the run (the
+same `traceId` for the last two). Follow `meta.cursor` for more than 100 rows, as in Read traces. Traces from before
+the deploy have no such tag: search them by the park id in the text.
+
 ### Secret scan (how it was done, and how to repeat it)
 
 Full capture means a secret that reaches the model or a tool result would also reach Langfuse, so the traces were
@@ -972,20 +1199,26 @@ Expect exactly one kind of hit: the public key in `scope.attributes.public_key`.
 ### Turn it off
 
 1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
-2. `hermes plugins disable langfuse`, then restart `hermes-gateway`. Nothing is sent after the restart.
-   Traces already sent stay in Langfuse until its 30-day window on the free plan has passed.
+2. `systemctl --user stop hermes-gateway`, then `hermes plugins disable tapdash-langfuse` (it prints that no running
+   gateway answered: expected; never run it with the gateway running, see the
+   [warning](#never-change-plugins-while-the-gateway-runs)), then `systemctl --user start hermes-gateway`. Nothing is
+   sent after the start. Traces already sent stay in Langfuse until its 30-day window on the free plan has passed.
 
-Leave `hermes_plugins.langfuse.on_pre_tool_call` in `observer_hooks` for now: a listed hook that is not loaded does no
-harm. But **do not update or reinstall the plugin while it is enabled**, and never enable an updated plugin before its
-hook has been reviewed: the name stays listed, so a changed hook would be allowed silently at the next restart. See
-[When the plugin changes](#when-the-plugin-changes).
+Leave `hermes_plugins.tapdash_langfuse.on_pre_tool_call` in `observer_hooks` for now: a listed hook that is not loaded
+does no harm. But **do not change the plugin's code while it is enabled** without the review in
+[When the plugin changes](#when-the-plugin-changes), and never enable a changed plugin before its hook has been
+reviewed: the name stays listed, so a changed hook would be allowed silently at the next restart. To go back to the
+unpatched catalog plugin instead of switching tracing off, use the rollback in
+[Switch to the patched plugin](#switch-to-the-patched-plugin-deploy).
 
 To remove it for good, **in this order**:
 
 1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
-2. `hermes plugins disable langfuse` (or remove the plugin), then restart `hermes-gateway`. The plugin is no longer loaded.
-3. Only now take `hermes_plugins.langfuse.on_pre_tool_call` out of `observer_hooks` (and its row in
-   [Hooks reviewed so far](#hooks-reviewed-so-far)). Check the ledger again, then restart `hermes-gateway` again.
+2. `systemctl --user stop hermes-gateway`, then `hermes plugins disable tapdash-langfuse` (or remove the plugin; the
+   command prints that no running gateway answered: expected), then `systemctl --user start hermes-gateway`. The plugin
+   is no longer loaded.
+3. Only now take `hermes_plugins.tapdash_langfuse.on_pre_tool_call` out of `observer_hooks` (and its row in
+   [Hooks reviewed so far](#hooks-reviewed-so-far)): check the ledger again, stop `hermes-gateway`, edit, start it again.
 4. Delete the two key lines from `~/.hermes/.env` and revoke the key pair in Langfuse.
 
 Why this order: while the plugin is still loaded, its hook is a foreign `pre_tool_call` hook. If it is taken out of
@@ -1007,24 +1240,31 @@ hook](#allow-another-hook-observer_hooks)).
 
 ### When the plugin changes
 
-The hook is listed in `observer_hooks` because of the code that was read: v2.0.0 at commit `c2a9596`. The listing is by
-name only, so an updated plugin whose hook now does something else would be allowed silently at the next gateway restart
-(a crash restart is enough). So **never update or reinstall the plugin while it is enabled.** In this order:
+The hook is listed in `observer_hooks` because of the code that was read: upstream v2.0.0 at commit `c2a9596`, and our
+copy's `on_pre_tool_call`, which is byte-identical to it. The listing is by name only, so a changed hook that now does
+something else would be allowed silently at the next load of the plugin: a gateway restart (a crash restart is
+enough) **or any plugin reload** (`hermes plugins enable|disable` of any plugin, the dashboard's plugin toggle), which
+loads the changed code too. Because, once deployed, the plugin is a symlink into the live clone, `git pull` in the live clone changes
+the code that next load uses. So a change under `tracing/tapdash_langfuse/` goes live only like this:
 
-1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
-2. `hermes plugins disable langfuse`, then restart `hermes-gateway`. The plugin is no longer loaded; leave the
-   `observer_hooks` entry in place.
-3. Update the plugin and pin the new version and commit (for example `hermes plugins install langfuse --yes-deps
-   --no-enable`, then confirm the commit). Do not enable it.
-4. Read the new hook again (steps 2 and 3 of [Allow another hook](#allow-another-hook-observer_hooks)) and update its row
-   in [Hooks reviewed so far](#hooks-reviewed-so-far). If you cannot confirm it never returns `modify`, do not enable it:
-   take the entry out as in "remove for good" under [Turn it off](#turn-it-off). Also update the version in the root
-   [Built on](../../README.md#built-on) table.
-5. Check the ledger again, `hermes plugins enable langfuse`, restart `hermes-gateway`, then run
-   [Check it works](#check-it-works) (the `durable-park loaded` line must still count 2 observer hooks and show no
-   `foreign pre_tool_call` line).
+1. In your worktree: `bash tracing/run_tests.sh` passes, and `on_pre_tool_call` still matches the upstream function
+   (the diff under "Before you start" in the [deploy](#switch-to-the-patched-plugin-deploy) prints nothing), or the changed hook is
+   read again (steps 2 and 3 of [Allow another hook](#allow-another-hook-observer_hooks)). If you cannot confirm it
+   never returns `modify`, do not merge it. List the change in `PATCHES.md`.
+2. Update its row in [Hooks reviewed so far](#hooks-reviewed-so-far) (a new date and what was read), and, for a new
+   upstream version, the version in the root [Built on](../../README.md#built-on) table.
+3. Only then pull into the live clone, with the gateway stopped so nothing can load the new code before it is
+   started on purpose: check that no row is `parked`, `approved` or `executing` ([health check](#health-check)),
+   `systemctl --user stop hermes-gateway`, `git -C /home/hermes/tapdash-agents pull --ff-only`,
+   `systemctl --user start hermes-gateway`, then run [Check it works](#check-it-works) (the `durable-park loaded` line
+   must still count 2 observer hooks and show no `foreign pre_tool_call` line). The pull also brings any `bridge/` and
+   `deploy/` changes merged meanwhile: `/opt/durable-park` stays at the old code until an admin runs
+   `configure_hermes.sh` ([Deploy a change](#deploy-a-change); check the ledger and stop `hermes-gateway` first: [Before you run the configure script](#before-you-run-the-configure-script)); a plugin update does not need that.
 
-After a **Hermes upgrade**, also set `HERMES_LANGFUSE_RELEASE` to the new version (`hermes-v<version>`) and restart, so
+To take a newer upstream version: copy it over the vendored files, re-apply the changes listed in `PATCHES.md`, and
+do steps 1 to 3. Never use `hermes plugins install langfuse` to update: it would change the catalog copy, not ours.
+
+After a **Hermes upgrade**, also set `HERMES_LANGFUSE_RELEASE` to the new version (`hermes-v<version>`) and restart (ledger check first: no row `parked`, `approved` or `executing`, [health check](#health-check)), so
 new traces carry the right release.
 
 ## Add a form-checked tool
@@ -1236,6 +1476,11 @@ Several secrets were pasted into chat during testing (approved for testing only)
   nothing restarts them at boot until you do this. The config rollback does not undo the venv switch: the install's
   `facts.json` now points at venv `58c7a333` (the Teams packages) and the old venv `e74ec07b` still exists. Only with nothing `parked`, `approved` or
   `executing`. Plan: [docs/plans/2026-10-20-one-agent-merge.md](../../docs/plans/2026-10-20-one-agent-merge.md).
+- **The patched Langfuse plugin (once deployed)**: go back to the unpatched catalog plugin with the rollback in
+  [Switch to the patched plugin](#switch-to-the-patched-plugin-deploy): enable `langfuse`, disable `tapdash-langfuse`
+  **with the gateway stopped** (never with it running, see the [warning](#never-change-plugins-while-the-gateway-runs)),
+  and make `observer_hooks` match the plugin that is loaded (the old name goes back first, the new name comes off only
+  after a restart), each stop/start with nothing `parked`, `approved` or `executing`.
 - **Code**: `git revert <commit>` in the clone, push, then make it live as in [Deploy a change](#deploy-a-change).
   For the bridge and receiver that includes copying the reverted files to `/opt/durable-park` again: the root
   copies do not change by themselves.

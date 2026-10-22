@@ -87,6 +87,8 @@ Neither the plugin nor the receiver checks the references themselves. This is th
 > `approved` or `executing`. See [Agent tool policy](#agent-tool-policy-v1-lockdown-re-applied-on-proto-agents)
 > and the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.1.
 
+**Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes.**
+
 ```sh
 sudo bash /home/hermes/durable-park/deploy/configure_hermes.sh
 ```
@@ -164,7 +166,7 @@ in the same gateway (since 2026-10-21), so only the `durable-park-sweep` cron jo
 
 ## Agent tool policy (v1 lockdown, re-applied on proto-agents)
 
-> **Status:** the v1 lockdown is applied on proto-agents since 2026-10-21 03:16 UTC, as a stopgap. It had been lifted by hand (decided 2026-10-20) and was re-applied 2026-10-21 03:16 UTC. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC; [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1): `hermes` has no sudo. The ledger is still owned by `hermes` (Phase 2 not done), so the lockdown is still a configuration guard for the ledger, not a permission boundary (see [architecture](architecture.md#the-three-guarantees)). Hermes approvals stay off. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing row" rule applies. The text below says what the lockdown does and why.
+> **Status:** the v1 lockdown is applied on proto-agents since 2026-10-21 03:16 UTC, as a stopgap. It had been lifted by hand (decided 2026-10-20) and was re-applied 2026-10-21 03:16 UTC. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC; [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1): `hermes` has no sudo. The ledger is still owned by `hermes` (Phase 2 not done), so the lockdown is still a configuration guard for the ledger, not a permission boundary (see [architecture](architecture.md#the-three-guarantees)). Hermes approvals stay off. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing row" rule applies. Before you run `configure_hermes.sh`: check the ledger (no `parked`, `approved` or `executing` rows), then stop `hermes-gateway` ([Before you run the configure script](runbook.md#before-you-run-the-configure-script)). The script starts it again when it finishes. The text below says what the lockdown does and why.
 
 The agent's tools run as the `hermes` user. That user owns the ledger and can read `instance_token`. So
 an agent with a terminal or file tool, for example one hijacked by a prompt injection, could write ledger rows

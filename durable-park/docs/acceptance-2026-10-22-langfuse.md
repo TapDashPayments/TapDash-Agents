@@ -1,6 +1,6 @@
 # durable-park: acceptance record, Langfuse tracing (2026-10-22)
 
-**Result: PASSED. Langfuse tracing is live on the test VM `proto-agents` and does not change how approvals work.**
+**Result: PASSED. Langfuse tracing is live on the test VM `proto-agents` (the unpatched catalog `langfuse` plugin; TapDash's patched copy is not deployed) and does not change how approvals work.**
 Every chat message, model call and tool call is copied, with its full content, to Langfuse Cloud (US). A $1
 payment still asked a human once in withHuman and ran once. Four gaps need code (recommendations in the
 [backlog](backlog.md#langfuse-tracing-gaps-from-the-2026-10-22-audit)); none changes what runs. One more item, the
@@ -19,12 +19,30 @@ Langfuse public key in span metadata, is noted and is not a gap.
 |---|---|
 | 04:24 | Plugin installed, left disabled; its hook `hermes_plugins.langfuse.on_pre_tool_call` added to `observer_hooks` next to the Raft one |
 | about 04:35 | Yaakov typed the Langfuse keys into `~hermes/.hermes/.env` |
-| 04:37:45 | Ledger had no active row; `hermes plugins enable langfuse`; gateway restarted (PID 370372 to 409800) |
+| 04:37:28 | `hermes plugins enable langfuse` ran with the gateway still running. **It reloaded every plugin inside the running gateway** (see the note below the table) |
+| 04:37:45 | Ledger had no active row; gateway restarted (PID 370372 to 409800; the log shows the stop at 04:37:46 and durable-park loading again at 04:37:51) |
 | 04:40 to 04:52 | Yaakov's Telegram test, one chat session (four traces, below) |
 | 04:57:37 | Added `MAX_DEPTH=10`, `MAX_CHARS=50000`, `RELEASE=hermes-v0.22.3`; ledger empty; restart (PID 409800 to 413587) |
 | 04:59 | Smoke turn (`hermes chat -q`) and the first secret scan |
 | 13:39 | Yaakov's second invoice lookup still showed `<max-depth>` |
 | 13:42:18 | `MAX_DEPTH=16`; ledger empty; restart (PID 413587 to 469072); secret scan repeated |
+
+**Found afterwards (strong review of PR #32, 2026-10-22): the enable reloaded the running gateway.** The record above
+lists only "enable; gateway restarted", so this was not noticed on the day. `hermes plugins enable` (and `disable`) does
+not wait for a restart: Hermes v0.22.3 asks the running gateway to reload all its plugins at once
+(`hermes_cli/plugins_cmd.py`, `hermes_cli/plugins_activation.py`, `gateway/control_socket.py` verb `reload-plugins`).
+`agent.log` shows it: at 04:37:28 UTC `gateway.run_plugin_rewire` logged `Re-wired plugin handlers on 4 adapter(s)` and
+durable-park registered again and logged `durable-park tool policy check failed (stale); refusing every tool call` at
+ERROR. From then until the gateway stopped at 04:37:46 (about 18 s; it loaded again at 04:37:51), durable-park refused
+every tool call. For a fraction of a second (about 0.1 s) while the plugins were unloaded and loaded, the
+`pre_tool_call` hook list was empty, so a call that started in that instant would have run with no durable-park check
+(a QuickBooks call would still have been held by withHuman's gateway and the bridge). **No tool call was recorded in
+that window:** the ledger has no row created between 04:00 and 04:50 UTC (its first row after 04:00 is 04:50:25), `agent.log`
+has no tool call or model request between 04:37:19 and the restart, and the gateway reported 0 active sessions when it
+stopped. Nothing ran unchecked and no approval was affected. The rule that follows is in the runbook: stop the gateway
+before any plugin enable or disable, and never reload plugins with the gateway running
+([warning](runbook.md#never-change-plugins-while-the-gateway-runs)); making durable-park itself safe across a live
+reload is a backlog item ([backlog](backlog.md#before-real-books), item 11).
 
 ## Checks
 
