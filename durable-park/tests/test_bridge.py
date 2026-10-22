@@ -776,3 +776,134 @@ def test_main_refuses_to_start_on_a_bad_api_base(monkeypatch, tmp_path):
     message = str(exc.value.code)
     assert "--api-base" in message and "https" in message
     assert FAKE_KEY not in message and "insecure.example" not in message
+
+
+# ---- systemd socket activation ---------------------------------------------------------------
+
+NO_SYSTEMD_SOCKET = "--systemd-socket: no socket from systemd (LISTEN_PID/LISTEN_FDS)"
+
+
+def _clear_listen_env(monkeypatch):
+    for name in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES", "DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_systemd_listen_fd_returns_fd_3_for_our_pid_and_one_socket():
+    assert bridge_app.systemd_listen_fd({"LISTEN_PID": "4242", "LISTEN_FDS": "1"}, 4242) == 3
+
+
+@pytest.mark.parametrize("environ", [
+    {},
+    {"LISTEN_FDS": "1"},
+    {"LISTEN_PID": "4242"},
+    {"LISTEN_PID": "4243", "LISTEN_FDS": "1"},      # socket was meant for another process
+    {"LISTEN_PID": "4242", "LISTEN_FDS": "2"},      # more than the one socket we expect
+    {"LISTEN_PID": "4242", "LISTEN_FDS": "0"},
+    {"LISTEN_PID": "4242", "LISTEN_FDS": ""},
+    {"LISTEN_PID": "not-a-pid", "LISTEN_FDS": "1"},
+    {"LISTEN_PID": "", "LISTEN_FDS": "1"},
+])
+def test_systemd_listen_fd_refuses_anything_but_our_pid_and_exactly_one_fd(environ):
+    with pytest.raises(SystemExit) as exc:
+        bridge_app.systemd_listen_fd(environ, 4242)
+    assert exc.value.code == NO_SYSTEMD_SOCKET
+
+
+def test_parse_args_systemd_socket_is_off_by_default(monkeypatch):
+    _clear_listen_env(monkeypatch)
+    assert parse_args([]).systemd_socket is False
+
+
+def test_parse_args_systemd_socket_flag_enables_it_and_leaves_host_and_port_unset(monkeypatch):
+    _clear_listen_env(monkeypatch)
+    ns = parse_args(["--systemd-socket"])
+    assert (ns.systemd_socket, ns.host, ns.port) == (True, None, None)
+
+
+def test_parse_args_systemd_socket_env_enables_it(monkeypatch):
+    _clear_listen_env(monkeypatch)
+    monkeypatch.setenv("DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET", "1")
+    assert parse_args([]).systemd_socket is True
+
+
+@pytest.mark.parametrize("value", ["0", "", "true", "yes"])
+def test_parse_args_systemd_socket_env_only_enables_on_exactly_1(monkeypatch, value):
+    _clear_listen_env(monkeypatch)
+    monkeypatch.setenv("DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET", value)
+    ns = parse_args([])
+    assert (ns.systemd_socket, ns.host, ns.port) == (False, "127.0.0.1", 8791)
+
+
+@pytest.mark.parametrize("extra", [["--host", "127.0.0.1"], ["--port", "8791"],
+                                   ["--host", "0.0.0.0", "--port", "9"]])
+def test_parse_args_systemd_socket_with_explicit_host_or_port_is_a_usage_error(monkeypatch, capsys, extra):
+    _clear_listen_env(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["--systemd-socket", *extra])
+    assert exc.value.code == 2  # argparse usage error
+    assert "--systemd-socket cannot be combined with --host or --port" in capsys.readouterr().err
+
+
+def test_parse_args_systemd_socket_env_with_explicit_port_is_a_usage_error(monkeypatch, capsys):
+    _clear_listen_env(monkeypatch)
+    monkeypatch.setenv("DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET", "1")
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["--port", "9"])
+    assert exc.value.code == 2
+    assert "--systemd-socket cannot be combined with --host or --port" in capsys.readouterr().err
+
+
+def test_main_without_the_flag_still_serves_on_host_and_port_defaults(monkeypatch, tmp_path):
+    import uvicorn
+    _clear_listen_env(monkeypatch)
+    served = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: served.update(kw))
+    secret, key = tmp_path / "secret", tmp_path / "key"
+    secret.write_text(SECRET)
+    key.write_text(FAKE_KEY)
+    bridge_app.main(["--secret-file", str(secret), "--key-file", str(key)])
+    assert served == {"host": "127.0.0.1", "port": 8791, "log_level": "info", "access_log": False}
+
+
+def test_main_with_systemd_socket_serves_on_fd_3_and_scrubs_the_listen_environment(monkeypatch, tmp_path):
+    import os
+    import uvicorn
+    _clear_listen_env(monkeypatch)
+    monkeypatch.setenv("LISTEN_PID", str(os.getpid()))
+    monkeypatch.setenv("LISTEN_FDS", "1")
+    monkeypatch.setenv("LISTEN_FDNAMES", "durable-park-bridge.socket")
+    served = {}
+
+    def fake_run(app, **kw):
+        served.update(kw)
+        served["env_at_serve"] = {n: os.environ.get(n) for n in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES")}
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    secret, key = tmp_path / "secret", tmp_path / "key"
+    secret.write_text(SECRET)
+    key.write_text(FAKE_KEY)
+    bridge_app.main(["--systemd-socket", "--secret-file", str(secret), "--key-file", str(key)])
+    assert served["fd"] == 3
+    assert "host" not in served and "port" not in served
+    assert (served["log_level"], served["access_log"]) == ("info", False)
+    assert served["env_at_serve"] == {"LISTEN_PID": None, "LISTEN_FDS": None, "LISTEN_FDNAMES": None}
+
+
+@pytest.mark.parametrize("env", [
+    {},
+    {"LISTEN_PID": "1", "LISTEN_FDS": "1"},         # a pid that is not ours
+    {"LISTEN_PID": "__OURS__", "LISTEN_FDS": "2"},
+])
+def test_main_with_systemd_socket_and_no_socket_from_systemd_serves_nothing(monkeypatch, tmp_path, env):
+    import os
+    import uvicorn
+    _clear_listen_env(monkeypatch)
+    for name, value in env.items():
+        monkeypatch.setenv(name, str(os.getpid()) if value == "__OURS__" else value)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: pytest.fail("the server must not start"))
+    secret, key = tmp_path / "secret", tmp_path / "key"
+    secret.write_text(SECRET)
+    key.write_text(FAKE_KEY)
+    with pytest.raises(SystemExit) as exc:
+        bridge_app.main(["--systemd-socket", "--secret-file", str(secret), "--key-file", str(key)])
+    assert exc.value.code == NO_SYSTEMD_SOCKET
