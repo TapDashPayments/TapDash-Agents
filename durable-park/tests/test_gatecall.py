@@ -11,8 +11,8 @@ from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
 from agentapprovalprotocol._gate import submission
 from durable_park.gatecall import (
-    GateHolder, LiftStatus, MAX_LIFT_ENTRIES, build_call, lift_gateway_context, make_gate, platform_of,
-    redact_arguments, server_label)
+    GateHolder, LiftStatus, MAX_LIFT_ENTRIES, build_call, find_leftover_notes, is_note_key, lift_gateway_context,
+    make_gate, platform_of, redact_arguments, server_label, text_form_note_keys)
 from durable_park.ledger import Ledger
 
 
@@ -309,7 +309,7 @@ PLAIN = {"type": "object", "properties": {"criteria": {"type": "string"}}}
 
 def lift_report(args, schema):
     problems = []
-    return lift_gateway_context(args, schema, on_problem=lambda kind, key: problems.append((kind, key))), problems
+    return lift_gateway_context(args, schema, on_problem=lambda kind, key, detail: problems.append((kind, key, detail))), problems
 
 
 @pytest.mark.parametrize("schema", [
@@ -328,7 +328,7 @@ def lift_report(args, schema):
         "pattern", "siblings"])
 def test_lift_skips_a_key_whose_rules_declare_the_field(schema):
     result, problems = lift_report(NOTE_ARGS, schema)
-    assert result == NOTE_ARGS and problems == [("declared", "params")]
+    assert result == NOTE_ARGS and problems == [("declared", "params", "")]
 
 
 @pytest.mark.parametrize("schema", [
@@ -383,11 +383,11 @@ def test_lift_reports_declared_only_for_keys_that_carry_a_note_and_never_values(
     schema["properties"]["zz"] = DECLARING
     args = {"params": {"withhuman_context": "private note"}, "zz": {"withhuman_context": "other"}}
     result, problems = lift_report(args, schema)
-    assert result == args and problems == [("declared", "params"), ("declared", "zz")]
+    assert result == args and problems == [("declared", "params", ""), ("declared", "zz", "")]
 
 
 def test_lift_survives_a_failing_on_problem_callback():
-    def boom(kind, key):
+    def boom(kind, key, detail):
         raise RuntimeError("callback bug")
 
     assert lift_gateway_context(NOTE_ARGS, ctx_schema(DECLARING), on_problem=boom) == NOTE_ARGS
@@ -415,6 +415,123 @@ def test_lift_still_lifts_when_the_nested_rules_are_plain():
         "params": {}, "withhuman_context": "n"}
 
 
+# ---- dropped notes, leftovers, the sanitized-key case ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("args,reason,key", [
+    ({"params": {"withhuman_context": {"why": "x"}}}, "not text", "params"),
+    ({"params": {"withhuman_context": 7}}, "not text", "params"),
+    ({"params": {"withhuman_context": None}}, "not text", "params"),
+    ({"params": {"withhuman_context": ""}}, "empty", "params"),
+    ({"params": {"withhuman_context": "nested"}, "withhuman_context": "top"}, "another note was already at the top", "params"),
+    ({"params": {"withhuman_context": "nested"}, "withhuman_context": ""}, "another note was already at the top", "params"),
+    ({"a": {"withhuman_context": "first"}, "b": {"withhuman_context": "second"}}, "more than one note", "b"),
+])
+def test_lift_reports_a_note_that_is_removed_but_not_moved(args, reason, key):
+    result, problems = lift_report(args, GW_SCHEMA_FOR_DROPS)
+    assert ("note_dropped", key, reason) in problems
+    assert all(kind == "note_dropped" for kind, _, _ in problems)
+    assert not any(isinstance(v, dict) and "withhuman_context" in v for v in result.values())
+
+
+GW_SCHEMA_FOR_DROPS = {"properties": {"params": {"type": "object"}, "withhuman_context": {"type": "string"}}}
+
+
+def test_lift_does_not_report_a_note_that_is_the_one_shown_or_an_exact_copy_of_it():
+    assert lift_report({"params": {"withhuman_context": "same"}, "withhuman_context": "same"},
+                       GW_SCHEMA_FOR_DROPS) == ({"params": {}, "withhuman_context": "same"}, [])
+    assert lift_report({"a": {"withhuman_context": "same"}, "b": {"withhuman_context": "same"}},
+                       GW_SCHEMA_FOR_DROPS) == ({"a": {}, "b": {}, "withhuman_context": "same"}, [])
+    result, problems = lift_report({"a": {"withhuman_context": "same"}, "b": {"withhuman_context": "other"}},
+                                   GW_SCHEMA_FOR_DROPS)
+    assert problems == [("note_dropped", "b", "more than one note")] and result["withhuman_context"] == "same"
+
+
+def test_lift_judges_a_key_the_rules_do_not_list_by_the_other_properties():
+    """Hermes may show the model a sanitized spelling of a property name: a key the rules do not list is skipped when
+    another property declares the field (when in doubt, leave it alone and say so)."""
+    schema = {"properties": {"wire_name": DECLARING, "withhuman_context": {"type": "string"}}}
+    args = {"sanitized_name": {"withhuman_context": "x"}}
+    assert lift_report(args, schema) == (args, [("declared", "sanitized_name", "")])
+    plain = {"properties": {"wire_name": PLAIN, "withhuman_context": {"type": "string"}}}
+    assert lift_report(args, plain) == ({"sanitized_name": {}, "withhuman_context": "x"}, [])
+
+
+@pytest.mark.parametrize("name", ["withhuman_context", "WithHuman_Context", "_withhuman_context", "withhuman_context__",
+                                  "WITHHUMAN_CONTEXT"])
+def test_note_key_spellings(name):
+    assert is_note_key(name)
+
+
+@pytest.mark.parametrize("name", ["withhuman_scope", "withhuman_context_x", "context", "", 5, None])
+def test_other_keys_are_not_the_note(name):
+    assert not is_note_key(name)
+
+
+@pytest.mark.parametrize("args,paths", [
+    ({"params": {"criteria": {"withhuman_context": "x"}}}, ["params.criteria.withhuman_context"]),
+    ({"params": [{"a": 1, "withhuman_context": "x"}]}, ["params[0].withhuman_context"]),
+    ({"params": {"items": [{"a": 1}, {"b": {"withhuman_context": "x"}}]}}, ["params.items[1].b.withhuman_context"]),
+    ({"params": "{'a':1,'withhuman_context':'x'}"}, ["params"]),  # not strict JSON, still contains the name
+    ({"params": '{"a":1,"withhuman_context":"x"'}, ["params"]),  # truncated
+    ({"params": '{"a":1,"withhuman_context":"x"}'}, ["params.withhuman_context"]),
+    ({"params": '{"a":1,"_withhuman_context_":"x"}'}, ["params._withhuman_context_"]),
+    ({"params": '[{"withhuman_context":"x"}]'}, ["params[0].withhuman_context"]),
+    ({"params": '"{\\"withhuman_context\\": \\"x\\"}"'}, ["params.withhuman_context"]),  # double encoded
+    ({"params": '{"\\u0077ithhuman_context": "x"}'}, ["params.withhuman_context"]),  # escaped spelling
+    ({"params": {"WithHuman_Context": "x"}}, ["params.WithHuman_Context"]),
+    ({"_withhuman_context": "x"}, ["_withhuman_context"]),  # a top-level misspelling is not the gateway's field
+    ({"params": {"a": 1}, "withhuman_context": "the real top-level note"}, []),
+    ({"params": {"a": "plain text"}}, []),
+    ({"params": "7", "q": "[1, 2]", "r": "null"}, []),
+])
+def test_find_leftover_notes_finds_every_shape_with_a_path_and_no_values(args, paths):
+    hits, incomplete = find_leftover_notes(args)
+    assert hits == paths and incomplete is False
+
+
+def test_find_leftover_notes_paths_never_hold_values():
+    args = {"params": {"criteria": {"withhuman_context": "SECRET-NOTE"}, "memo": "SECRET-DATA"}}
+    hits, _ = find_leftover_notes(args)
+    assert hits == ["params.criteria.withhuman_context"] and "SECRET" not in repr(hits)
+
+
+def test_find_leftover_notes_skips_only_the_declared_locations():
+    args = {"params": {"withhuman_context": "owned"}, "other": {"withhuman_context": "stray"}}
+    assert find_leftover_notes(args, {"params.withhuman_context"}) == (["other.withhuman_context"], False)
+
+
+def test_find_leftover_notes_does_not_look_inside_a_note_or_flag_the_top_level_text():
+    args = {"withhuman_context": "talks about withhuman_context in prose", "params": {"a": 1}}
+    assert find_leftover_notes(args) == ([], False)
+
+
+def test_find_leftover_notes_is_bounded_in_depth_nodes_and_hits():
+    deep = current = {}
+    for _ in range(60):
+        current["x"] = {}
+        current = current["x"]
+    current["withhuman_context"] = "n"
+    assert find_leftover_notes({"params": deep}) == ([], True)  # too deep: reported as incomplete, not silently fine
+    wide = {"params": [{"i": i} for i in range(11_000)]}
+    assert find_leftover_notes(wide)[1] is True
+    many = {"params": [{"withhuman_context": "x"} for _ in range(50)]}
+    hits, incomplete = find_leftover_notes(many)
+    assert len(hits) == 20 and incomplete is True
+
+
+def test_find_leftover_notes_survives_absurd_json_nesting():
+    text = "[" * 100_000 + "withhuman_context" + "]" * 100_000
+    assert find_leftover_notes({"params": text}) == (["params"], False)
+
+
+def test_text_form_note_keys_lists_only_json_objects_holding_the_note():
+    args = {"b": '{"withhuman_context": "n"}', "a": '{"withhuman_context": "n"}', "c": '{"x": 1}',
+            "d": "withhuman_context", "e": {"withhuman_context": "n"}, "f": '[{"withhuman_context": "n"}]'}
+    assert text_form_note_keys(args) == ["a", "b"]
+    assert text_form_note_keys("nope") == []
+
+
 # ---- the lift problem recorder (lift_status.json) ---------------------------------------------------------
 
 
@@ -422,7 +539,10 @@ def read_entries(path):
     return json.loads(path.read_text())["entries"]
 
 
-def test_lift_status_dedupes_per_tool_kind_key_and_counts(tmp_path):
+FIELDS = {"tool", "kind", "key", "detail", "first_seen", "last_seen", "count"}
+
+
+def test_lift_status_dedupes_per_tool_kind_key_detail_and_counts(tmp_path):
     path = tmp_path / "lift_status.json"
     status = LiftStatus(str(path))
     for _ in range(3):
@@ -430,12 +550,16 @@ def test_lift_status_dedupes_per_tool_kind_key_and_counts(tmp_path):
     status.record("tool_a", "declared", "other")
     status.record("tool_a", "schema_unavailable")
     status.record("tool_b", "declared", "params")
+    status.record("tool_a", "note_dropped", "params", "empty")
+    status.record("tool_a", "note_dropped", "params", "not text")
+    status.flush()
     entries = read_entries(path)
-    assert len(entries) == 4
+    assert len(entries) == 6
     first = next(e for e in entries if (e["tool"], e["kind"], e["key"]) == ("tool_a", "declared", "params"))
     assert first["count"] == 3 and first["first_seen"] <= first["last_seen"]
-    assert set(first) == {"tool", "kind", "key", "first_seen", "last_seen", "count"}
+    assert set(first) == FIELDS
     assert next(e for e in entries if e["kind"] == "schema_unavailable")["key"] == ""
+    assert sorted(e["detail"] for e in entries if e["kind"] == "note_dropped") == ["empty", "not text"]
 
 
 def test_lift_status_keeps_at_most_200_entries_and_the_newest_always_gets_in(tmp_path):
@@ -454,38 +578,84 @@ def test_lift_status_file_holds_names_and_times_only_never_values(tmp_path):
     LiftStatus(str(path)).record("mcp__wh__quickbooks__create_payment", "declared", "params")
     data = json.loads(path.read_text())
     assert set(data) == {"entries", "updated_at"}
-    assert set(data["entries"][0]) == {"tool", "kind", "key", "first_seen", "last_seen", "count"}
+    assert set(data["entries"][0]) == FIELDS
 
 
 def test_lift_status_is_reloaded_after_a_restart(tmp_path):
     path = tmp_path / "lift_status.json"
-    LiftStatus(str(path)).record("t", "declared", "params")
+    first = LiftStatus(str(path))
+    first.record("t", "declared", "params")
     again = LiftStatus(str(path))
     again.record("t", "declared", "params")
+    again.flush()
     (entry,) = read_entries(path)
     assert entry["count"] == 2
 
 
-def test_lift_status_ignores_a_corrupt_old_file(tmp_path):
+def test_lift_status_keeps_a_corrupt_old_file_aside_instead_of_losing_it(tmp_path):
     path = tmp_path / "lift_status.json"
     path.write_text("{not json")
     LiftStatus(str(path)).record("t", "lift_error")
     assert [e["kind"] for e in read_entries(path)] == ["lift_error"]
+    assert (tmp_path / "lift_status.json.corrupt").read_text() == "{not json"
 
 
-def test_lift_status_write_error_never_raises_and_logs_one_error(tmp_path, caplog):
+def test_lift_status_merges_with_what_another_process_wrote(tmp_path):
+    path = tmp_path / "lift_status.json"
+    gateway, cli = LiftStatus(str(path)), LiftStatus(str(path))
+    gateway.record("t", "declared", "params")
+    cli.record("u", "lift_error")  # written after the gateway's: must not drop it
+    gateway.record("t", "declared", "params")
+    gateway.flush()
+    cli.record("t", "declared", "params")
+    cli.flush()
+    by_tool = {(e["tool"], e["kind"]): e["count"] for e in read_entries(path)}
+    assert by_tool == {("t", "declared"): 3, ("u", "lift_error"): 1}
+
+
+def test_lift_status_write_failure_keeps_the_entries_and_retries_later(tmp_path, caplog):
     caplog.set_level(logging.ERROR, logger="durable_park")
-    status = LiftStatus(str(tmp_path / "missing-dir" / "lift_status.json"))
+    directory = tmp_path / "later"
+    path = directory / "lift_status.json"
+    status = LiftStatus(str(path))
     status.record("t", "declared", "params")
     status.record("t", "declared", "params")
     status.record("u", "lift_error")
     errors = [r.getMessage() for r in caplog.records if "lift_status" in r.getMessage()]
-    assert errors == ["could not write lift_status.json (FileNotFoundError)"]
+    assert errors == ["could not write lift_status.json (FileNotFoundError)"]  # one error per outage
+    directory.mkdir()
+    status.flush()  # the self-check thread's retry
+    assert {(e["tool"], e["kind"]): e["count"] for e in read_entries(path)} == {("t", "declared"): 2, ("u", "lift_error"): 1}
+
+
+def test_lift_status_retries_on_the_next_record_after_a_failure(tmp_path):
+    directory = tmp_path / "later"
+    path = directory / "lift_status.json"
+    status = LiftStatus(str(path))
+    status.record("t", "declared", "params")
+    directory.mkdir()
+    status.record("u", "lift_error")
+    assert {e["tool"] for e in read_entries(path)} == {"t", "u"}
+
+
+def test_lift_status_holds_back_the_write_for_a_repeat_until_the_interval_passes(tmp_path):
+    now = [100.0]
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path), clock=lambda: now[0])
+    status.record("t", "declared", "params")
+    status.record("t", "declared", "params")
+    assert read_entries(path)[0]["count"] == 1  # a repeat of a known problem does not rewrite the file
+    now[0] += 61
+    status.record("t", "declared", "params")
+    assert read_entries(path)[0]["count"] == 3
+    status.record("u", "lift_error")  # a new problem always writes at once
+    assert {e["tool"] for e in read_entries(path)} == {"t", "u"}
 
 
 def test_lift_status_without_a_path_only_remembers(tmp_path):
     status = LiftStatus(None)
     status.record("t", "declared", "params")  # no file, no error
+    status.flush()
 
 
 def test_lift_status_is_thread_safe(tmp_path):
@@ -495,5 +665,6 @@ def test_lift_status_is_thread_safe(tmp_path):
                for _ in range(8)]
     [t.start() for t in threads]
     [t.join() for t in threads]
+    status.flush()
     (entry,) = read_entries(path)
     assert entry["count"] == 200

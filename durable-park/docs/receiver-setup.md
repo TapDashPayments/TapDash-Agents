@@ -49,7 +49,7 @@ Group `dpwake` (members `hermes`, `aaprecv`) guards `wake_secret` only; the brid
 | `~hermes/.hermes/plugin-data/durable-park/ledger.db` | hermes | the plugin | the ledger (`plugins.entries.durable-park.settings.ledger_path`; the sweep uses the same path; the bridge does not use the ledger) |
 | `~hermes/.hermes/plugin-data/durable-park/bridge_deliveries.db` | hermes | nobody (the old bridge) | unused: the bridge keeps no state; delete it once the new bridge is live |
 | `~hermes/.hermes/plugin-data/durable-park/formcheck_status.json`, `formcheck_alert_state.json` | hermes | the gateway's form self-check / the sweep | form checker health and the alert state |
-| `~hermes/.hermes/plugin-data/durable-park/lift_status.json`, `lift_alert_state.json` | hermes | the park hook / the sweep | what the hook could not do with the agent's `withhuman_context` note (names and counts only) and the alert state |
+| `~hermes/.hermes/plugin-data/durable-park/lift_status.json` (+ `.lock`, `.corrupt` when needed), `lift_alert_state.json`, `lift_check_alert_state.json` | hermes | the park hook / the sweep | what the hook could not do with the agent's `withhuman_context` note (names and counts only), and the sweep's alert states |
 | `~hermes/.hermes/scripts/durable_park_sweep.sh` | hermes 0750 | configure_hermes.sh | cron wrapper: `exec /usr/bin/python3 -I <repo>/scripts/durable_park_sweep.py --ledger <ledger> --wake-secret-file /etc/durable-park/wake_secret --retention-days 30` |
 
 The webhook route's secret in `config.yaml` is the reference `${DURABLE_PARK_WAKE_SECRET}`. Hermes's

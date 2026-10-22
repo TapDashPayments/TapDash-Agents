@@ -375,3 +375,24 @@ def test_only_one_selfcheck_thread_per_process_even_after_reimport():
         stop.set()
         t.join()
     assert formcheck._selfcheck_thread_alive() is False
+
+
+def test_selfcheck_loop_calls_on_tick_after_each_check_and_survives_a_failing_tick(tmp_path):
+    import re
+    from durable_park.formcheck import selfcheck_loop
+    path = tmp_path / "formcheck_status.json"
+    ticks = []
+
+    def tick():
+        ticks.append(1)
+        raise RuntimeError("tick bug")
+
+    t = {"now": 0.0}
+
+    def clock():
+        t["now"] += 1
+        return t["now"]
+    selfcheck_loop(FormChecker(lambda tool: BILL_SCHEMA, coerce_fn=lambda tool, args: args),
+                   lambda: ["mcp__wh__quickbooks__create_bill"], [re.compile(r"mcp__wh__quickbooks__create_bill")],
+                   str(path), sleep=lambda s: None, clock=clock, iterations=2, on_tick=tick)
+    assert len(ticks) == 2 and json.loads(path.read_text())["ok"] is True

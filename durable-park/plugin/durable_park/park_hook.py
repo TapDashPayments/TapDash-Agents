@@ -19,8 +19,8 @@ from .breaker import Breaker
 from . import formcheck
 from .formcheck import FormChecker, FormCheckUnavailable
 from .gatecall import (
-    LiftStatus, build_call, declares_context, first_text_form_note_key, keys_still_holding_note,
-    lift_gateway_context, server_label)
+    CONTEXT_FIELD, LiftStatus, build_call, declares_context, find_leftover_notes, gateway_slug,
+    lift_gateway_context, server_label, text_form_note_keys)
 from .ledger import Ledger, args_digest, call_key
 from .wake import one_line
 
@@ -139,6 +139,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                        form_checker: FormChecker | None = None,
                        schema_fn: Callable[[str], dict | None] | None = None,
                        coerce_fn: Callable[[str, dict], dict] | None = None,
+                       lift_status: LiftStatus | None = None,
                        lift_status_path: str | None = None) -> Callable[..., dict | None]:
     """Build the hook. ``gate_factory`` is called per call (e.g. ``GateHolder.get``). ``form_checker``
     validates a form-checked call's arguments against the tool's rules before anything is recorded or asked
@@ -149,18 +150,26 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
     it decides whether a nested ``withhuman_context``
     note is lifted to the top level (see ``lift_gateway_context``). ``coerce_fn`` is Hermes's own type fixing
     (default: ``formcheck.hermes_coerce``, looked up when called), run first on a copy only when a string argument
-    holds a JSON object with the note. Every case where the lift could not run or left a note inside is reported
-    to ``lift_status_path`` (``lift_status.json``; the sweep alerts on it), and the call goes on with the
-    original arguments."""
+    holds a JSON object with the note. Every case where the note was not moved, was dropped, or the check could not
+    run is reported to ``lift_status`` (a ``LiftStatus``, or one built for ``lift_status_path``:
+    ``lift_status.json``; the sweep alerts on it), and the call goes on with the original arguments."""
     checker = form_checker if form_checker is not None else FormChecker()
     exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
 
-    status = LiftStatus(lift_status_path)
+    status = lift_status if lift_status is not None else LiftStatus(lift_status_path)
+
+    def report_leftovers(tool_name: str, args: Any, declared: set[str]) -> None:
+        """Record every place a note is still inside ``args`` (names and indices only) and an incomplete walk."""
+        hits, incomplete = find_leftover_notes(args, declared)
+        for path in hits:
+            status.record(tool_name, "note_left_inside", path)
+        if incomplete:
+            status.record(tool_name, "check_incomplete")
 
     def lift_nested_context(tool_name: str, args: Any) -> Any:
-        """The call's arguments with a nested ``withhuman_context`` lifted to the top level. Every way the lift
-        cannot run (or leaves a note inside) is recorded for the sweep's chat alert; the original arguments are
-        used in those cases, so approval is unaffected. Never raises."""
+        """The call's arguments with a nested ``withhuman_context`` lifted to the top level. Every way the note is
+        not moved, is dropped, or the check cannot run is recorded for the sweep's chat alert; the original
+        arguments are used when the lift cannot run, so approval is unaffected. Never raises."""
         if not isinstance(args, dict):
             return args
         try:
@@ -168,35 +177,46 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 schema = (schema_fn or formcheck.registry_schema)(tool_name)
             except Exception as exc:  # noqa: BLE001 - the lift is a cleanup, never a gate
                 log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)
-                status.record(tool_name, "schema_unavailable")
-                return args
+                schema = None
             if not declares_context(schema):
-                return args  # not a gateway tool: nothing to lift
-            work = args
-            text_key = first_text_form_note_key(args)
-            if text_key is not None:
-                # pre_tool_call fires before Hermes's type coercion: do what dispatch will do, on a copy.
+                # Not a gateway tool: nothing to do. A gateway tool whose rules are missing or do not show the field
+                # is reported, and its arguments are still searched for a note.
+                if gateway_slug(tool_name):
+                    if schema is None:
+                        status.record(tool_name, "schema_unavailable")
+                    report_leftovers(tool_name, args, set())
+                return args
+            work = dict(args)
+            text_keys = text_form_note_keys(args)
+            if text_keys:
+                # pre_tool_call fires before Hermes's type coercion: do what dispatch will do, on a copy, and take
+                # from it ONLY the values of the keys whose original value is JSON text holding a note.
                 try:
                     coerced = (coerce_fn or formcheck.hermes_coerce)(tool_name, copy.deepcopy(args))
                 except Exception as exc:  # noqa: BLE001
                     log.warning("could not read arguments to lift withhuman_context for tool=%s (%s)",
                                 tool_name, type(exc).__name__)
                     coerced = None
-                if not isinstance(coerced, dict):
-                    status.record(tool_name, "args_unreadable", text_key)
-                    return args
-                work = coerced
+                for key in text_keys:
+                    value = coerced.get(key) if isinstance(coerced, dict) else None
+                    if isinstance(value, dict):
+                        work[key] = value
+                    else:
+                        status.record(tool_name, "args_unreadable", key)
             declared: set[str] = set()
 
-            def on_problem(kind: str, key: str) -> None:
+            def on_problem(kind: str, key: str, detail: str = "") -> None:
                 if kind == "declared":
-                    declared.add(key)
-                status.record(tool_name, kind, key)
+                    declared.add(f"{key}.{CONTEXT_FIELD}")
+                status.record(tool_name, kind, key, detail)
 
             lifted = lift_gateway_context(work, schema, on_problem=on_problem)
-            for key in keys_still_holding_note(lifted):
-                if key not in declared:
-                    status.record(tool_name, "note_left_inside", key)
+            if {**args, **lifted} != lifted:
+                # Hermes merges a modify into the original arguments and can neither delete nor rename a key:
+                # unless that merge is exactly the lifted call, the lift is not safe to use.
+                status.record(tool_name, "lift_error")
+                return args
+            report_leftovers(tool_name, lifted, declared)
             return lifted
         except Exception as exc:  # noqa: BLE001
             log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)

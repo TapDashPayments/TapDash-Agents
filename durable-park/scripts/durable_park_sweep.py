@@ -14,9 +14,12 @@
   gateway's MainPID)                                 -> print one alert line (and one when it recovers)
 * the park hook's circuit-breaker report (``breaker_status.json``: withHuman unreachable) opened or closed
                                                        -> print one alert line for each change
-* the park hook's note-lift report (``lift_status.json``: the agent's ``withhuman_context`` note could not be
-  moved to the top level, or a tool declares its own)  -> print one alert line per (tool, kind, key) not alerted
-  before (state in ``lift_alert_state.json``), and one when the report itself is unreadable (until it reads again)
+* the park hook's note-lift report (``lift_status.json``: the agent's ``withhuman_context`` note was not moved
+  to the top level, was dropped, could not be checked for, or a tool declares its own field)
+                                                       -> print one alert line per (tool, kind, key, detail) not
+  alerted before (state in ``lift_alert_state.json``), again once per 24 h while its count keeps growing, one when
+  the report itself is unreadable (until it reads again), and one when the check itself fails
+  (``lift_check_alert_state.json``; a recovery line follows)
 
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
@@ -58,6 +61,8 @@ POLICY_LOAD = "tool_policy_load.json"  # the plugin's own verdict at load (it ju
 POLICY_LOAD_STATE = "tool_policy_load_alert_state.json"
 LIFT_STATUS = "lift_status.json"  # what the park hook could not do with the agent's withhuman_context note
 LIFT_STATE = "lift_alert_state.json"
+LIFT_CHECK_STATE = "lift_check_alert_state.json"  # the lift check itself failed
+LIFT_REALERT = timedelta(hours=24)  # a problem that keeps happening is said again this often
 LIFT_TEXTS = {
     "declared": ("durable-park ALERT: {tool} has its own withhuman_context field inside {key}; the agent's note is "
                  "left there and goes to the server, not to the approver."),
@@ -68,6 +73,10 @@ LIFT_TEXTS = {
     "lift_error": "durable-park ALERT: moving the agent's note failed for {tool}; it may reach the server.",
     "note_left_inside": ("durable-park ALERT: the agent's note is still inside {key} for {tool} after the move; it "
                          "may reach the server."),
+    "note_dropped": ("durable-park ALERT: the agent's note inside {key} for {tool} was removed but not shown to the "
+                     "approver ({reason})."),
+    "check_incomplete": ("durable-park ALERT: could not finish checking {tool}'s arguments for the agent's note "
+                         "(they are too large or nested too deep); it may reach the server."),
 }
 PLUGIN_LOAD = "plugin_load.json"  # the load proof the plugin writes in the gateway (pid of that process)
 PLUGIN_LOAD_STATE = "plugin_load_alert_state.json"
@@ -339,16 +348,29 @@ def _policy_load_alert(directory: str, *, report_failed: bool) -> None:
     _save_state(state_path, {"alerted": alerted})
 
 
+def _parse_stamp(text) -> datetime | None:
+    try:
+        return datetime.strptime(str(text), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
 def _lift_alert(ledger_path: str, now: datetime) -> None:
-    """Alert once per (tool, kind, key) in the park hook's ``lift_status.json`` (``now`` is unused: the entries carry
-    their own times). A missing file is silent (nothing has gone wrong yet); an unreadable or malformed one alerts
-    once, until it reads again. The state remembers only the entries still in the report, so it cannot grow."""
+    """Alert once per (tool, kind, key, detail) in the park hook's ``lift_status.json`` (next to the ledger), and
+    again once per 24 hours while its count keeps growing (the leak is still happening). A missing file is silent
+    (nothing has gone wrong yet); an unreadable or malformed one alerts once, until it reads again. The state
+    remembers only the entries still in the report (bounded), each with the count and time it was last announced;
+    an entry that leaves the report and comes back alerts again. May raise: ``_lift_check`` reports that."""
     directory = os.path.dirname(os.path.abspath(ledger_path))
     state_path = os.path.join(directory, LIFT_STATE)
     state = _load_state(state_path)
-    alerted = {tuple(item) for item in state.get("alerted", [])
-               if isinstance(item, list) and len(item) == 3 and all(isinstance(x, str) for x in item)} \
-        if isinstance(state.get("alerted"), list) else set()
+    stamp_now = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    announced: dict[tuple[str, str, str, str], dict] = {}
+    for item in state.get("alerted", []) if isinstance(state.get("alerted"), list) else []:
+        if isinstance(item, dict) and all(isinstance(item.get(f), str) for f in ("tool", "kind", "key")):
+            detail = item["detail"] if isinstance(item.get("detail"), str) else ""
+            count = item["count"] if isinstance(item.get("count"), int) and not isinstance(item.get("count"), bool) else 1
+            announced[(item["tool"], item["kind"], item["key"], detail)] = {"count": count, "at": item.get("at")}
     unreadable_alerted = state.get("unreadable") is True
     unreadable_reason = None
     entries: list = []
@@ -365,25 +387,71 @@ def _lift_alert(ledger_path: str, now: datetime) -> None:
         unreadable_reason = type(exc).__name__
     except ValueError:
         unreadable_reason = "not valid JSON"
-    seen: set[tuple[str, str, str]] = set()
+    except Exception:  # noqa: BLE001 - for example RecursionError on a file nested absurdly deep
+        unreadable_reason = "unexpected format"
+    current: dict[tuple[str, str, str, str], dict] = {}
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("tool"), str) or not isinstance(entry.get("kind"), str):
             continue
-        key = entry.get("key") if isinstance(entry.get("key"), str) else ""
-        ident = (entry["tool"], entry["kind"], key)
-        seen.add(ident)
-        if ident in alerted:
-            continue
+        key = entry["key"] if isinstance(entry.get("key"), str) else ""
+        detail = entry["detail"] if isinstance(entry.get("detail"), str) else ""
+        count = entry["count"] if isinstance(entry.get("count"), int) and not isinstance(entry.get("count"), bool) else 1
+        ident = (entry["tool"], entry["kind"], key, detail)
         template = LIFT_TEXTS.get(entry["kind"], "durable-park ALERT: a note problem ({kind}) for {tool}; it may reach the server.")
-        print(template.format(tool=_clean(entry["tool"], 200), key=_clean(key, 200), kind=_clean(entry["kind"], 40)), flush=True)
+        text = template.format(tool=_clean(entry["tool"], 200), key=_clean(key, 200), reason=_clean(detail, 100),
+                               kind=_clean(entry["kind"], 40))
+        before = announced.get(ident)
+        if ident in current:  # a duplicate line in the report: one alert
+            current[ident]["count"] = max(current[ident]["count"], count)
+            continue
+        if before is None:
+            print(text, flush=True)
+            current[ident] = {"count": count, "at": stamp_now}
+        else:
+            last = _parse_stamp(before["at"])
+            if count > before["count"] and (last is None or now - last >= LIFT_REALERT):
+                print(text.replace("durable-park ALERT:", f"durable-park ALERT (still happening, {count} times):", 1),
+                      flush=True)
+                current[ident] = {"count": count, "at": stamp_now}
+            else:  # same leak, said recently or no new occurrence; a smaller count (file restarted) lowers the base
+                current[ident] = {"count": min(count, before["count"]), "at": before["at"] or stamp_now}
     if unreadable_reason is not None:
         if not unreadable_alerted:
             print(f"durable-park ALERT: could not read {LIFT_STATUS} ({_clean(unreadable_reason, 100)}).", flush=True)
-        new_state = {"alerted": sorted(list(item) for item in alerted), "unreadable": True}  # keep what was announced
-    else:
-        new_state = {"alerted": sorted(list(item) for item in seen), "unreadable": False}
+        current = announced  # keep what was announced: the report may come back unchanged
+    new_state = {"alerted": [{"tool": t, "kind": k, "key": key, "detail": d, **v}
+                             for (t, k, key, d), v in sorted(current.items())],
+                 "unreadable": unreadable_reason is not None}
     if new_state != state:
         _save_state(state_path, new_state)
+
+
+def _lift_check(ledger_path: str, now: datetime) -> None:
+    """Run ``_lift_alert``; when the check itself fails (a bug, an unwritable state file, anything), print ONE stdout
+    ALERT per error type until it works again, then one recovery line: a check that cannot run must not be silent."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    fail_path = os.path.join(directory, LIFT_CHECK_STATE)
+    try:
+        _lift_alert(ledger_path, now)
+    except Exception as exc:  # noqa: BLE001
+        name = type(exc).__name__
+        try:
+            already = _load_state(fail_path).get("failed") == name
+        except Exception:  # noqa: BLE001
+            already = False
+        if not already:
+            print(f"durable-park ALERT: could not check for lift problems ({_clean(name, 60)}).", flush=True)
+            try:
+                _save_state(fail_path, {"failed": name})
+            except Exception:  # noqa: BLE001 - it may then repeat on the next run: loud, not silent
+                pass
+        return
+    try:
+        if _load_state(fail_path).get("failed"):
+            print("durable-park: lift problems can be checked again.", flush=True)
+            _save_state(fail_path, {"failed": None})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _gateway_mainpid() -> int | None:
@@ -461,7 +529,7 @@ def main(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001 - the policy alert must never stop the sweep
         _err(f"tool policy alert failed ({type(exc).__name__})")
     try:
-        _lift_alert(args.ledger, datetime.now(timezone.utc))
+        _lift_check(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the lift alert must never stop the sweep
         _err(f"lift alert failed ({type(exc).__name__})")
     try:

@@ -438,19 +438,25 @@ the outage was shorter than 5 minutes, both lines may arrive together.
 ### The agent's note could not be moved
 
 The model puts a short reason in `withhuman_context`. The withHuman gateway expects it at the top level and shows it
-to the approver; the park hook moves it there when the model nests it inside `params`. When it cannot, the call still
-goes on exactly as before (the original arguments, approval is unaffected) and the sweep sends one chat alert per
-tool, kind and key (state in `lift_alert_state.json`, report in `lift_status.json` next to the ledger: names, times
-and counts, never a value). The text tells you the kind:
+to the approver; the park hook moves it there when the model nests it inside `params`. When it cannot (or a note is
+dropped, or the hook could not even look), the call still goes on exactly as before (the original arguments, approval
+is unaffected) and the sweep sends one chat alert per tool, kind, key and detail (state in `lift_alert_state.json`).
+The report is `lift_status.json` next to the ledger (names, times and counts, never a value; the hook writes it under
+a lock, so the gateway and any other Hermes process share it; a write that fails is retried on the next problem and
+every 30 minutes). The same problem is said again once per 24 hours while it keeps happening
+(`durable-park ALERT (still happening, <n> times): ...`). The text tells you the kind:
 
 | Alert | Meaning | What to do |
 |---|---|---|
-| `<tool> has its own withhuman_context field inside <key>` | The tool's own rules declare a `withhuman_context` inside that key, so the note is left there and goes to the server, not to the approver | Usually fine and intended (a server that really has such a field). If it is not, look at the tool's rules in the withHuman tool catalog |
-| `could not read <tool>'s tool rules` | The rules lookup failed (Hermes registry unavailable or changed) | Same as a form-check problem: [Form checker not working](#form-checker-not-working); `hermes mcp test wh`; read `compat.py` after a Hermes upgrade |
-| `could not read <tool>'s arguments` | The arguments came as JSON text and Hermes's type fixing could not turn them into objects | Check Hermes's `tools/arg_coercion.py` after an upgrade (`formcheck.hermes_coerce`) |
-| `moving the agent's note failed for <tool>` | An unexpected error in the lift step | `journalctl --user -u hermes-gateway` for `could not lift withhuman_context for tool=<tool> (<ErrorType>)`; fix and redeploy |
-| `the agent's note is still inside <key> for <tool> after the move` | A note is still inside that key after the lift (for example JSON text the type fixing did not turn into an object) | Look at the tool's rules for that key; the note reaches the server and QuickBooks says "IGNORED" |
-| `could not read lift_status.json (<reason>)` | The report is unreadable or not the expected shape | Look at the file next to the ledger; it is rewritten by the gateway on the next problem; delete it if corrupt |
+| `<tool> has its own withhuman_context field inside <key>` | The tool's own rules declare a `withhuman_context` inside that key, so the note is left there: it goes to the server and never reaches the approver | Fine if the server really has such a field (the approver then does not see the agent's reason for this tool). If not, look at the tool's rules in the withHuman tool catalog |
+| `the agent's note inside <key> for <tool> was removed but not shown to the approver (<reason>)` | A nested note was removed but could not be shown: `not text` (the model sent an object or number), `empty`, `another note was already at the top` (the top-level note, even an empty one, wins), `more than one note` | Usually a model slip; the approver saw the call without that reason. Repeats mean the model's instructions or the tool description need work |
+| `could not read <tool>'s tool rules` | A gateway tool's rules were not found (the registry lookup failed, or the tool is not registered): its arguments were still searched for a note | Same as a form-check problem: [Form checker not working](#form-checker-not-working); `hermes mcp test wh`; read `compat.py` after a Hermes upgrade |
+| `could not read <tool>'s arguments` | The arguments came as JSON text and Hermes's type fixing could not turn them into an object under the same key | Check Hermes's `tools/arg_coercion.py` after an upgrade (`formcheck.hermes_coerce`) |
+| `moving the agent's note failed for <tool>` | An unexpected error in the lift step, or the lifted call did not pass the merge check | `journalctl --user -u hermes-gateway` for `could not lift withhuman_context for tool=<tool> (<ErrorType>)`; fix and redeploy |
+| `the agent's note is still inside <key> for <tool> after the move` | A note is still inside the final arguments at that path (deeper than one level, inside a list, in JSON text, or another spelling of the name). A gateway tool whose rules do not list the top-level field is searched too | The note reaches the server (QuickBooks says "IGNORED"). Look at the tool's rules and at how the model nests it |
+| `could not finish checking <tool>'s arguments for the agent's note` | The arguments are too large or too deep for the bounded search | Look at what the model sent; the note may reach the server |
+| `could not read lift_status.json (<reason>)` | The report is unreadable or not the expected shape | Look at the file next to the ledger; the hook keeps an unparseable one as `lift_status.json.corrupt` before writing a new one |
+| `could not check for lift problems (<ErrorType>)` | The sweep's own check failed (for example its state file cannot be written) | Read the sweep's stderr (`~/.hermes/logs`), fix, and a line `durable-park: lift problems can be checked again.` follows |
 
 A problem that goes away and comes back alerts again. When adding tools from a new provider, expect these alerts
 if its rules differ from the QuickBooks ones.

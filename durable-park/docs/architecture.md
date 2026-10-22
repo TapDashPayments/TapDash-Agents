@@ -175,7 +175,7 @@ flowchart LR
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
 | bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). |
 | bridge check | `deploy/bridge_check.py` | Read-only isolation check, run as root by `configure_hermes.sh` right after the bridge answers 401 (the deploy stops if it fails) and by hand ([runbook](runbook.md#health-check)). Seven checks: the socket unit is active and listens on exactly `127.0.0.1:8791`; the service is active, its main process runs as `dpbridge` and the `Groups:` line of its `/proc/<pid>/status` is empty or only `dpbridge`'s own gid; only systemd and that process hold the port; no other process runs `bridge.app`; no user-level `durable-park-bridge*` unit exists for any user; `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; `bridge_secret` is `root:root 0600` (stat only, never read). |
-| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, and once per (tool, kind, key) when the park hook reports that the agent's `withhuman_context` note could not be moved or a tool declares its own (`lift_status.json`, [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
+| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, and once per (tool, kind, key, detail) when the park hook reports that the agent's `withhuman_context` note was not moved, was dropped or could not be checked for (`lift_status.json`, [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). |
 
 ### Plugin settings
 
@@ -474,7 +474,7 @@ flowchart TD
   foreign -->|"yes"| bforeign["Block: foreign hook<br/>(no row, nobody asked)"]
   foreign -->|"no"| ids{"Chat session and<br/>tool call id?"}
   ids -->|"no"| bids["Block: no chat session<br/>or no tool call id"]
-  ids -->|"yes"| lift["Lift a nested withhuman_context<br/>to the top level (gateway tools only;<br/>JSON text args coerced first)<br/>from here on: the lifted args<br/>problems go to lift_status.json"]
+  ids -->|"yes"| lift["Lift a nested withhuman_context<br/>to the top level (gateway tools only;<br/>JSON text keys coerced first)<br/>from here on: the lifted args<br/>problems go to lift_status.json"]
   lift --> fc{"Form-checked tool,<br/>call id not seen before?"}
   fc -->|"yes"| rules{"Rules for this tool<br/>found and usable?"}
   rules -->|"no"| closed["Block: could not be checked<br/>(no row, nobody asked)"]
@@ -506,21 +506,35 @@ flowchart TD
   parameter and answer with an "IGNORED" warning that wastes tokens, and the approver would not see the reason.
   `gatecall.lift_gateway_context` moves it up one level for tools whose registered rules (`schema_fn`, default the
   Hermes registry) list `withhuman_context` at the top level: sorted key order, the first non-empty string wins, an
-  existing top-level note always wins, other values are dropped. For a nested object that holds a note, its own rules
-  decide, and **the note is lifted unless the rules positively declare their own `withhuman_context`** (in
-  `properties`, a matching `patternProperties` pattern, any `allOf`/`anyOf`/`oneOf` branch, or a local `$ref` such as
-  `#/$defs/X` resolved inside the tool's rules): then the server really has that field and the key is left alone.
-  Rules that cannot be judged (a remote or unresolvable `$ref`, an invalid pattern, a `$ref` cycle, nesting deeper
-  than 10) lift too. Arguments that arrive as JSON text (`pre_tool_call` fires before Hermes's type fixing) are first
-  put through Hermes's own coercion (`formcheck.hermes_coerce`, on a copy), but only when a string argument decodes to
-  an object holding the note; Hermes coerces again at dispatch, which changes nothing.
-  **Nothing about the lift fails silently.** Every case it could not do its job is recorded in `lift_status.json`
-  (next to the ledger; `gatecall.LiftStatus`: tool, kind, key, `first_seen`, `last_seen`, `count`, never a value; at
-  most 200 entries) and the sweep alerts once per (tool, kind, key) in the chat ([runbook](runbook.md#the-agents-note-could-not-be-moved)):
-  `declared` (a key was left alone because its rules declare the field), `schema_unavailable` (the rules lookup
-  raised), `args_unreadable` (the type fixing failed or returned a non-object), `lift_error` (any other error in the
-  lift step) and `note_left_inside` (after the lift a note is still inside a key that is not a declaration). In every
-  failure case the call goes on with the original arguments, so approval is unaffected. The lifted arguments are the
+  existing top-level note always wins. For a nested object that holds a note, its own rules decide, and **the note is
+  lifted unless the rules positively declare their own `withhuman_context`** (in `properties`, a matching
+  `patternProperties` pattern, any `allOf`/`anyOf`/`oneOf` branch, or a local `$ref` such as `#/$defs/X` resolved inside
+  the tool's rules): then the server really has that field and the key is left alone. Rules that cannot be judged (a
+  remote or unresolvable `$ref`, an invalid pattern, a `$ref` cycle, nesting deeper than 10) lift too. The move is one
+  level deep; deeper notes are found and reported, not moved. Arguments that arrive as JSON text (`pre_tool_call`
+  fires before Hermes's type fixing) are put through Hermes's own coercion (`formcheck.hermes_coerce`, on a copy)
+  when a string argument decodes to an object holding the note, and **only the values of those text keys are taken
+  from the coerced copy**: every other key keeps the model's own value, and a coerced copy that has no object under
+  the same key name (Hermes renames sanitized keys back to wire names) leaves that key unread. Before a `modify` is
+  returned the hook checks that Hermes's merge (`{**original, **lifted}`) equals the lifted call exactly (a modify
+  can neither delete nor rename a key); if not, the original arguments are used.
+  **Every case where the note is not moved, is dropped, or the check could not run ends as a chat alert.** The hook
+  records it in `lift_status.json` (next to the ledger; `gatecall.LiftStatus`: tool, kind, key, detail, `first_seen`,
+  `last_seen`, `count`, never a value; at most 200 entries; written under a file lock that merges with other
+  processes' entries, and a failed write is kept in memory and retried on every later record and by the 30-minute
+  self-check thread). The sweep alerts once per (tool, kind, key, detail), again once per 24 hours while the count keeps
+  growing, and once when the report is unreadable or the check itself fails
+  ([runbook](runbook.md#the-agents-note-could-not-be-moved)). Kinds: `declared` (a key was left alone because its rules
+  declare the field; the note goes to the server, not the approver), `note_dropped` (a nested note was removed but not
+  shown to the approver: not text, empty, another note was already at the top, more than one note), `schema_unavailable`
+  (a gateway tool whose rules could not be read), `args_unreadable` (a JSON-text argument that Hermes's type fixing could
+  not turn into an object under the same key), `lift_error` (any other error, or a lift that failed the merge check),
+  `note_left_inside` (a note is still inside the final arguments, found by a bounded walk of dicts, lists and JSON text
+  at any depth; also for a gateway tool whose rules do not show the field) and `check_incomplete` (the walk hit its
+  bound: depth 50, 10 000 nodes or 20 hits). The call itself always goes on (with the original arguments when the lift
+  could not run), so approval is unaffected. What is still **not** covered: a note hidden somewhere the walk cannot read
+  (for example inside a string in another encoding), and a lift report nobody can write for longer than the gateway
+  runs (the ledger shares that directory, so a full or read-only disk fails loudly elsewhere). The lifted arguments are the
   only arguments from then on: the form check, the row (digest and stored args, so the executor later dispatches the
   lifted call), the request to withHuman, and, for an instant `Allow`, the `{"action": "modify", "args": ...}` the
   hook returns (Hermes shallow-merges it into the call; nothing is returned when nothing was lifted). The top-level
@@ -599,7 +613,7 @@ and re-run against the real code on the VM (2026-10-21):
 | Bridge cannot confirm the gateway call (no matching consumed park, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
 | The bridge process dies or is restarted | systemd keeps listening on `127.0.0.1:8791` (the socket unit holds the port) and restarts the service after 1 s (`Restart=always`); a delivery meanwhile waits in the socket's backlog or times out, and withHuman asks a person instead. Nobody else can bind the port and answer, for as long as the socket unit is neither stopped nor failed. systemd fails a socket unit when the service it activates trips its start limit (`service-start-limit-hit`, with `Accept=no`) and when the socket trips its own trigger limit, and either frees the port; so the service has `StartLimitIntervalSec=0` (systemd keeps retrying every second, however long the start keeps failing) and the socket has `TriggerLimitIntervalSec=0`. Only an admin's `systemctl stop` or `disable --now` of the socket frees the port, and `bridge_check.py` check 1 fails when it is not active. | Nobody; check the unit if it keeps restarting ([runbook](runbook.md#health-check)) |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
-| The agent's `withhuman_context` note could not be moved to the top level (rules unreadable, arguments unreadable, an error, a tool that declares its own field, or a note left inside) | The call goes on with the original arguments, approval is unaffected; the note may reach the server instead of the approver. The sweep alerts once per tool, kind and key. | See [runbook](runbook.md#the-agents-note-could-not-be-moved) |
+| The agent's `withhuman_context` note was not moved to the top level, was dropped, or could not be checked for (rules or arguments unreadable, an error, a tool that declares its own field, a note left inside or removed, a search cut short) | The call goes on with the original arguments, approval is unaffected; the note may reach the server instead of the approver. The sweep alerts once per tool, kind and key. | See [runbook](runbook.md#the-agents-note-could-not-be-moved) |
 | Form checker cannot run | Form-checked calls blocked; sweep alert after two bad sweeps. | Fix the checker ([runbook](runbook.md#form-checker-not-working)) |
 | Tool policy report missing, failed or older than 15 minutes at start (judged against the process start) | Every tool call except the exempt ones is blocked; wakes are dropped; `parked_action_execute` refuses and leaves the row as it is. The sweep alerts once, and once when it passes. | Fix the policy ([runbook](runbook.md#tool-policy-check-failed)), restart the gateway |
 | The plugin did not load at all (import error, missing dependency or `_vendor`, overran `plugins.load_timeout_seconds`, or disabled in `config.yaml`): Hermes drops every registration and runs with no `pre_tool_call` hook | `plugin_load_check.sh` (`ExecStartPost`) finds no `plugin_load.json` for the gateway's pid within the timeout and fails, so systemd stops the gateway; after 3 starts in 10 minutes it stays stopped. If the gateway is somehow running anyway, the sweep alerts once. | Fix the plugin ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)) |
@@ -644,7 +658,8 @@ System users behind that table:
   boundary for the code, [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1). Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
 - Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`,
   `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
-  `lift_status.json` (what the lift could not do), `lift_alert_state.json`, `plugin_load.json` (the load proof) and
+  `lift_status.json` (what the lift could not do; with `.lock` and, if ever needed, `.corrupt`), `lift_alert_state.json`,
+  `lift_check_alert_state.json`, `plugin_load.json` (the load proof) and
   `plugin_load_alert_state.json`. The bridge keeps nothing here: the
   `bridge_deliveries.db` of the old bridge is unused and can be deleted once the new bridge is live.
 - Since 2026-10-21 03:16 UTC the v1 lockdown is applied (`deploy/hermes_tool_policy.py`: tools limited to

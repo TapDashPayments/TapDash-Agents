@@ -806,7 +806,7 @@ def test_register_checks_forms_with_the_registry_rules(tmp_path, monkeypatch):
 def test_register_starts_selfcheck_next_to_the_ledger(tmp_path, monkeypatch):
     started = []
     monkeypatch.setattr("durable_park.formcheck.start_selfcheck",
-                        lambda checker, risky, path: started.append((checker, len(risky), path)) or True)
+                        lambda checker, risky, path, on_tick=None: started.append((checker, len(risky), path)) or True)
     ctx = FakeCtx(tmp_path / "data")
     register(ctx)
     ((checker, n_risky, path),) = started
@@ -816,7 +816,7 @@ def test_register_starts_selfcheck_next_to_the_ledger(tmp_path, monkeypatch):
 
 def test_register_without_ledger_does_not_start_selfcheck(tmp_path, monkeypatch):
     started = []
-    monkeypatch.setattr("durable_park.formcheck.start_selfcheck", lambda *a: started.append(a) or True)
+    monkeypatch.setattr("durable_park.formcheck.start_selfcheck", lambda *a, **kw: started.append(a) or True)
     register(FakeCtx(tmp_path, {"ledger_path": str(tmp_path)}))
     assert started == []
 
@@ -1863,14 +1863,16 @@ def test_coercion_that_raises_is_recorded_and_the_original_args_are_used(env):
     (row,) = env.ledger.list_by_status("parked")
     assert result == {"action": "block", "message": park_message(row.park_id, GW_TOOL)}
     assert json.loads(row.args_json) == TEXT_ARGS
-    assert recorded(env) == {(GW_TOOL, "args_unreadable", "params")}
+    assert recorded(env) == {(GW_TOOL, "args_unreadable", "params"),
+                             (GW_TOOL, "note_left_inside", "params.withhuman_context")}  # the text still holds it
 
 
 def test_coercion_that_returns_a_non_object_counts_as_unreadable(env):
     env.provider.auto = "approved"
     hook = status_hook(env, coerce_fn=lambda tool, args: "nonsense")
     assert call(hook, GW_TOOL, args=copy.deepcopy(TEXT_ARGS)) is None
-    assert recorded(env) == {(GW_TOOL, "args_unreadable", "params")}
+    assert recorded(env) == {(GW_TOOL, "args_unreadable", "params"),
+                             (GW_TOOL, "note_left_inside", "params.withhuman_context")}
 
 
 def test_schema_lookup_failure_is_recorded(env):
@@ -1880,7 +1882,8 @@ def test_schema_lookup_failure_is_recorded(env):
     hook = status_hook(env, schema_fn=broken)
     result = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
     assert result["message"].startswith("PARKED P-")
-    assert recorded(env) == {(GW_TOOL, "schema_unavailable", "")}
+    assert recorded(env) == {(GW_TOOL, "schema_unavailable", ""),
+                             (GW_TOOL, "note_left_inside", "params.withhuman_context")}  # the walk still ran
 
 
 def test_any_other_error_in_the_lift_step_is_recorded_and_the_original_args_are_used(env, monkeypatch):
@@ -1903,7 +1906,8 @@ def test_a_note_still_inside_after_the_lift_is_recorded(env):
     hook = status_hook(env, schema_fn=lambda tool: schema, coerce_fn=lambda tool, args: args)
     args = {"params": {"withhuman_context": "owned by the server"}, "extra": '{"withhuman_context": "stuck"}'}
     assert call(hook, GW_TOOL, args=args) is None
-    assert recorded(env) == {(GW_TOOL, "declared", "params"), (GW_TOOL, "note_left_inside", "extra")}
+    assert recorded(env) == {(GW_TOOL, "declared", "params"), (GW_TOOL, "args_unreadable", "extra"),
+                             (GW_TOOL, "note_left_inside", "extra.withhuman_context")}
     assert "stuck" not in (env.tmp_path / "lift_status.json").read_text()
 
 
@@ -1913,9 +1917,10 @@ def test_a_declared_key_is_not_also_reported_as_left_inside(env):
     assert recorded(env) == {(GW_TOOL, "declared", "params")}
 
 
-def test_problems_never_log_values_and_repeat_calls_do_not_duplicate_entries(env, caplog):
+def test_problems_never_log_values_and_repeat_calls_do_not_duplicate_entries(env, caplog, monkeypatch):
     env.provider.auto = "approved"
     caplog.set_level(logging.DEBUG, logger="durable_park")
+    monkeypatch.setattr("durable_park.gatecall.LIFT_REWRITE_SECONDS", 0)
     hook = status_hook(env, schema_fn=lambda tool: DECLARES)
     args = {"params": {"customer_ref": "cust-ref-9911", "withhuman_context": "private note 4455"}}
     call(hook, GW_TOOL, args=copy.deepcopy(args), tool_call_id="call-1")
@@ -1945,4 +1950,176 @@ def test_register_writes_the_lift_report_next_to_the_ledger(tmp_path, monkeypatc
     monkeypatch.setattr("durable_park.make_pre_tool_call", spy)
     ctx = FakeCtx(tmp_path, {"ledger_path": str(tmp_path / "data" / "ledger.db")})
     register(ctx)
-    assert captured["lift_status_path"] == str(tmp_path / "data" / "lift_status.json")
+    assert captured["lift_status"].path == str(tmp_path / "data" / "lift_status.json")
+
+
+# ---- round 5: every silent path ------------------------------------------------------------------------
+
+NOTHING_LISTED = {"type": "object", "properties": {"params": {"type": "object"}}}  # no top-level withhuman_context
+
+
+@pytest.mark.parametrize("nested", [
+    {"params": {"criteria": {"withhuman_context": "deep"}}},
+    {"params": [{"a": 1, "withhuman_context": "in a list"}]},
+    {"params": "{'a': 1, 'withhuman_context': 'not strict json'}"},
+    {"params": {"WithHuman_Context": "other spelling"}},
+])
+def test_a_note_that_stays_inside_a_deeper_shape_is_recorded_not_moved(env, nested):
+    env.provider.auto = "approved"
+    assert call(status_hook(env), GW_TOOL, args=copy.deepcopy(nested)) is None  # nothing moved
+    kinds = {(tool, kind) for tool, kind, key in recorded(env)}
+    assert kinds == {(GW_TOOL, "note_left_inside")}
+    (_, _, key), = recorded(env)
+    assert key.startswith("params") and "deep" not in key and "list" not in key and "strict" not in key
+
+
+def test_a_gateway_tool_without_rules_is_reported_and_still_searched_for_a_note(env):
+    env.provider.auto = "approved"
+    hook = status_hook(env, schema_fn=lambda tool: None)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None
+    assert recorded(env) == {(GW_TOOL, "schema_unavailable", ""), (GW_TOOL, "note_left_inside", "params.withhuman_context")}
+
+
+def test_a_gateway_tool_whose_rules_do_not_show_the_field_is_searched_too(env):
+    env.provider.auto = "approved"
+    hook = status_hook(env, schema_fn=lambda tool: NOTHING_LISTED)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None
+    assert recorded(env) == {(GW_TOOL, "note_left_inside", "params.withhuman_context")}  # not schema_unavailable
+    assert call(hook, GW_TOOL, args={"params": {"a": 1}}, tool_call_id="call-2") is None
+    assert recorded(env) == {(GW_TOOL, "note_left_inside", "params.withhuman_context")}  # a clean call adds nothing
+
+
+def test_a_tool_that_is_not_a_gateway_tool_is_never_touched_or_reported(env):
+    env.provider.auto = "approved"
+    for schema_fn in (lambda tool: None, lambda tool: NOTHING_LISTED):  # no gateway slug: no extra search
+        hook = status_hook(env, schema_fn=schema_fn)
+        assert call(hook, "web_search", args=copy.deepcopy(NESTED), tool_call_id=f"c-{id(schema_fn)}") is None
+
+    def broken(tool):
+        raise RuntimeError("registry gone")
+
+    assert call(status_hook(env, schema_fn=broken), "web_search", args=copy.deepcopy(NESTED),
+                tool_call_id="c-broken") is None
+    assert recorded(env) == set()
+
+
+@pytest.mark.parametrize("args,detail", [
+    ({"params": {"customer_ref": "58", "withhuman_context": {"why": "x"}}}, "not text"),
+    ({"params": {"customer_ref": "58", "withhuman_context": ""}}, "empty"),
+    ({"params": {"customer_ref": "58", "withhuman_context": "nested"}, "withhuman_context": "top"},
+     "another note was already at the top"),
+])
+def test_a_note_that_is_removed_but_not_moved_is_recorded(env, args, detail):
+    env.provider.auto = "approved"
+    result = call(status_hook(env), GW_TOOL, args=copy.deepcopy(args))
+    assert result["action"] == "modify" and "withhuman_context" not in result["args"]["params"]
+    entries = json.loads((env.tmp_path / "lift_status.json").read_text())["entries"]
+    assert [(e["kind"], e["key"], e["detail"]) for e in entries] == [("note_dropped", "params", detail)]
+    assert "nested" not in (env.tmp_path / "lift_status.json").read_text().replace("note_dropped", "")
+
+
+def test_two_nested_notes_record_the_second_as_dropped(env):
+    env.provider.auto = "approved"
+    args = {"a": {"withhuman_context": "first"}, "b": {"withhuman_context": "second"}}
+    result = call(status_hook(env), GW_TOOL, args=args)
+    assert result["args"]["withhuman_context"] == "first"
+    entries = json.loads((env.tmp_path / "lift_status.json").read_text())["entries"]
+    assert [(e["kind"], e["key"], e["detail"]) for e in entries] == [("note_dropped", "b", "more than one note")]
+
+
+def rename_coerce(tool, args):
+    """Hermes's ``unrename_tool_args`` maps a model-facing (sanitized) key back to its wire name."""
+    return {("params_wire" if k == "params" else k): json.loads(v) if isinstance(v, str) and v.startswith("{") else v
+            for k, v in args.items()}
+
+
+def test_a_coercion_that_renames_a_key_is_never_adopted(env):
+    env.provider.auto = "approved"
+    args = {"params": '{"customer_ref": "58", "withhuman_context": "Find customer 58"}',
+            "other": {"withhuman_context": "x"}}
+    result = call(status_hook(env, coerce_fn=rename_coerce), GW_TOOL, args=copy.deepcopy(args))
+    assert "params_wire" not in result["args"]  # the renamed key is not taken over
+    assert result["args"]["params"] == args["params"]  # the text key keeps the model's own value
+    assert result["args"]["other"] == {} and result["args"]["withhuman_context"] == "x"  # the plain key is still lifted
+    assert {**args, **result["args"]} == result["args"]
+    assert {(k, key) for _, k, key in recorded(env)} == {("args_unreadable", "params"),
+                                                         ("note_left_inside", "params.withhuman_context")}
+    assert env.provider.only().body["arguments"] == result["args"]
+
+
+def test_only_the_text_keys_take_hermes_coerced_values(env):
+    """Hermes's type fixing may also change unrelated values ("5" to 5): the model's own values are kept."""
+    env.provider.auto = "approved"
+
+    def coerce(tool, args):
+        out = json_coerce(tool, args)
+        out["amount"] = 5  # unrelated change by Hermes
+        return out
+
+    args = {"params": '{"customer_ref": "58", "withhuman_context": "n"}', "amount": "5"}
+    result = call(status_hook(env, coerce_fn=coerce), GW_TOOL, args=args)
+    assert result["args"] == {"params": {"customer_ref": "58"}, "amount": "5", "withhuman_context": "n"}
+
+
+def test_an_unsafe_lift_is_refused_with_a_record_and_no_modify(env, monkeypatch):
+    """The merge of a modify into the original must be exactly the lifted call: if the lift ever lost a key it
+    could not be expressed, so the original arguments are used."""
+    monkeypatch.setattr("durable_park.park_hook.lift_gateway_context",
+                        lambda work, schema, on_problem=None: {"params": {"customer_ref": "58"}})  # dropped a key
+    env.provider.auto = "approved"
+    args = {"params": {"customer_ref": "58"}, "amount": 5}
+    assert call(status_hook(env), GW_TOOL, args=copy.deepcopy(args)) is None
+    assert recorded(env) == {(GW_TOOL, "lift_error", "")}
+    assert env.provider.only().body["arguments"] == args
+
+
+def test_a_failed_coercion_still_lifts_the_plain_nested_notes(env):
+    env.provider.auto = "approved"
+
+    def broken(tool, args):
+        raise RuntimeError("hermes moved")
+
+    args = {"params": '{"a": 1, "withhuman_context": "text"}', "other": {"x": 1, "withhuman_context": "plain"}}
+    result = call(status_hook(env, coerce_fn=broken), GW_TOOL, args=args)
+    assert result == {"action": "modify", "args": {"params": args["params"], "other": {"x": 1},
+                                                   "withhuman_context": "plain"}}
+    assert {(k, key) for _, k, key in recorded(env)} == {("args_unreadable", "params"),
+                                                         ("note_left_inside", "params.withhuman_context")}
+
+
+def test_too_big_an_argument_tree_is_reported_as_an_incomplete_check(env):
+    env.provider.auto = "approved"
+    args = {"params": [{"i": i} for i in range(11_000)]}
+    assert call(status_hook(env), GW_TOOL, args=args) is None
+    assert recorded(env) == {(GW_TOOL, "check_incomplete", "")}
+
+
+def test_lift_report_that_cannot_be_written_is_kept_and_written_by_the_self_check_tick(env, tmp_path, caplog):
+    from durable_park.gatecall import LiftStatus
+
+    env.provider.auto = "approved"
+    directory = tmp_path / "late"
+    status = LiftStatus(str(directory / "lift_status.json"))
+    hook = make_hook(env, schema_fn=lambda tool: DECLARES, lift_status=status)
+    assert call(hook, GW_TOOL, args=copy.deepcopy(NESTED)) is None  # the call is not disturbed
+    assert not directory.exists()
+    directory.mkdir()
+    status.flush()  # what the 30-minute self-check thread calls
+    entries = json.loads((directory / "lift_status.json").read_text())["entries"]
+    assert [(e["tool"], e["kind"], e["key"]) for e in entries] == [(GW_TOOL, "declared", "params")]
+
+
+def test_register_gives_the_selfcheck_thread_the_lift_flush(tmp_path, monkeypatch):
+    ticks = []
+    monkeypatch.setattr("durable_park.formcheck.start_selfcheck",
+                        lambda checker, risky, path, on_tick=None: ticks.append(on_tick) or True)
+    captured = {}
+
+    def spy(ledger, gate_factory, form_checked, **kw):
+        captured.update(kw)
+        return lambda **k: None
+
+    monkeypatch.setattr("durable_park.make_pre_tool_call", spy)
+    register(FakeCtx(tmp_path / "data"))
+    (tick,) = ticks
+    assert tick == captured["lift_status"].flush
