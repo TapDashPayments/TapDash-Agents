@@ -13,18 +13,22 @@ every tool call except `parked_action_execute`, `clarify` and the read-only Tool
 
 Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
 `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (on every platform key; `hermes_tool_policy.py check` prints the key count and ends `ok`).
-Hermes approvals stay off. The user `hermes` still has passwordless sudo until Clean Setup Phase 1
-([spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1); the lockdown is a configuration guard,
-not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
+Hermes approvals stay off. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC, 2026-10-21 10:22 PM ET;
+[spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1): the user `hermes` no longer has sudo. The ledger is
+still owned by `hermes` (Clean Setup Phase 2, §4.5, not done), so the lockdown is still a configuration guard for the
+ledger, not a permission boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay off
+until Phase 2. Re-running `configure_hermes.sh` or
 `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
 row" rule applies.
 
-**Known risk, accepted for now:** while the user `hermes` has passwordless sudo, the lockdown does not stop a
-determined or hijacked agent that finds a way to run code as that user: it could read every secret in
-`/etc/durable-park/` (including the QuickBooks credentials), forge ledger rows and call QuickBooks directly, bypassing
-withHuman. durable-park therefore is not a security boundary yet. Yaakov accepted this on 2026-10-20 for the QuickBooks
-sandbox exploration phase. Clean Setup Phase 1 (spec §4.1) is the first item in the [backlog](docs/backlog.md#before-real-books),
-before any real books.
+**Known risk, narrowed on 2026-10-22:** `hermes` no longer has sudo (Clean Setup Phase 1), so a hijacked agent that
+found a way to run code as that user can no longer read `/etc/durable-park/` (the QuickBooks credentials) through sudo,
+or change `/opt/durable-park`. What remains: the ledger and the plugin data are still owned by `hermes`, so such an agent
+could forge ledger rows; the secrets `hermes` reads by design (`instance_token`, `audit_key`, `wake_secret`, `bridge_secret`) stay
+readable; and an agent with a file or terminal tool could still reach everything `hermes` owns. durable-park
+therefore is not a full security boundary yet: the lockdown (no file, terminal or code tools) must stay in place until Clean
+Setup Phase 2 (a separate ledger owner, spec §4.5). Yaakov accepted the earlier, wider risk on 2026-10-20 for the QuickBooks
+sandbox exploration phase. The open items are in the [backlog](docs/backlog.md#before-real-books), before any real books.
 
 ## How it works
 

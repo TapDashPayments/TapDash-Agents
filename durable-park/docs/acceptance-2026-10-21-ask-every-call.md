@@ -46,7 +46,25 @@ The crash-injection, fail-closed, instant-deny and park evidence is from the liv
 - Sweep: collapse the duplicate policy recovery and alert lines.
 - Refusal note: name the human decider (withHuman management API lookup). The AAP wire exposes only status and note.
 - Runbook: document the `observer_hooks` procedure for the Raft adapter.
-- Clean Setup Phase 1 (spec §4.1, rows 1–5): Yaakov at a terminal, `COMMANDS.md` steps 3, 5–10.
+- Clean Setup Phase 1 (spec §4.1, rows 1–5): done afterwards, see the dated note below. What is left: `COMMANDS.md` step 3 (dashboard login rotation, optional) and step 10 (restrict Tailscale SSH to `ubuntu`, the owner's action in the Tailscale admin console).
 - Phase 2 (rows 13–15) not started.
+
+## Note 2026-10-22: Clean Setup Phase 1 done (rows 1 to 5)
+
+Added after this record was written; the table above is left as it was. Phase 1 was run by Yaakov at his terminal and finished at 2026-10-22 02:22 UTC (2026-10-21 10:22 PM ET). The outputs were seen live.
+
+| # | Check | Result | Evidence |
+|---|---|---|---|
+| 1 | Connector runs as `ubuntu` (spec 4.1 #1) | PASS | The system unit `hermes-shell-mcp` runs as `ubuntu` from `/home/ubuntu/hermes-shell-mcp` (venv rebuilt from a pip freeze, fastmcp 4.1.1; `server.py` and `set-github-oauth.sh` patched for the `ubuntu` home and to reach Hermes through `sudo -u hermes ...`); port 127.0.0.1:8792, Tailscale Funnel path `/hermes-shell` unchanged. Unit backup: `/root/hermes-shell-mcp.service.bak`. Re-authorizing the connector in Claude worked (`POST /token` 200, `/mcp` 200). |
+| 2 | `hermes` has no sudo (spec 4.1 #2) | PASS | `/etc/sudoers.d/90-hermes` removed; `sudo -u hermes sudo -n true` is refused; `/etc/sudoers.d` holds only `90-cloud-init-users` and `README`. `ubuntu` keeps passwordless sudo. |
+| 3 | Nothing the agent runs broke (spec 4.1 #3) | PASS (partly evidenced) | `hermes-gateway` and `hermes-dashboard` (user units of `hermes`), `durable-park-bridge`, `durable-park-receiver`, `hermes-shell-mcp` and `devtunnel-hermes` all active; the Telegram bot answered a test message. The Teams message and the sweep run that spec 4.1 #3 names were not reported in this check. |
+| 4 | SSH passwords off (spec 4.1 #4) | PASS | `sshd -T` says `passwordauthentication no` (done earlier). |
+| 5 | Admin can still deploy (spec 4.1 #5) | PASS (partly evidenced) | `sudo -u hermes git fetch` works. A `git pull --ff-only` and a user-unit restart through `XDG_RUNTIME_DIR`, as spec 4.1 #5 words it, were not reported in this check. |
+
+Also done: the stale `ubuntu` user units `hermes-gateway.service` and `hermes-dashboard.service` were removed from `~ubuntu/.config/systemd/user` (spec step 8); `devtunnel-hermes` (Teams) was kept and is active.
+
+Lesson: copying fastmcp's OAuth store (`~/.local/share/fastmcp/oauth-proxy`) from `/home/hermes` breaks the login (`PathSecurityError`: entries resolve outside the new root). The fix was to move the copied store aside (`oauth-proxy.copied-bak`) and re-authorize the connector in Claude, which creates a fresh store.
+
+Still open: Tailscale admin console, restrict Tailscale SSH to `ubuntu` (step 10, pending); Hermes dashboard login rotation (step 3, optional). Rows 13–15 and Clean Setup Phase 2 are unchanged: the ledger is still owned by `hermes`, so file, terminal and code tools stay off.
 - Rotate all secrets before production (see [acceptance-2026-10-20.md](acceptance-2026-10-20.md) "Before production").
 - P-BEFE1029 stays `unknown` by design. The $7 on invoice 1016 is unposted; a human may issue a fresh payment.
