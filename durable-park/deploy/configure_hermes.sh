@@ -7,7 +7,7 @@
 # What it does (each step checks before it changes anything):
 #   1. system user aaprecv; group dpwake (members hermes, aaprecv); /etc/durable-park (0755 root)
 #   2. /etc/durable-park/wake_secret: generated once (0640 root:dpwake); never printed. No bridge_secret.
-#   3. receiver venv /opt/durable-park (agentapprovalprotocol + uvicorn + starlette, pinned) and a root-owned
+#   3. receiver venv /opt/durable-park (agentapprovalprotocol + uvicorn + starlette + httpx, pinned) and a root-owned
 #      copy of receiver/*.py; system unit durable-park-receiver (enabled + started: it answers 401 to every
 #      event until provision.py has written /etc/durable-park/receiver.json); the Hermes secret-source helper
 #      /opt/durable-park/libexec/hermes-secrets
@@ -70,8 +70,9 @@ BRIDGE_LOCAL=http://127.0.0.1:8791/wh/bridge
 SECRETS_HELPER="$VENV/libexec/hermes-secrets"
 # Earlier value of secrets.command.command (inline sed); migrated to SECRETS_HELPER.
 OLD_SECRET_COMMAND="sed -n 's/^/DURABLE_PARK_WAKE_SECRET=/p' $ETC/wake_secret"
-# Receiver venv pins: what the repo's tests run against.
-RECEIVER_PACKAGES=("agentapprovalprotocol==0.3.3" "uvicorn==0.54.0" "starlette==1.9.0")
+# Receiver venv pins: what the repo's tests run against. httpx is imported directly by the bridge (bridge/whapi.py):
+# pinned here, to the version already in the VM's venv, instead of relying on agentapprovalprotocol to pull it in.
+RECEIVER_PACKAGES=("agentapprovalprotocol==0.3.3" "uvicorn==0.54.0" "starlette==1.9.0" "httpx==0.28.1")
 
 log() { printf 'configure_hermes: %s\n' "$*"; }
 die() { printf 'configure_hermes: ERROR: %s\n' "$*" >&2; exit 1; }

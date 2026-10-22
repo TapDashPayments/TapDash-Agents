@@ -583,3 +583,21 @@ echo REACHED-AFTER-DIE
     assert 'users:(("python3",pid=999,fd=3))' in done.stderr  # the listener's line is shown
     assert "do not continue" in done.stderr.lower()
     assert argv_file.read_text().strip() == "-ltnp sport = :8791"
+
+
+def _receiver_package_pins():
+    match = re.search(r"^RECEIVER_PACKAGES=\((.*)\)$", SCRIPT.read_text(), re.M)
+    assert match, "RECEIVER_PACKAGES not found"
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def test_the_venv_pins_httpx_which_the_bridge_imports_directly():
+    """bridge/whapi.py imports httpx. It must not depend on agentapprovalprotocol happening to pull it in, so the
+    venv pins it, to the version the VM's /opt/durable-park venv has (0.28.1) and the dev requirements test against."""
+    assert "httpx==0.28.1" in _receiver_package_pins()
+
+
+def test_every_venv_pin_is_the_version_the_tests_run_against():
+    dev = (SCRIPT.parents[1] / "requirements-dev.txt").read_text().split()
+    pins = _receiver_package_pins()
+    assert pins and all(pin in dev for pin in pins), [pin for pin in pins if pin not in dev]
