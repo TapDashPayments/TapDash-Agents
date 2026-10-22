@@ -8,6 +8,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 - [Alerts and what to do](#alerts-and-what-to-do)
 - [Troubleshooting](#troubleshooting)
 - [Plugin settings](#plugin-settings)
+- [Tracing (Langfuse)](#tracing-langfuse)
 - [Add a form-checked tool](#add-a-form-checked-tool)
 - [Rotate secrets before production](#rotate-secrets-before-production)
 - [Rollback](#rollback)
@@ -89,7 +90,7 @@ follows whatever tool list it is given. Check that the wording is still there af
 ### Live Hermes settings on proto-agents
 
 The settings below were changed on the VM itself (not by a repo change), so they are listed here. Checked live on
-2026-10-21 at about 20:10 UTC, as `hermes`. Print a key with `hermes config get <key>` (never print the whole file
+2026-10-21 at about 20:10 UTC, as `hermes` (the Langfuse row was added on 2026-10-22). Print a key with `hermes config get <key>` (never print the whole file
 or `~/.hermes/.env`: they hold secrets).
 
 | Setting | Live value | Why |
@@ -101,6 +102,7 @@ or `~/.hermes/.env`: they hold secrets).
 | Secret references (`platforms.webhook.extra.routes.durable-park-wake.secret`, `mcp_servers.wh.headers.Authorization`) | bare `${VAR}` form | PR #28; no `${env:...}` is left in `config.yaml`. See [Config ref is not set](#every-hermes-command-prints-config-ref--is-not-set). |
 | Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *` | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). |
 | `hermes-dashboard` unit | `RestartPreventExitStatus=78` in the main unit file | See [Dashboard over HTTPS](#dashboard-over-https). |
+| Langfuse tracing: plugin `langfuse` enabled, `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | on since 2026-10-22 04:37 UTC; settings last changed 13:42 UTC | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
 
 If `hermes-gateway` reports `DEGRADED` after a Hermes update, read `~/.hermes/logs/gateway.log` for the platform
 that failed to start before changing anything. To use `api_server` later, an admin sets `API_SERVER_KEY` in the
@@ -799,9 +801,231 @@ observer may be listed.
 | Name | Source | What it does | Reviewed (date) | Result |
 |---|---|---|---|---|
 | `platforms__raft.adapter._on_pre_tool_call` (full name `hermes_plugins.platforms__raft.adapter._on_pre_tool_call`) | Hermes Raft platform plugin, on `proto-agents` | Records telemetry about each call; always returns `None`, on every path including errors. Never returns `modify`, `block` or any other directive. | 2026-10-21 | Listed in `observer_hooks`; gateway restarted; calls asked about normally again |
+| `hermes_plugins.langfuse.on_pre_tool_call` | Nous Research official `langfuse` plugin v2.0.0 @ commit `c2a9596`, on `proto-agents` | Starts a Langfuse tool observation from a copy of the call's arguments (`_capture_content` builds new structures with `_safe_value`). Returns `None` on every path and never changes the arguments. Its `on_post_tool_call` only changes the plugin's own copies. | 2026-10-22 | Listed in `observer_hooks`. The plugin was switched on 2026-10-22 04:37 UTC ([Tracing (Langfuse)](#tracing-langfuse)); after that restart calls were asked about normally and a $1 payment ran once after one approval ([record](acceptance-2026-10-22-langfuse.md)) |
 
 `<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook or middleware
 registry (e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
+
+## Tracing (Langfuse)
+
+Langfuse shows what the agent did: each message, each model call and each tool call, with its full content.
+It is for people debugging and reviewing the agent. It has no say in what runs: it only watches.
+
+**State: LIVE since 2026-10-22 04:37 UTC.** The Nous Research `langfuse` plugin (v2.0.0 @ `c2a9596`, MIT) was enabled
+at 04:37:45 and the gateway restarted; the Langfuse keys were typed in by Yaakov at about 04:35. Its hook is listed in
+`observer_hooks`. Every chat turn on `proto-agents` is now copied to Langfuse Cloud. The settings last changed at
+13:42 UTC the same day (`HERMES_LANGFUSE_MAX_DEPTH` 16). What was checked, and the audit of what Langfuse shows:
+[acceptance-2026-10-22-langfuse.md](acceptance-2026-10-22-langfuse.md).
+
+What it records (a hooks-only plugin, no tools):
+
+| Level in Langfuse | What it is |
+|---|---|
+| Trace | One per message turn, named `Hermes turn`. Input = the user's message, output = the final reply. All turns of one chat share a session id, including the turn after an approval |
+| Generation | One per model call (`LLM call 1`, `LLM call 2`, ...). Input = the system prompt + the last 12 messages; output = the answer; model name and token counts are filled in |
+| Observation | One per tool call (type `TOOL`: arguments and result) and one per subagent. A call that was parked shows level `WARNING` with status message `plugin_block` |
+
+It **fails open**: if Langfuse is down or a key is missing, the turn still runs and the trace is lost. There is no
+offline spool, so a gap in Langfuse is not proof that nothing happened. The ledger and withHuman remain the record of
+what ran.
+
+**Where traces go.** Langfuse Cloud, US region (<https://us.cloud.langfuse.com>), project `proto-agents`, Hobby (free)
+plan: 30 days of data access, and a monthly allowance of units (a unit is one trace, observation or score; 50,000 on
+Langfuse's public pricing page, <https://langfuse.com/pricing>, not checked in this work). Retention
+cannot be changed on Hobby ([backlog](backlog.md#before-real-books), items 8 and 9).
+
+**Settings** (names only; never print `.env`). They live in `~hermes/.hermes/.env`. Read once when the gateway
+starts. A change needs a restart (ledger check first, see [Turn it off](#turn-it-off) step 1).
+
+| Name | Live value | Secret | Why |
+|---|---|---|---|
+| `HERMES_LANGFUSE_BASE_URL` | `https://us.cloud.langfuse.com` | no | Langfuse Cloud, US region |
+| `HERMES_LANGFUSE_CAPTURE` | `full` (modes: `metadata`, `sanitized` = the plugin's default, `full`) | no | Whole content, decided for the sandbox (see "What `full` means" below) |
+| `HERMES_LANGFUSE_ENV` | `proto-agents` | no | The environment label on each trace |
+| `HERMES_LANGFUSE_MAX_DEPTH` | `16` | no | How many levels of nested data are kept per field. The plugin default (4) cut 16 observations, including the arguments of `create_payment`. 10 still cut the payment's `linked_txn` (11 levels deep inside the tool-call envelope) and the QuickBooks tool schemas. At 16 nothing is cut (checked with the plugin's own serializer: 10 gave 1 + 5 cut-offs, 16 gave none). Cut-off data shows as `<max-depth>` |
+| `HERMES_LANGFUSE_MAX_CHARS` | `50000` | no | Characters kept per field. The default (12000) cut root outputs of about 14,000 characters |
+| `HERMES_LANGFUSE_RELEASE` | `hermes-v0.22.3` | no | The release label on each trace. **Update it when Hermes is upgraded** (`hermes-v<version>`), then restart, so traces can be told apart by version |
+| `HERMES_LANGFUSE_PUBLIC_KEY` | the project's public key (`pk-lf-...`) | typed in | Half of the key pair. An identifier rather than a secret on its own, but handled like the other key |
+| `HERMES_LANGFUSE_SECRET_KEY` | the project's secret key (`sk-lf-...`) | yes, typed in | Reads and writes the project's traces |
+
+Backups of `.env` from this work: `.env.bak-langfuse-20261022T042450Z`, `.env.bak-langfuse2-20261022T045726Z`,
+`.env.bak-langfuse3-20261022T134218Z` (and `config.yaml.bak-langfuse-20261022T042450Z`), all in `~hermes/.hermes/`.
+The same settings are listed with the other live settings in [Live Hermes settings on
+proto-agents](#live-hermes-settings-on-proto-agents).
+
+**What `full` means.** Raw content, cut only when a field is longer than `HERMES_LANGFUSE_MAX_CHARS` or
+nested deeper than `HERMES_LANGFUSE_MAX_DEPTH`. Everything people
+type in a chat, everything the model is sent and answers, and every tool's arguments and results (QuickBooks names,
+amounts, ids) leaves the VM and sits at Langfuse. That is acceptable for the QuickBooks **sandbox** on the test VM. It
+is a decision to make again before real books ([backlog](backlog.md#before-real-books), item 9).
+
+### Turn it on (admin)
+
+This is how it was switched on on 2026-10-22; use the same steps to switch it on again after it was turned off.
+
+1. In Langfuse (project `proto-agents`, Settings, API keys), create a key pair. The secret key is shown once.
+2. Type the keys in on the VM as `hermes`. Nothing is echoed, nothing goes in chat or the repo:
+
+   ```sh
+   read -rs -p "Langfuse public key: " LF_PK; echo
+   read -rs -p "Langfuse secret key: " LF_SK; echo
+   [ -z "$(tail -c1 ~/.hermes/.env)" ] || echo >> ~/.hermes/.env      # end the last line first, if it has no newline
+   printf 'HERMES_LANGFUSE_PUBLIC_KEY=%s\nHERMES_LANGFUSE_SECRET_KEY=%s\n' "$LF_PK" "$LF_SK" >> ~/.hermes/.env
+   unset LF_PK LF_SK
+   ```
+
+3. Check that the non-secret settings in the table above are in `.env` (names only: `grep -c '^HERMES_LANGFUSE_' ~/.hermes/.env`
+   counts the lines; `grep -o '^HERMES_LANGFUSE_[A-Z_]*' ~/.hermes/.env` lists the names). Add any that are missing.
+   Also check that `hermes config get plugins.entries.durable-park.settings.observer_hooks` still lists
+   `hermes_plugins.langfuse.on_pre_tool_call` (it is taken out only under "remove for good" below). Without it,
+   durable-park refuses every tool call once the plugin is enabled (an outage, not a loss of safety).
+4. `hermes plugins enable langfuse`.
+5. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)), and restart `hermes-gateway`
+   straight after, so no approval can be parked in between. Then run [Check it works](#check-it-works).
+
+### Check it works
+
+```sh
+hermes plugins list | grep -i -e langfuse -e durable-park      # langfuse enabled, durable-park enabled
+grep -i -e 'durable-park loaded' -e 'foreign pre_tool_call' ~/.hermes/logs/agent.log | tail
+grep -e 'Langfuse plugin:' -e 'Langfuse tracing:' ~/.hermes/logs/agent.log | tail     # nothing dated after the last start (older lines also match)
+grep 'plugin=langfuse' ~/.hermes/logs/agent.log | tail -3
+cat ~/.hermes/plugin-data/durable-park/tool_policy_status.json       # "ok": true
+cat ~/.hermes/plugin-data/durable-park/plugin_load.json            # present, pid = the gateway's MainPID
+```
+
+What good looks like (seen on 2026-10-22):
+
+- `hermes plugins list` shows `langfuse` enabled.
+- The `durable-park loaded: ... 2 observer hook(s) ...` line (two: Raft and Langfuse), and **no**
+  `foreign pre_tool_call hook(s) present` line. If there is one, the Langfuse hook name is not listed, and durable-park
+  refuses every call ([Allow another hook](#allow-another-hook-observer_hooks)).
+- The Langfuse plugin writes **no "loaded" line**, so do not look for one. A missing or placeholder key is the only thing
+  it complains about, with a warning that starts `Langfuse plugin:` or `Langfuse tracing:`. None must appear after the
+  last start.
+- Every start logs `capability_check plugin=langfuse capability=tools.override decision=deny`. That is normal and
+  harmless: the plugin asks for a capability it does not need and is refused.
+- `tool_policy_status.json` has `"ok": true` and `plugin_load.json` exists.
+- Send one chat message. After a short delay a trace named `Hermes turn` appears in Langfuse (project
+  `proto-agents`, environment `proto-agents`, release as in the table) with the full text. See
+  [Read traces](#read-traces).
+- Make one QuickBooks call. It must still be asked about in withHuman as before, and a parked payment must still run
+  at most once. Tracing changes none of that.
+
+### Read traces
+
+In the Langfuse web app: project `proto-agents`, Tracing. To read them from the VM: **Langfuse Cloud answers HTTP 410
+for the old v1 calls** (`/api/public/traces`, `/api/public/observations`, `/api/public/sessions`). Use the v2
+observations call, or `npx langfuse-cli` (the Langfuse agent skill recommends it). Load the keys into the process
+only: never put them on a command line (they would show in `ps` and in shell history) and never print them.
+
+```sh
+python3 - <<'PY'
+import base64, json, os, urllib.parse, urllib.request
+env = {}
+for line in open(os.path.expanduser("~/.hermes/.env")):
+    if line.startswith("HERMES_LANGFUSE_"):
+        k, _, v = line.rstrip("\n").partition("=")
+        env[k] = v.strip().strip("'\"")
+auth = base64.b64encode(
+    (env["HERMES_LANGFUSE_PUBLIC_KEY"] + ":" + env["HERMES_LANGFUSE_SECRET_KEY"]).encode()).decode()
+base = env["HERMES_LANGFUSE_BASE_URL"] + "/api/public/v2/observations"
+params = {"fields": "core,basic,io,metadata,time", "limit": "100", "fromStartTime": "2026-10-22T04:35:00Z"}
+rows = []
+while True:
+    req = urllib.request.Request(base + "?" + urllib.parse.urlencode(params),
+                                 headers={"Authorization": "Basic " + auth})
+    body = json.load(urllib.request.urlopen(req, timeout=30))
+    rows += body.get("data", [])
+    cursor = (body.get("meta") or {}).get("cursor")
+    if not cursor:
+        break
+    params["cursor"] = cursor
+print(len(rows), "observations,", len({r["traceId"] for r in rows}), "traces")   # counts only
+PY
+```
+
+Change `fromStartTime` (UTC) to the start of the window you want. Print only what you need from each row (name, type,
+level, trace id): the rows hold full chat and tool content. With `npx langfuse-cli`, export the keys into the
+process environment the same way (from the `.env` lines, without echoing) and do not pass them as arguments.
+
+### Secret scan (how it was done, and how to repeat it)
+
+Full capture means a secret that reaches the model or a tool result would also reach Langfuse, so the traces were
+scanned for secrets (2026-10-22 at 04:59 UTC over 26 observations, repeated at 13:42 UTC). Result: **no secret key, no
+`.env` secret, no readable `/etc/durable-park` secret, no Telegram bot token, no Bearer token, no withHuman `who_` key
+and no card-number-like digits** were found in Langfuse. The only hit was the Langfuse **public** key, which the
+SDK writes into every span's metadata (`scope.attributes.public_key`); it is an identifier, not a secret. Not scanned:
+`/etc/durable-park/receiver.json` and `tunnel.env` (owner-only; `hermes` cannot read them).
+
+To repeat it, as `hermes`, in one process that never prints a candidate or a match:
+
+1. Build the candidate list: every `.env` value whose name contains `KEY`, `TOKEN`, `SECRET` or `PASSWORD` and that is
+   at least 12 characters long, plus the contents of each file under `/etc/durable-park/` that `hermes` can read.
+2. Fetch the observations with the v2 call under [Read traces](#read-traces).
+3. For each observation, search its whole JSON for each candidate as a literal substring, and for the shapes `sk-lf-`,
+   `pk-lf-`, a Telegram bot token, `Bearer`, `who_` and any 13 to 19 digit run that passes the Luhn check.
+4. Print only counts, the observation id and the field name where something matched. Never print the matched text.
+
+Expect exactly one kind of hit: the public key in `scope.attributes.public_key`.
+
+### Turn it off
+
+1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
+2. `hermes plugins disable langfuse`, then restart `hermes-gateway`. Nothing is sent after the restart.
+   Traces already sent stay in Langfuse until its 30-day window on the free plan has passed.
+
+Leave `hermes_plugins.langfuse.on_pre_tool_call` in `observer_hooks` for now: a listed hook that is not loaded does no
+harm. But **do not update or reinstall the plugin while it is enabled**, and never enable an updated plugin before its
+hook has been reviewed: the name stays listed, so a changed hook would be allowed silently at the next restart. See
+[When the plugin changes](#when-the-plugin-changes).
+
+To remove it for good, **in this order**:
+
+1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
+2. `hermes plugins disable langfuse` (or remove the plugin), then restart `hermes-gateway`. The plugin is no longer loaded.
+3. Only now take `hermes_plugins.langfuse.on_pre_tool_call` out of `observer_hooks` (and its row in
+   [Hooks reviewed so far](#hooks-reviewed-so-far)). Check the ledger again, then restart `hermes-gateway` again.
+4. Delete the two key lines from `~/.hermes/.env` and revoke the key pair in Langfuse.
+
+Why this order: while the plugin is still loaded, its hook is a foreign `pre_tool_call` hook. If it is taken out of
+`observer_hooks` first, durable-park refuses every tool call ([Allow another
+hook](#allow-another-hook-observer_hooks)).
+
+### Rotate the keys
+
+1. In Langfuse, create a new key pair. Do not delete the old one yet.
+2. On the VM, as `hermes`, replace the two lines, typing the new keys in as in "Turn it on" step 2:
+
+   ```sh
+   (umask 077; grep -v '^HERMES_LANGFUSE_\(PUBLIC\|SECRET\)_KEY=' ~/.hermes/.env > ~/.hermes/.env.new)
+   cat ~/.hermes/.env.new > ~/.hermes/.env && rm ~/.hermes/.env.new
+   # then the read -rs and printf lines from "Turn it on"
+   ```
+
+3. Check the ledger, restart `hermes-gateway`, run "Check it works", then revoke the old key pair in Langfuse.
+
+### When the plugin changes
+
+The hook is listed in `observer_hooks` because of the code that was read: v2.0.0 at commit `c2a9596`. The listing is by
+name only, so an updated plugin whose hook now does something else would be allowed silently at the next gateway restart
+(a crash restart is enough). So **never update or reinstall the plugin while it is enabled.** In this order:
+
+1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
+2. `hermes plugins disable langfuse`, then restart `hermes-gateway`. The plugin is no longer loaded; leave the
+   `observer_hooks` entry in place.
+3. Update the plugin and pin the new version and commit (for example `hermes plugins install langfuse --yes-deps
+   --no-enable`, then confirm the commit). Do not enable it.
+4. Read the new hook again (steps 2 and 3 of [Allow another hook](#allow-another-hook-observer_hooks)) and update its row
+   in [Hooks reviewed so far](#hooks-reviewed-so-far). If you cannot confirm it never returns `modify`, do not enable it:
+   take the entry out as in "remove for good" under [Turn it off](#turn-it-off). Also update the version in the root
+   [Built on](../../README.md#built-on) table.
+5. Check the ledger again, `hermes plugins enable langfuse`, restart `hermes-gateway`, then run
+   [Check it works](#check-it-works) (the `durable-park loaded` line must still count 2 observer hooks and show no
+   `foreign pre_tool_call` line).
+
+After a **Hermes upgrade**, also set `HERMES_LANGFUSE_RELEASE` to the new version (`hermes-v<version>`) and restart, so
+new traces carry the right release.
 
 ## Add a form-checked tool
 
@@ -987,6 +1211,7 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - [ ] Rotate the withHuman org key (`audit_key`; the bridge needs it, so it is always set): revoke it in withHuman
       and [store a new one](#store-or-rotate-the-bridges-keys) with `audit.read`, `request.read`, `request.read.unrouted`,
       then `sudo systemctl restart durable-park-bridge` (it copies the key at start)
+- [ ] Rotate the Langfuse keys (`HERMES_LANGFUSE_PUBLIC_KEY`, `HERMES_LANGFUSE_SECRET_KEY`, if set): [Rotate the keys](#rotate-the-keys)
 - [ ] Revoke any GitHub token shared in chat; keep only the VM's deploy key for this repo
 - [ ] Then the rest of the [backlog's "Before real books" list](backlog.md#before-real-books)
 

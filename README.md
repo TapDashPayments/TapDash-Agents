@@ -13,6 +13,9 @@ saved. An approver gets an approval request and can take minutes or days to deci
 request runs once, and the assistant reports back in the same chat. If they deny it, nothing happens. Restarts and crashes
 can't lose a request or make it run twice. If anything is unclear, it stops and asks a person instead of guessing.
 
+Every chat message, model call and tool call (with its full content) is also copied to Langfuse Cloud (US), a third
+company, so people can review what the assistant did; on the free plan it can be read there for 30 days.
+
 **Where it stands:** working and tested on a test server with a QuickBooks **sandbox** (fake books) since
 October 2026. It is not connected to real books yet. First the secrets need rotating, and a short list of
 safety items needs finishing: [what is left](durable-park/docs/backlog.md#before-real-books).
@@ -42,6 +45,8 @@ running on the test VM.
 | Component | What it does here | Version | License | Link |
 |---|---|---|---|---|
 | Hermes Agent (Nous Research) | The AI agent framework. Runs the chat bots; our plugin hooks into it | v0.22.3 | MIT | [github](https://github.com/NousResearch/hermes-agent) |
+| Langfuse plugin for Hermes (Nous Research, official catalog plugin) | Sends one trace per message turn to Langfuse: the model calls (system prompt + last 12 messages in, answer out), every tool call and subagent, with full content. Hooks only, no tools. If Langfuse is down or the keys are missing it does nothing, and the turn still runs (traces can be lost). **Live** on the test VM since 2026-10-22 04:37 UTC ([runbook](durable-park/docs/runbook.md#tracing-langfuse)) | v2.0.0 @ commit `c2a9596` | MIT | [github](https://github.com/NousResearch/hermes-official-plugins/tree/main/langfuse) |
+| Langfuse Cloud | Where the traces are stored and read: the hosted service, US region (`us.cloud.langfuse.com`), free Hobby plan (30 days of data; about 50k units a month on [Langfuse's pricing page](https://langfuse.com/pricing)). **Live** since 2026-10-22. It holds the full text of chats and tool calls. Its Python SDK `langfuse` runs inside the plugin | hosted ([langfuse.com](https://langfuse.com)); SDK 4.15.2 | service is Langfuse's; SDK MIT | [site](https://langfuse.com) · [sdk](https://github.com/langfuse/langfuse-python) |
 | withHuman | Approvals: pipeline rules, the approval app, escalation paths, the MCP gateway in front of QuickBooks | hosted ([app.withhuman.ai](https://app.withhuman.ai)) | Elastic License 2.0 (source-available) | [github](https://github.com/withHumanAI/withhuman) |
 | AAP - Agent Approval Protocol | The open protocol and Python SDK (`agentapprovalprotocol`) we use to open approval requests, use an approval once, and verify signed webhooks | SDK 0.3.3 | Apache-2.0 | [github](https://github.com/agentapprovalprotocol/agentapprovalprotocol) · [site](https://agentapprovalprotocol.io) |
 | withHuman tunnel | Container that connects the QuickBooks server on the VM to the withHuman gateway | `quay.io/withhuman/tunnel:0.0.369` | withHuman's | [withHuman](https://withhuman.ai) |
