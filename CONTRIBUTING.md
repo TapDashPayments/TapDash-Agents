@@ -13,6 +13,9 @@ cd durable-park && python3 -m venv .venv && .venv/bin/pip install -r requirement
    sweep load code from it ([runbook](durable-park/docs/runbook.md#deploy-a-change)).
 2. Change the code **and the docs it affects** (next section).
 3. Run the tests: `cd durable-park && .venv/bin/pytest -q -W error`. New behaviour needs a test.
+   For a change under `tracing/` (the patched Langfuse plugin), run `bash tracing/run_tests.sh` as `hermes` on the test
+   VM instead; it needs the Hermes environment's Python, so CI does not run it yet
+   ([backlog](durable-park/docs/backlog.md#langfuse-tracing-gaps-from-the-2026-10-22-audit)).
 4. Push. Open a pull request for anything beyond operations fixes; the template has the checklist.
 5. Make it live on the VM as the [runbook](durable-park/docs/runbook.md#deploy-a-change) says.
 

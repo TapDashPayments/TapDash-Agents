@@ -20,20 +20,33 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 ## Langfuse tracing gaps (from the 2026-10-22 audit)
 
 Found by auditing the live traces ([acceptance-2026-10-22-langfuse.md](acceptance-2026-10-22-langfuse.md)). Tracing is
-live and works. Items 1 to 4 need plugin or durable-park code, so each is a recommendation for Yaakov to decide; item 5
-is only noted. No code was changed in the tracing work.
+live and works. Yaakov decided on 2026-10-22 to fix items 1 to 3 in a patched copy of the plugin,
+[`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse) ([design](../../docs/specs/2026-10-22-langfuse-trace-gaps-design.md);
+changes against upstream: its `PATCHES.md`). The copy is **built and tested, not deployed yet**: items 1 to 3 are live
+only after the deploy ([runbook](runbook.md#switch-to-the-patched-plugin-deploy)). Item 4 is cosmetic and item 5 is only noted.
+No durable-park code changes.
 
-1. **No `userId` on any trace.** The Nous plugin never sets one. Recommend an upstream PR to pass the chat user id, or a
-   small durable-park-side tag. Worth it once there is more than one user.
-2. **Every trace is named `Hermes turn` and every model call `LLM call N`.** Recommend upstream: name by platform and
-   purpose (for example `telegram-chat-turn`).
+1. **No `userId` on any trace.** The Nous plugin never sets one. **Fixed in `tracing/tapdash_langfuse`, live after the
+   deploy:** `userId` is the chat sender id (and `user_name` goes in the trace metadata). A turn with no sender (cron,
+   some CLI turns) has no `userId`; a value that is not US-ASCII or is over 200 characters is left out, never altered.
+2. **Every trace is named `Hermes turn` and every model call `LLM call N`.** **Fixed in `tracing/tapdash_langfuse`, live
+   after the deploy:** traces are named `telegram-turn`, `teams-turn`, `cli-turn`, `cron-run` or `hermes-turn` (platform
+   unknown). The model calls are still named `LLM call N`; that part was not changed.
 3. **Park, approval and resume are separate traces,** joined only by the park id in the text; the inner `create_payment`
-   is not a child of `parked_action_execute`. Recommend a durable-park follow-up: add the park id and the withHuman
-   request id as trace metadata or tags (for example `park:P-...`), and an event or span for the approval decision. It
-   touches the park, wake and executor code, so it needs **its own plan, tests and independent review** (AGENTS.md Rule 2).
+   is not a child of `parked_action_execute`. **Fixed for finding them, in `tracing/tapdash_langfuse`, live after the
+   deploy:** the new setting `HERMES_LANGFUSE_TAG_PATTERNS` (live value `park=\bP-[0-9A-F]{8}\b`) tags each trace that
+   mentions a park id with `park:P-XXXXXXXX`, so one tag filter returns the parking turn, the approval turn and the run
+   ([how](runbook.md#find-everything-about-one-approval)). It needed no durable-park change. **Still open:** the traces
+   are not linked as parent and child, the withHuman request id is not tagged, and there is no event for the approval
+   decision itself (out of scope of the design; it would touch the park, wake and executor code and would need its own
+   plan, tests and independent review, AGENTS.md Rule 2).
 4. **The root `CHAIN` has a parent observation id that points at a span that is never exported.** Cosmetic; upstream.
 5. **Noted, not a gap: the Langfuse public key is in every span's metadata** (`scope.attributes.public_key`, an SDK default). An
    identifier, not a secret; nothing to do unless the SDK adds an option to leave it out.
+
+6. **Run `tracing/run_tests.sh` in CI.** The patched plugin's tests run only on the test VM today
+   (`bash tracing/run_tests.sh` as `hermes`: they need the Hermes environment's Python and a `hermes-agent`
+   checkout), so CI does not run them. Add a CI job that checks out `hermes-agent` and runs them.
 
 Also found on the way:
 
