@@ -14,6 +14,9 @@
   gateway's MainPID)                                 -> print one alert line (and one when it recovers)
 * the park hook's circuit-breaker report (``breaker_status.json``: withHuman unreachable) opened or closed
                                                        -> print one alert line for each change
+* the park hook's note-lift report (``lift_status.json``: the agent's ``withhuman_context`` note could not be
+  moved to the top level, or a tool declares its own)  -> print one alert line per (tool, kind, key) not alerted
+  before (state in ``lift_alert_state.json``), and one when the report itself is unreadable (until it reads again)
 
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
@@ -53,6 +56,19 @@ POLICY_STATUS = "tool_policy_status.json"
 POLICY_STATE = "tool_policy_alert_state.json"
 POLICY_LOAD = "tool_policy_load.json"  # the plugin's own verdict at load (it judges the report's age)
 POLICY_LOAD_STATE = "tool_policy_load_alert_state.json"
+LIFT_STATUS = "lift_status.json"  # what the park hook could not do with the agent's withhuman_context note
+LIFT_STATE = "lift_alert_state.json"
+LIFT_TEXTS = {
+    "declared": ("durable-park ALERT: {tool} has its own withhuman_context field inside {key}; the agent's note is "
+                 "left there and goes to the server, not to the approver."),
+    "schema_unavailable": ("durable-park ALERT: could not read {tool}'s tool rules, so the agent's note was not moved; "
+                           "it may reach the server."),
+    "args_unreadable": ("durable-park ALERT: could not read {tool}'s arguments, so the agent's note was not moved; "
+                        "it may reach the server."),
+    "lift_error": "durable-park ALERT: moving the agent's note failed for {tool}; it may reach the server.",
+    "note_left_inside": ("durable-park ALERT: the agent's note is still inside {key} for {tool} after the move; it "
+                         "may reach the server."),
+}
 PLUGIN_LOAD = "plugin_load.json"  # the load proof the plugin writes in the gateway (pid of that process)
 PLUGIN_LOAD_STATE = "plugin_load_alert_state.json"
 GATEWAY_UNIT = "hermes-gateway"
@@ -323,6 +339,53 @@ def _policy_load_alert(directory: str, *, report_failed: bool) -> None:
     _save_state(state_path, {"alerted": alerted})
 
 
+def _lift_alert(ledger_path: str, now: datetime) -> None:
+    """Alert once per (tool, kind, key) in the park hook's ``lift_status.json`` (``now`` is unused: the entries carry
+    their own times). A missing file is silent (nothing has gone wrong yet); an unreadable or malformed one alerts
+    once, until it reads again. The state remembers only the entries still in the report, so it cannot grow."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    state_path = os.path.join(directory, LIFT_STATE)
+    state = _load_state(state_path)
+    alerted = {tuple(item) for item in state.get("alerted", [])
+               if isinstance(item, list) and len(item) == 3 and all(isinstance(x, str) for x in item)} \
+        if isinstance(state.get("alerted"), list) else set()
+    unreadable_alerted = state.get("unreadable") is True
+    unreadable_reason = None
+    entries: list = []
+    try:
+        with open(os.path.join(directory, LIFT_STATUS), encoding="utf-8") as handle:
+            report = json.load(handle)
+        if not isinstance(report, dict) or not isinstance(report.get("entries"), list):
+            unreadable_reason = "unexpected format"
+        else:
+            entries = report["entries"]
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        unreadable_reason = type(exc).__name__
+    except ValueError:
+        unreadable_reason = "not valid JSON"
+    seen: set[tuple[str, str, str]] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("tool"), str) or not isinstance(entry.get("kind"), str):
+            continue
+        key = entry.get("key") if isinstance(entry.get("key"), str) else ""
+        ident = (entry["tool"], entry["kind"], key)
+        seen.add(ident)
+        if ident in alerted:
+            continue
+        template = LIFT_TEXTS.get(entry["kind"], "durable-park ALERT: a note problem ({kind}) for {tool}; it may reach the server.")
+        print(template.format(tool=_clean(entry["tool"], 200), key=_clean(key, 200), kind=_clean(entry["kind"], 40)), flush=True)
+    if unreadable_reason is not None:
+        if not unreadable_alerted:
+            print(f"durable-park ALERT: could not read {LIFT_STATUS} ({_clean(unreadable_reason, 100)}).", flush=True)
+        new_state = {"alerted": sorted(list(item) for item in alerted), "unreadable": True}  # keep what was announced
+    else:
+        new_state = {"alerted": sorted(list(item) for item in seen), "unreadable": False}
+    if new_state != state:
+        _save_state(state_path, new_state)
+
+
 def _gateway_mainpid() -> int | None:
     """MainPID of the ``hermes-gateway`` user unit, or ``None`` when it cannot be learned (systemctl missing,
     failing, timing out, printing junk, or ``0`` = no main process). ``None`` means the load-proof alert stays
@@ -397,6 +460,10 @@ def main(argv=None) -> int:
         _policy_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the policy alert must never stop the sweep
         _err(f"tool policy alert failed ({type(exc).__name__})")
+    try:
+        _lift_alert(args.ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - the lift alert must never stop the sweep
+        _err(f"lift alert failed ({type(exc).__name__})")
     try:
         _load_proof_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the load-proof alert must never stop the sweep

@@ -435,6 +435,26 @@ restart while it is open keeps it open but lets the first call through at once, 
 `durable-park: withHuman answers again (since <time>); tool calls are decided normally.` follows when it closes. If
 the outage was shorter than 5 minutes, both lines may arrive together.
 
+### The agent's note could not be moved
+
+The model puts a short reason in `withhuman_context`. The withHuman gateway expects it at the top level and shows it
+to the approver; the park hook moves it there when the model nests it inside `params`. When it cannot, the call still
+goes on exactly as before (the original arguments, approval is unaffected) and the sweep sends one chat alert per
+tool, kind and key (state in `lift_alert_state.json`, report in `lift_status.json` next to the ledger: names, times
+and counts, never a value). The text tells you the kind:
+
+| Alert | Meaning | What to do |
+|---|---|---|
+| `<tool> has its own withhuman_context field inside <key>` | The tool's own rules declare a `withhuman_context` inside that key, so the note is left there and goes to the server, not to the approver | Usually fine and intended (a server that really has such a field). If it is not, look at the tool's rules in the withHuman tool catalog |
+| `could not read <tool>'s tool rules` | The rules lookup failed (Hermes registry unavailable or changed) | Same as a form-check problem: [Form checker not working](#form-checker-not-working); `hermes mcp test wh`; read `compat.py` after a Hermes upgrade |
+| `could not read <tool>'s arguments` | The arguments came as JSON text and Hermes's type fixing could not turn them into objects | Check Hermes's `tools/arg_coercion.py` after an upgrade (`formcheck.hermes_coerce`) |
+| `moving the agent's note failed for <tool>` | An unexpected error in the lift step | `journalctl --user -u hermes-gateway` for `could not lift withhuman_context for tool=<tool> (<ErrorType>)`; fix and redeploy |
+| `the agent's note is still inside <key> for <tool> after the move` | A note is still inside that key after the lift (for example JSON text the type fixing did not turn into an object) | Look at the tool's rules for that key; the note reaches the server and QuickBooks says "IGNORED" |
+| `could not read lift_status.json (<reason>)` | The report is unreadable or not the expected shape | Look at the file next to the ledger; it is rewritten by the gateway on the next problem; delete it if corrupt |
+
+A problem that goes away and comes back alerts again. When adding tools from a new provider, expect these alerts
+if its rules differ from the QuickBooks ones.
+
 ## Troubleshooting
 
 ### An approver was asked twice for one action

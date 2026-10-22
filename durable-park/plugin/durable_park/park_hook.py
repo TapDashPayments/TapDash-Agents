@@ -8,9 +8,9 @@ instant ``Allow`` lets the tool run (row ``allowed``), an instant ``Deny`` refus
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
-import threading
 from typing import Any, Callable, Iterable
 
 from agentapprovalprotocol import Allow, Deny, Pending
@@ -18,7 +18,9 @@ from agentapprovalprotocol import Allow, Deny, Pending
 from .breaker import Breaker
 from . import formcheck
 from .formcheck import FormChecker, FormCheckUnavailable
-from .gatecall import build_call, lift_gateway_context, server_label
+from .gatecall import (
+    LiftStatus, build_call, declares_context, first_text_form_note_key, keys_still_holding_note,
+    lift_gateway_context, server_label)
 from .ledger import Ledger, args_digest, call_key
 from .wake import one_line
 
@@ -92,9 +94,6 @@ CHECK_UNAVAILABLE_MESSAGE = (
 )
 
 
-# The "could not tell" warning is logged once per (tool, key); this many pairs are remembered at most.
-MAX_UNKNOWN_WARNINGS = 1000
-
 
 def _block(message: str) -> dict[str, str]:
     return {"action": "block", "message": message}
@@ -138,7 +137,9 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                        foreign_hooks_fn: Callable[[], list[str]] | None = None,
                        session_key_fn: Callable[[], str] | None = None,
                        form_checker: FormChecker | None = None,
-                       schema_fn: Callable[[str], dict | None] | None = None) -> Callable[..., dict | None]:
+                       schema_fn: Callable[[str], dict | None] | None = None,
+                       coerce_fn: Callable[[str, dict], dict] | None = None,
+                       lift_status_path: str | None = None) -> Callable[..., dict | None]:
     """Build the hook. ``gate_factory`` is called per call (e.g. ``GateHolder.get``). ``form_checker``
     validates a form-checked call's arguments against the tool's rules before anything is recorded or asked
     (default: the rules Hermes registered for the tool). ``breaker`` (optional) stops asking withHuman while
@@ -146,30 +147,60 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
     change arguments after approval; while it names any, every non-exempt call is refused. ``schema_fn`` looks up
     a tool's registered input rules (default: ``formcheck.registry_schema``, looked up when called);
     it decides whether a nested ``withhuman_context``
-    note is lifted to the top level (see ``lift_gateway_context``), and a lookup error means no lift."""
+    note is lifted to the top level (see ``lift_gateway_context``). ``coerce_fn`` is Hermes's own type fixing
+    (default: ``formcheck.hermes_coerce``, looked up when called), run first on a copy only when a string argument
+    holds a JSON object with the note. Every case where the lift could not run or left a note inside is reported
+    to ``lift_status_path`` (``lift_status.json``; the sweep alerts on it), and the call goes on with the
+    original arguments."""
     checker = form_checker if form_checker is not None else FormChecker()
     exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
 
-    unknown_warned: set[tuple[str, str]] = set()  # (tool, key) pairs already warned about; bounded
-    unknown_lock = threading.Lock()
-
-    def warn_unknown(tool_name: str, key: str) -> None:
-        with unknown_lock:
-            if (tool_name, key) in unknown_warned or len(unknown_warned) >= MAX_UNKNOWN_WARNINGS:
-                return
-            unknown_warned.add((tool_name, key))
-        log.warning("could not tell whether %s.%s has its own withhuman_context; the note was left in place",
-                    tool_name, key)
+    status = LiftStatus(lift_status_path)
 
     def lift_nested_context(tool_name: str, args: Any) -> Any:
-        """``lift_gateway_context`` with the tool's registered rules; any error means the original arguments."""
+        """The call's arguments with a nested ``withhuman_context`` lifted to the top level. Every way the lift
+        cannot run (or leaves a note inside) is recorded for the sweep's chat alert; the original arguments are
+        used in those cases, so approval is unaffected. Never raises."""
         if not isinstance(args, dict):
             return args
         try:
-            return lift_gateway_context(args, (schema_fn or formcheck.registry_schema)(tool_name),
-                                        on_unknown=lambda key: warn_unknown(tool_name, key))
-        except Exception as exc:  # noqa: BLE001 - the lift is a cleanup, never a gate
+            try:
+                schema = (schema_fn or formcheck.registry_schema)(tool_name)
+            except Exception as exc:  # noqa: BLE001 - the lift is a cleanup, never a gate
+                log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)
+                status.record(tool_name, "schema_unavailable")
+                return args
+            if not declares_context(schema):
+                return args  # not a gateway tool: nothing to lift
+            work = args
+            text_key = first_text_form_note_key(args)
+            if text_key is not None:
+                # pre_tool_call fires before Hermes's type coercion: do what dispatch will do, on a copy.
+                try:
+                    coerced = (coerce_fn or formcheck.hermes_coerce)(tool_name, copy.deepcopy(args))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("could not read arguments to lift withhuman_context for tool=%s (%s)",
+                                tool_name, type(exc).__name__)
+                    coerced = None
+                if not isinstance(coerced, dict):
+                    status.record(tool_name, "args_unreadable", text_key)
+                    return args
+                work = coerced
+            declared: set[str] = set()
+
+            def on_problem(kind: str, key: str) -> None:
+                if kind == "declared":
+                    declared.add(key)
+                status.record(tool_name, kind, key)
+
+            lifted = lift_gateway_context(work, schema, on_problem=on_problem)
+            for key in keys_still_holding_note(lifted):
+                if key not in declared:
+                    status.record(tool_name, "note_left_inside", key)
+            return lifted
+        except Exception as exc:  # noqa: BLE001
             log.warning("could not lift withhuman_context for tool=%s (%s)", tool_name, type(exc).__name__)
+            status.record(tool_name, "lift_error")
             return args
 
     def is_form_checked(tool_name: str) -> bool:

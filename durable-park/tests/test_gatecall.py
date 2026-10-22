@@ -1,5 +1,8 @@
 import copy
 import hashlib
+import json
+import logging
+import threading
 
 import pytest
 
@@ -8,7 +11,8 @@ from agentapprovalprotocol.testing import BASE_URL, TOKEN, FakeProvider
 
 from agentapprovalprotocol._gate import submission
 from durable_park.gatecall import (
-    GateHolder, build_call, lift_gateway_context, make_gate, platform_of, redact_arguments, server_label)
+    GateHolder, LiftStatus, MAX_LIFT_ENTRIES, build_call, lift_gateway_context, make_gate, platform_of,
+    redact_arguments, server_label)
 from durable_park.ledger import Ledger
 
 
@@ -304,8 +308,8 @@ PLAIN = {"type": "object", "properties": {"criteria": {"type": "string"}}}
 
 
 def lift_report(args, schema):
-    unknown = []
-    return lift_gateway_context(args, schema, on_unknown=unknown.append), unknown
+    problems = []
+    return lift_gateway_context(args, schema, on_problem=lambda kind, key: problems.append((kind, key))), problems
 
 
 @pytest.mark.parametrize("schema", [
@@ -323,8 +327,8 @@ def lift_report(args, schema):
 ], ids=["defs", "definitions", "tilde1", "tilde0", "ref-chain", "allOf", "allOf-ref", "anyOf", "oneOf-true-wins",
         "pattern", "siblings"])
 def test_lift_skips_a_key_whose_rules_declare_the_field(schema):
-    result, unknown = lift_report(NOTE_ARGS, schema)
-    assert result == NOTE_ARGS and unknown == []
+    result, problems = lift_report(NOTE_ARGS, schema)
+    assert result == NOTE_ARGS and problems == [("declared", "params")]
 
 
 @pytest.mark.parametrize("schema", [
@@ -338,8 +342,8 @@ def test_lift_skips_a_key_whose_rules_declare_the_field(schema):
     ctx_schema({"type": "object", "properties": {"criteria": {}}, "allOf": [PLAIN]}),
 ], ids=["defs", "definitions", "tilde1", "allOf", "anyOf", "oneOf-bools", "pattern", "siblings"])
 def test_lift_lifts_when_the_rules_clearly_do_not_declare_the_field(schema):
-    result, unknown = lift_report(NOTE_ARGS, schema)
-    assert result == LIFTED_ARGS and unknown == []
+    result, problems = lift_report(NOTE_ARGS, schema)
+    assert result == LIFTED_ARGS and problems == []
 
 
 def _cycle():
@@ -366,41 +370,42 @@ def _deep():
     _deep(),  # past the depth limit
 ], ids=["remote", "relative-file", "missing", "pointer-into-nothing", "non-string-ref", "oneOf-unknown",
         "bad-anyOf", "bad-regex", "self-ref", "cycle", "too-deep"])
-def test_lift_skips_and_reports_a_key_it_cannot_judge(schema):
-    result, unknown = lift_report(NOTE_ARGS, schema)
-    assert result == NOTE_ARGS and unknown == ["params"]
+def test_lift_lifts_a_key_it_cannot_judge_and_reports_nothing(schema):
+    """Only a positive declaration skips a key: rules that cannot be judged are treated as not declaring it."""
+    result, problems = lift_report(NOTE_ARGS, schema)
+    assert result == LIFTED_ARGS and problems == []
 
 
-def test_lift_reports_only_keys_that_carry_a_note_and_never_values():
-    schema = ctx_schema({"$ref": "https://example.com/x.json"})
-    quiet, unknown = lift_report({"params": {"criteria": "x"}}, schema)
-    assert quiet == {"params": {"criteria": "x"}} and unknown == []
+def test_lift_reports_declared_only_for_keys_that_carry_a_note_and_never_values():
+    schema = ctx_schema(DECLARING)
+    quiet, problems = lift_report({"params": {"criteria": "x"}}, schema)
+    assert quiet == {"params": {"criteria": "x"}} and problems == []
+    schema["properties"]["zz"] = DECLARING
     args = {"params": {"withhuman_context": "private note"}, "zz": {"withhuman_context": "other"}}
-    schema["properties"]["zz"] = {"$ref": "#/nowhere"}
-    _, unknown = lift_report(args, schema)
-    assert unknown == ["params", "zz"]
+    result, problems = lift_report(args, schema)
+    assert result == args and problems == [("declared", "params"), ("declared", "zz")]
 
 
-def test_lift_survives_a_failing_on_unknown_callback():
-    def boom(key):
+def test_lift_survives_a_failing_on_problem_callback():
+    def boom(kind, key):
         raise RuntimeError("callback bug")
 
-    assert lift_gateway_context(NOTE_ARGS, ctx_schema({"$ref": "https://x/y"}), on_unknown=boom) == NOTE_ARGS
+    assert lift_gateway_context(NOTE_ARGS, ctx_schema(DECLARING), on_problem=boom) == NOTE_ARGS
 
 
-def test_lift_treats_an_unexpected_error_while_judging_as_unknown(monkeypatch):
+def test_lift_treats_an_unexpected_error_while_judging_as_not_declared(monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("bug")
 
     monkeypatch.setattr("durable_park.gatecall._declares_context_in", boom)
-    result, unknown = lift_report(NOTE_ARGS, ctx_schema(PLAIN))
-    assert result == NOTE_ARGS and unknown == ["params"]
+    result, problems = lift_report(NOTE_ARGS, ctx_schema(PLAIN))
+    assert result == LIFTED_ARGS and problems == []
 
 
 def test_lift_ignores_a_non_dict_or_boolean_nested_schema():
     for nested in (True, False, None, "object", []):
-        result, unknown = lift_report(NOTE_ARGS, ctx_schema(nested))
-        assert result == LIFTED_ARGS and unknown == [], nested
+        result, problems = lift_report(NOTE_ARGS, ctx_schema(nested))
+        assert result == LIFTED_ARGS and problems == [], nested
 
 
 def test_lift_still_lifts_when_the_nested_rules_are_plain():
@@ -408,3 +413,87 @@ def test_lift_still_lifts_when_the_nested_rules_are_plain():
                              "withhuman_context": {"type": "string"}}}
     assert lift_gateway_context({"params": {"withhuman_context": "n"}}, schema) == {
         "params": {}, "withhuman_context": "n"}
+
+
+# ---- the lift problem recorder (lift_status.json) ---------------------------------------------------------
+
+
+def read_entries(path):
+    return json.loads(path.read_text())["entries"]
+
+
+def test_lift_status_dedupes_per_tool_kind_key_and_counts(tmp_path):
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path))
+    for _ in range(3):
+        status.record("tool_a", "declared", "params")
+    status.record("tool_a", "declared", "other")
+    status.record("tool_a", "schema_unavailable")
+    status.record("tool_b", "declared", "params")
+    entries = read_entries(path)
+    assert len(entries) == 4
+    first = next(e for e in entries if (e["tool"], e["kind"], e["key"]) == ("tool_a", "declared", "params"))
+    assert first["count"] == 3 and first["first_seen"] <= first["last_seen"]
+    assert set(first) == {"tool", "kind", "key", "first_seen", "last_seen", "count"}
+    assert next(e for e in entries if e["kind"] == "schema_unavailable")["key"] == ""
+
+
+def test_lift_status_keeps_at_most_200_entries_and_the_newest_always_gets_in(tmp_path):
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path))
+    for i in range(MAX_LIFT_ENTRIES + 25):
+        status.record(f"tool_{i}", "declared", "params")
+    entries = read_entries(path)
+    assert MAX_LIFT_ENTRIES == 200 and len(entries) == 200
+    assert f"tool_{MAX_LIFT_ENTRIES + 24}" in {e["tool"] for e in entries}  # the newest is kept
+    assert "tool_0" not in {e["tool"] for e in entries}  # the oldest made room
+
+
+def test_lift_status_file_holds_names_and_times_only_never_values(tmp_path):
+    path = tmp_path / "lift_status.json"
+    LiftStatus(str(path)).record("mcp__wh__quickbooks__create_payment", "declared", "params")
+    data = json.loads(path.read_text())
+    assert set(data) == {"entries", "updated_at"}
+    assert set(data["entries"][0]) == {"tool", "kind", "key", "first_seen", "last_seen", "count"}
+
+
+def test_lift_status_is_reloaded_after_a_restart(tmp_path):
+    path = tmp_path / "lift_status.json"
+    LiftStatus(str(path)).record("t", "declared", "params")
+    again = LiftStatus(str(path))
+    again.record("t", "declared", "params")
+    (entry,) = read_entries(path)
+    assert entry["count"] == 2
+
+
+def test_lift_status_ignores_a_corrupt_old_file(tmp_path):
+    path = tmp_path / "lift_status.json"
+    path.write_text("{not json")
+    LiftStatus(str(path)).record("t", "lift_error")
+    assert [e["kind"] for e in read_entries(path)] == ["lift_error"]
+
+
+def test_lift_status_write_error_never_raises_and_logs_one_error(tmp_path, caplog):
+    caplog.set_level(logging.ERROR, logger="durable_park")
+    status = LiftStatus(str(tmp_path / "missing-dir" / "lift_status.json"))
+    status.record("t", "declared", "params")
+    status.record("t", "declared", "params")
+    status.record("u", "lift_error")
+    errors = [r.getMessage() for r in caplog.records if "lift_status" in r.getMessage()]
+    assert errors == ["could not write lift_status.json (FileNotFoundError)"]
+
+
+def test_lift_status_without_a_path_only_remembers(tmp_path):
+    status = LiftStatus(None)
+    status.record("t", "declared", "params")  # no file, no error
+
+
+def test_lift_status_is_thread_safe(tmp_path):
+    path = tmp_path / "lift_status.json"
+    status = LiftStatus(str(path))
+    threads = [threading.Thread(target=lambda: [status.record("t", "declared", "params") for _ in range(25)])
+               for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    (entry,) = read_entries(path)
+    assert entry["count"] == 200
