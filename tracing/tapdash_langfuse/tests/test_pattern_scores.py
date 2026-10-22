@@ -18,7 +18,7 @@ import pytest
 SCORE_ENV = "HERMES_LANGFUSE_SCORE_PATTERNS"
 
 # The exact proto-agents value (plan amendment A4; also in README.md). Raw string: backslashes and quotes are literal.
-SCORE_PATTERNS = r'''approval_decision=\A\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) (?:\("[^"]*"\) )?was (?P<value>APPROVED|DENIED|CANCELLED) in withHuman(?: by (?P<by>[^:]+?))?(?:: (?P<note>.+?))?\. (?:It did not run\.|Call parked_action_execute );approval_decision=\A\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) \("[^"]*"\) got no decision before its deadline\.=>expired'''
+SCORE_PATTERNS = r'''approval_decision=(?m)^(?:\[[^\]\n]*\] )?\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) (?:\("[^"]*"\) )?was (?P<value>APPROVED|DENIED|CANCELLED) in withHuman(?: by (?P<by>[^:]+?))?(?:: (?P<note>.+?))?\. (?:It did not run\.|Call parked_action_execute );approval_decision=(?m)^(?:\[[^\]\n]*\] )?\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) \("[^"]*"\) got no decision before its deadline\.=>expired'''
 
 # The three format strings below are copied from durable-park/plugin/durable_park/wake.py (APPROVED_TEXT, DENIED_TEXT,
 # EXPIRED_TEXT). test_wake_texts_have_not_drifted fails when wake.py changes them.
@@ -133,6 +133,40 @@ def test_wake_texts_have_not_drifted():
         assert ast.literal_eval(constants[name]) == fixture, f"{name} in wake.py no longer matches this test"
 
 
+def test_inject_text_glue_has_not_drifted():
+    """The by/note glue (`` by {decider}``, ``: {note}``) lives in wake.inject_text, not in the three constants, and
+    the setting's regex depends on it. Run the real inject_text (functions and constants lifted by ast, not
+    imported: no durable_park deps) on stub rows and compare with what this file's helpers build."""
+    from types import SimpleNamespace
+
+    wanted_consts = {"MAX_NOTE_CHARS", "MAX_DECIDER_CHARS", "MAX_CHANNEL_CHARS", "MAX_DECIDED_BY_CHARS",
+                     "_DECIDER_EXTRA_CHARS", "APPROVED_TEXT", "DENIED_TEXT", "EXPIRED_TEXT"}
+    wanted_funcs = {"one_line", "clean_decider", "inject_text"}
+    tree = ast.parse(_find_wake_py().read_text(encoding="utf-8"))
+    body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                and node.targets[0].id in wanted_consts:
+            body.append(node)
+        elif isinstance(node, ast.FunctionDef) and node.name in wanted_funcs:
+            body.append(node)
+    assert {n.name for n in body if isinstance(n, ast.FunctionDef)} == wanted_funcs, "wake.py helpers moved or renamed"
+    namespace: dict = {}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), "wake.py", "exec"), namespace)
+
+    def row(status, decided_by=None, note=None):
+        return SimpleNamespace(park_id=PARK_ID, tool=TOOL, status=status, decided_by=decided_by, note=note)
+
+    inject_text = namespace["inject_text"]
+    assert inject_text(row("approved")) == approved()
+    assert inject_text(row("approved", DECIDER)) == approved(DECIDER)
+    assert inject_text(row("denied")) == denied()
+    assert inject_text(row("denied", DECIDER, "wrong amount")) == denied(decider=DECIDER, note="wrong amount")
+    assert inject_text(row("cancelled", DECIDER)) == denied("CANCELLED", decider=DECIDER)
+    assert inject_text(row("cancelled", note="duplicate")) == denied("CANCELLED", note="duplicate")
+    assert inject_text(row("expired")) == expired()
+
+
 # ---- parsing ----
 
 def test_parse_splits_name_on_first_equals_and_literal_on_last_arrow(plugin):
@@ -195,12 +229,31 @@ def test_proto_agents_setting_scores_each_wake_text(plugin, monkeypatch, text, v
     "please pay the invoice",
     "[durable-park] P-1A2B3C4D was APPROVED in withHuman",  # no tail: not a wake text
     "I read that " + approved(),  # not at the start of the message
+    "[Yaakov Yehuda] I read that " + approved(),  # a sender prefix does not open the door to mid-line text
+    "Earlier in the chat: " + denied(),  # mid-line mention, not a line of its own
     "[durable-park] P-1A2B3C4D (\"x\") was PENDING in withHuman. It did not run. ",
     "",
 ])
 def test_non_matching_message_gives_no_score(plugin, monkeypatch, text):
     monkeypatch.setenv(SCORE_ENV, SCORE_PATTERNS)
     assert plugin._pattern_scores(text) == []
+
+
+@pytest.mark.parametrize("text, value, comment", [
+    pytest.param(f"[Yaakov Yehuda] {approved()}", "approved", PARK_ID, id="sender-prefix-approved"),
+    pytest.param(f"[Yaakov Yehuda] {denied(decider=DECIDER, note='wrong amount')}", "denied",
+                 f"{PARK_ID}; by: {DECIDER}; note: wrong amount", id="sender-prefix-denied-by-note"),
+    pytest.param(f"[Yaakov Yehuda] {expired()}", "expired", PARK_ID, id="sender-prefix-expired"),
+    pytest.param(f"Alice: hi\nBob: ok\n\n[New message]\n{approved()}", "approved", PARK_ID,
+                 id="observed-group-backfill"),
+    pytest.param(f"Alice: hi\n\n[New message]\n[Yaakov Yehuda] {denied('CANCELLED')}", "cancelled", PARK_ID,
+                 id="backfill-and-sender-prefix"),
+])
+def test_wake_text_still_scores_behind_the_sender_prefix_or_backfill(plugin, monkeypatch, text, value, comment):
+    """Hermes rewrites a shared-session message to ``[<user name>] <text>`` and puts observed-group backfill before
+    ``[New message]``; the hook's user_message is taken after that (final review of TAP2-125)."""
+    monkeypatch.setenv(SCORE_ENV, SCORE_PATTERNS)
+    assert plugin._pattern_scores(text) == [("approval_decision", value, comment)]
 
 
 # ---- value and comment rules (A1, A2) ----

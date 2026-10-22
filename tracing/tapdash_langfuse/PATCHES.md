@@ -130,7 +130,13 @@ Keep this list complete: every difference from upstream goes here, in the commit
      and `tests/test_pattern_scores.py` (which also fails when durable-park's `wake.py` texts drift from the copies it
      holds as fixtures).
    - Value on proto-agents (durable-park's approval decision; see the README for the sample texts):
-     `HERMES_LANGFUSE_SCORE_PATTERNS=approval_decision=\A\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) (?:\("[^"]*"\) )?was (?P<value>APPROVED|DENIED|CANCELLED) in withHuman(?: by (?P<by>[^:]+?))?(?:: (?P<note>.+?))?\. (?:It did not run\.|Call parked_action_execute );approval_decision=\A\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) \("[^"]*"\) got no decision before its deadline\.=>expired`
+     `HERMES_LANGFUSE_SCORE_PATTERNS=approval_decision=(?m)^(?:\[[^\]\n]*\] )?\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) (?:\("[^"]*"\) )?was (?P<value>APPROVED|DENIED|CANCELLED) in withHuman(?: by (?P<by>[^:]+?))?(?:: (?P<note>.+?))?\. (?:It did not run\.|Call parked_action_execute );approval_decision=(?m)^(?:\[[^\]\n]*\] )?\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) \("[^"]*"\) got no decision before its deadline\.=>expired`
+   - The patterns start with `(?m)^(?:\[[^\]\n]*\] )?\s*`, not `\A\s*`: Hermes rewrites a message in a shared
+     session to `[<user name>] <text>` and puts observed-group backfill before a `[New message]` line, and the
+     hook's `user_message` is taken after that, so a start-of-text anchor never matched a threaded session
+     (final review of TAP2-125). A `[durable-park]` mid-line still does not score.
+   - `tests/test_pattern_scores.py` also runs the real `wake.inject_text` on stub rows, so a change to the
+     ` by {decider}` / `: {note}` glue fails there too (the three text constants alone would not catch it).
    - `README.md` documents the setting in the tuning list and under "Score traces by pattern (TapDash patch)".
 
 `on_pre_tool_call` is unchanged from upstream.
@@ -157,7 +163,7 @@ bash tracing/run_tests.sh            # as the hermes user on the test VM
 bash tracing/run_tests.sh -k attribution   # extra pytest arguments are added; the deselection below always stays
 ```
 
-Expected today: `245 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
+Expected today: `253 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
 through Hermes's dependency installer, which would run against the gateway's shared Hermes environment and drops the
 test path, so they cannot run from a checkout. The script deselects them with `--deselect` by node id, so a `-k` or
 `-m` of your own cannot bring them back. It runs under the Python of the Hermes environment the running gateway

@@ -966,6 +966,9 @@ step 3 write down which environment the gateway runs:
    setting once, quoted so the backslashes stay (it holds no secret):
    `printf '%s\n' 'HERMES_LANGFUSE_TAG_PATTERNS=park=\bP-[0-9A-F]{8}\b' >> ~/.hermes/.env`
    (end the last line first if it has no newline, as in [Turn it on](#turn-it-on-admin)).
+   To also turn on the approval score, add `HERMES_LANGFUSE_SCORE_PATTERNS` the same way (it holds no secret). Its value contains `"`, so it must be unquoted or **single**-quoted in `.env`: a double-quoted line does not parse (python-dotenv) and the setting silently disappears. Copy the value from the [README](../../tracing/tapdash_langfuse/README.md#score-traces-by-pattern-tapdash-patch) into the single quotes (it has no `'`):
+   `printf '%s\n' 'HERMES_LANGFUSE_SCORE_PATTERNS=<the value from the README>' >> ~/.hermes/.env`
+   Check it afterwards: `grep -c '^HERMES_LANGFUSE_SCORE_PATTERNS=' ~/.hermes/.env` prints `1`.
 2. Add `hermes_plugins.tapdash_langfuse.on_pre_tool_call` to `observer_hooks` by hand in `config.yaml`
    ([Plugin settings](#plugin-settings)), **next to** the existing entries, so the list has three:
    `hermes_plugins.platforms__raft.adapter._on_pre_tool_call`, `hermes_plugins.langfuse.on_pre_tool_call` and

@@ -189,16 +189,19 @@ categorical Langfuse score called `name`. The name ends at the first `=`; a lite
 - Scores follow the trace's sampling: with `HERMES_LANGFUSE_SAMPLE_RATE` below 1, a trace that is sampled out has no
   score either.
 
+The patterns are anchored to the start of a line (`(?m)^`), with an optional `[<user name>] ` in front. Hermes adds that sender prefix in shared sessions (a Telegram forum topic or a Slack, Teams or Discord thread) and puts observed-group backfill before a `[New message]` line, and the hook sees the text after both. A `[durable-park]` that sits in the middle of a line does not score.
+
 On proto-agents the setting turns durable-park's wake message into the `approval_decision` score (`approved`,
 `denied`, `cancelled` or `expired`), with the park id, the person who decided and their note in the comment:
 
 ```
-HERMES_LANGFUSE_SCORE_PATTERNS=approval_decision=\A\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) (?:\("[^"]*"\) )?was (?P<value>APPROVED|DENIED|CANCELLED) in withHuman(?: by (?P<by>[^:]+?))?(?:: (?P<note>.+?))?\. (?:It did not run\.|Call parked_action_execute );approval_decision=\A\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) \("[^"]*"\) got no decision before its deadline\.=>expired
+HERMES_LANGFUSE_SCORE_PATTERNS=approval_decision=(?m)^(?:\[[^\]\n]*\] )?\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) (?:\("[^"]*"\) )?was (?P<value>APPROVED|DENIED|CANCELLED) in withHuman(?: by (?P<by>[^:]+?))?(?:: (?P<note>.+?))?\. (?:It did not run\.|Call parked_action_execute );approval_decision=(?m)^(?:\[[^\]\n]*\] )?\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) \("[^"]*"\) got no decision before its deadline\.=>expired
 ```
 
-| The turn's user message starts with | Score `approval_decision` | Comment |
+| A line of the turn's user message starts with | Score `approval_decision` | Comment |
 |---|---|---|
 | `[durable-park] P-1A2B3C4D was APPROVED in withHuman. Call parked_action_execute ...` | `approved` | `P-1A2B3C4D` |
+| `[Yaakov Yehuda] [durable-park] P-1A2B3C4D was APPROVED in withHuman. ...` (shared or threaded session) | `approved` | `P-1A2B3C4D` |
 | `[durable-park] P-1A2B3C4D was APPROVED in withHuman by Yaakov Yehuda (web). Call parked_action_execute ...` | `approved` | `P-1A2B3C4D; by: Yaakov Yehuda (web)` |
 | `[durable-park] P-1A2B3C4D ("tool") was DENIED in withHuman. It did not run. ...` | `denied` | `P-1A2B3C4D` |
 | `[durable-park] P-1A2B3C4D ("tool") was DENIED in withHuman by Yaakov Yehuda (web): wrong amount. It did not run. ...` | `denied` | `P-1A2B3C4D; by: Yaakov Yehuda (web); note: wrong amount` |
