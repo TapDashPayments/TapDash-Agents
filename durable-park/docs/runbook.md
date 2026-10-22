@@ -587,7 +587,8 @@ offline spool, so a gap in Langfuse is not proof that nothing happened. The ledg
 what ran.
 
 **Where traces go.** Langfuse Cloud, US region (<https://us.cloud.langfuse.com>), project `proto-agents`, Hobby (free)
-plan: 50,000 units a month (a unit is one trace, observation or score), 30 days of data access, 2 users. Retention
+plan: 30 days of data access, and a monthly allowance of units (a unit is one trace, observation or score; 50,000 on
+Langfuse's public pricing page, <https://langfuse.com/pricing>, not checked in this work). Retention
 cannot be changed on Hobby ([backlog](backlog.md#before-real-books), items 8 and 9).
 
 **Settings** (names only; never print `.env`). They live in `~hermes/.hermes/.env`. Read once when the gateway
@@ -625,21 +626,26 @@ This is how it was switched on on 2026-10-22; use the same steps to switch it on
    ```sh
    read -rs -p "Langfuse public key: " LF_PK; echo
    read -rs -p "Langfuse secret key: " LF_SK; echo
+   [ -z "$(tail -c1 ~/.hermes/.env)" ] || echo >> ~/.hermes/.env      # end the last line first, if it has no newline
    printf 'HERMES_LANGFUSE_PUBLIC_KEY=%s\nHERMES_LANGFUSE_SECRET_KEY=%s\n' "$LF_PK" "$LF_SK" >> ~/.hermes/.env
    unset LF_PK LF_SK
    ```
 
 3. Check that the non-secret settings in the table above are in `.env` (names only: `grep -c '^HERMES_LANGFUSE_' ~/.hermes/.env`
    counts the lines; `grep -o '^HERMES_LANGFUSE_[A-Z_]*' ~/.hermes/.env` lists the names). Add any that are missing.
-4. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
-5. `hermes plugins enable langfuse`, then restart `hermes-gateway`. Then run [Check it works](#check-it-works).
+   Also check that `hermes config get plugins.entries.durable-park.settings.observer_hooks` still lists
+   `hermes_plugins.langfuse.on_pre_tool_call` (it is taken out only under "remove for good" below). Without it,
+   durable-park refuses every tool call once the plugin is enabled (an outage, not a loss of safety).
+4. `hermes plugins enable langfuse`.
+5. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)), and restart `hermes-gateway`
+   straight after, so no approval can be parked in between. Then run [Check it works](#check-it-works).
 
 ### Check it works
 
 ```sh
 hermes plugins list | grep -i -e langfuse -e durable-park      # langfuse enabled, durable-park enabled
 grep -i -e 'durable-park loaded' -e 'foreign pre_tool_call' ~/.hermes/logs/agent.log | tail
-grep -e 'Langfuse plugin:' -e 'Langfuse tracing:' ~/.hermes/logs/agent.log | tail     # nothing since the last start
+grep -e 'Langfuse plugin:' -e 'Langfuse tracing:' ~/.hermes/logs/agent.log | tail     # nothing dated after the last start (older lines also match)
 grep 'plugin=langfuse' ~/.hermes/logs/agent.log | tail -3
 cat ~/.hermes/plugin-data/durable-park/tool_policy_status.json       # "ok": true
 cat ~/.hermes/plugin-data/durable-park/plugin_load.json            # present, pid = the gateway's MainPID
@@ -727,7 +733,9 @@ Expect exactly one kind of hit: the public key in `scope.attributes.public_key`.
    Traces already sent stay in Langfuse until its 30-day window on the free plan has passed.
 
 Leave `hermes_plugins.langfuse.on_pre_tool_call` in `observer_hooks` for now: a listed hook that is not loaded does no
-harm.
+harm. But **do not update or reinstall the plugin while it is enabled**, and never enable an updated plugin before its
+hook has been reviewed: the name stays listed, so a changed hook would be allowed silently at the next restart. See
+[When the plugin changes](#when-the-plugin-changes).
 
 To remove it for good, **in this order**:
 
@@ -756,10 +764,22 @@ hook](#allow-another-hook-observer_hooks)).
 
 ### When the plugin changes
 
-The hook is listed in `observer_hooks` because of the code that was read: v2.0.0 at commit `c2a9596`. After **any**
-update or reinstall of the plugin (a new version or commit), read its hook again (steps 2 to 5 of [Allow another
-hook](#allow-another-hook-observer_hooks)) and update the row in [Hooks reviewed so far](#hooks-reviewed-so-far). Until
-then, turn it off as in [Turn it off](#turn-it-off) (ledger check, disable, restart; leave the `observer_hooks` entry). Also update the version in the root [Built on](../../README.md#built-on) table.
+The hook is listed in `observer_hooks` because of the code that was read: v2.0.0 at commit `c2a9596`. The listing is by
+name only, so an updated plugin whose hook now does something else would be allowed silently at the next gateway restart
+(a crash restart is enough). So **never update or reinstall the plugin while it is enabled.** In this order:
+
+1. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
+2. `hermes plugins disable langfuse`, then restart `hermes-gateway`. The plugin is no longer loaded; leave the
+   `observer_hooks` entry in place.
+3. Update the plugin and pin the new version and commit (for example `hermes plugins install langfuse --yes-deps
+   --no-enable`, then confirm the commit). Do not enable it.
+4. Read the new hook again (steps 2 and 3 of [Allow another hook](#allow-another-hook-observer_hooks)) and update its row
+   in [Hooks reviewed so far](#hooks-reviewed-so-far). If you cannot confirm it never returns `modify`, do not enable it:
+   take the entry out as in "remove for good" under [Turn it off](#turn-it-off). Also update the version in the root
+   [Built on](../../README.md#built-on) table.
+5. Check the ledger again, `hermes plugins enable langfuse`, restart `hermes-gateway`, then run
+   [Check it works](#check-it-works) (the `durable-park loaded` line must still count 2 observer hooks and show no
+   `foreign pre_tool_call` line).
 
 After a **Hermes upgrade**, also set `HERMES_LANGFUSE_RELEASE` to the new version (`hermes-v<version>`) and restart, so
 new traces carry the right release.

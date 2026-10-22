@@ -13,13 +13,14 @@
 ## Global Constraints
 
 - Test VM `proto-agents` only. Never touch the production Hermes host.
-- Never print, log, paste or commit a secret. The Langfuse public/secret keys are typed in by Yaakov with `read`; never echo `.env` values (names only, or masked).
+- Never print, log, paste or commit a secret. The Langfuse public/secret keys are typed in by Yaakov with `read -rs` (no echo); never echo `.env` values (names only, or masked).
 - Live clone `/home/hermes/tapdash-agents` is never edited; repo work happens in worktree `/home/hermes/tapdash-agents-wt/langfuse-tracing` (branch `ops/langfuse-tracing`).
 - Before any `hermes-gateway` restart: the durable-park ledger (`/home/hermes/.hermes/plugin-data/durable-park/ledger.db`, table `parks`) has no row with status `parked`, `approved` or `executing`.
 - Exact settings (non-secret, appended to `~hermes/.hermes/.env`):
   - `HERMES_LANGFUSE_BASE_URL=https://us.cloud.langfuse.com`
   - `HERMES_LANGFUSE_CAPTURE=full`
   - `HERMES_LANGFUSE_ENV=proto-agents`
+  - Added in Task 4 (live: six non-secret settings in all): `HERMES_LANGFUSE_MAX_DEPTH=16`, `HERMES_LANGFUSE_MAX_CHARS=50000`, `HERMES_LANGFUSE_RELEASE=hermes-v0.22.3`.
 - durable-park observer hook to add: `hermes_plugins.langfuse.on_pre_tool_call` (format `module.qualname`, durable_park/__init__.py `_callback_name`). Existing entry `hermes_plugins.platforms__raft.adapter._on_pre_tool_call` must stay.
 - Install command: `hermes plugins install langfuse --yes-deps --no-enable` (run as `hermes`). Enabling is a separate step after the keys exist.
 - Backups get the suffix `.bak-langfuse-<UTC yyyymmddTHHMMSSZ>`; never delete existing backups.

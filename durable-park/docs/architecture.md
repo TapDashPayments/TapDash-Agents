@@ -549,7 +549,7 @@ the repo) and never printed by any script.
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
 | `audit_key` (optional) | 0640 root:hermes | plugin | withHuman org API key with only `audit.read`: names who decided in the chat message |
 
-The Langfuse keys are not in this folder: they are `HERMES_LANGFUSE_PUBLIC_KEY` and `HERMES_LANGFUSE_SECRET_KEY` in `~hermes/.hermes/.env`, typed in by an admin like the rest ([runbook](runbook.md#tracing-langfuse)). The key pair gives full read and write access to the project's traces, and with capture mode `full` the traces hold all conversations, so treat the keys like the other secrets: typed in with `read`, never in chat, rotated before production.
+The Langfuse keys are not in this folder: they are `HERMES_LANGFUSE_PUBLIC_KEY` and `HERMES_LANGFUSE_SECRET_KEY` in `~hermes/.hermes/.env`, typed in by an admin like the rest ([runbook](runbook.md#tracing-langfuse)). The key pair gives full read and write access to the project's traces, and with capture mode `full` the traces hold all conversations, so treat the keys like the other secrets: typed in by an admin with `read -rs` (no echo), never in chat, rotated before production.
 
 The user `hermes` has passwordless sudo, so an agent that got a terminal or file tool could read every file in this table. The v1 lockdown withholds those tools today. See backlog item 0.
 

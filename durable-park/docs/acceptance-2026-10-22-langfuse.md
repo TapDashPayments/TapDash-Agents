@@ -2,8 +2,9 @@
 
 **Result: PASSED. Langfuse tracing is live on the test VM `proto-agents` and does not change how approvals work.**
 Every chat message, model call and tool call is copied, with its full content, to Langfuse Cloud (US). A $1
-payment still asked a human once in withHuman and ran once. Five gaps need code (recommendations in the
-[backlog](backlog.md#langfuse-tracing-gaps-from-the-2026-10-22-audit)); none changes what runs.
+payment still asked a human once in withHuman and ran once. Four gaps need code (recommendations in the
+[backlog](backlog.md#langfuse-tracing-gaps-from-the-2026-10-22-audit)); none changes what runs. One more item, the
+Langfuse public key in span metadata, is noted and is not a gap.
 
 - Environment: test VM `proto-agents` (QuickBooks sandbox), Hermes Agent v0.22.3, Nous Research `langfuse` plugin v2.0.0
   @ `c2a9596`, Langfuse SDK 4.15.2, Langfuse Cloud US, Hobby (free) plan, project `proto-agents`.
@@ -30,7 +31,7 @@ payment still asked a human once in withHuman and ran once. Five gaps need code 
 | # | Check | Result | Evidence |
 |---|---|---|---|
 | 1 | Plugin on, durable-park still loads | PASS | `hermes plugins list` shows `langfuse` enabled. `agent.log`: `durable-park loaded: ... 2 observer hook(s) ...` and no `foreign pre_tool_call hook(s) present` line, on the live gateway. The Langfuse plugin logs no key warning (`Langfuse plugin:` / `Langfuse tracing:`). The line `capability_check plugin=langfuse capability=tools.override decision=deny` appears at every start and is harmless. |
-| 2 | Gateway and policy healthy | PASS | `hermes-gateway` active after the restarts. `tool_policy_status.json` `"ok": true` and `plugin_load.json` present (checked after the 04:57 restart). |
+| 2 | Gateway and policy healthy | PASS | `hermes-gateway` active after the restarts. `tool_policy_status.json` `"ok": true` and `plugin_load.json` present (checked after the 04:57 restart and again after the 13:42:18 restart: PID 469072, policy ok at 13:42:22Z, 2 observer hooks). |
 | 3 | Plain chat message | PASS | Trace `af1fefb9` ("hi, what can you do?"): `Hermes turn` with the full message in and the reply out, `LLM call` generations with model and token counts. |
 | 4 | QuickBooks read | PASS | Trace `5dc98827` (invoice lookup): the tool call is a `TOOL` observation with its arguments and the full result. A second lookup at 13:39 (trace `1db0bec4`) is what showed the depth cut-off, fixed by `MAX_DEPTH=16`. |
 | 5 | Payment that parks: one human ask, runs once | PASS | Trace `be88850d`: `create_payment` of $1 was parked as ledger row **P-420E1D2C**; withHuman asked Yaakov once; he approved after about 54 s; the row went to `executed` once and one payment was created. The parked call shows in Langfuse as a `TOOL` at level `WARNING`, status `plugin_block`. The resume turn is trace `95056bf4`, in the same session. No second payment. |
@@ -61,7 +62,7 @@ Each item from the skill's baseline table and the best-practices page.
 | Every trace named `Hermes turn`, every call `LLM call N` | Needs code | Names do not say platform or purpose. Recommendation: upstream, name by platform and purpose (for example `telegram-chat-turn`). |
 | Park, approval and resume are separate traces | Needs code | They are joined only by the park id in the text; the inner `create_payment` is not a child of `parked_action_execute`. Recommendation: a durable-park follow-up with its own plan, tests and independent review (AGENTS.md Rule 2): add the park id and the withHuman request id as trace metadata or a tag (for example `park:P-...`) and an event for the approval decision. |
 | Root `CHAIN` points to a span that is never exported | Needs code | Cosmetic (upstream). |
-| Langfuse public key in every span's metadata | Not a gap | `scope.attributes.public_key`, an SDK default. An identifier, not a secret. |
+| Langfuse public key in every span's metadata | Noted, not a gap | `scope.attributes.public_key`, an SDK default. An identifier, not a secret. |
 
 No code was changed in this work: only configuration and docs. The code gaps are recommendations for Yaakov to decide.
 

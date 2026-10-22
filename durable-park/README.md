@@ -99,6 +99,7 @@ not importable (CI) and run on the VM ([runbook](docs/runbook.md#check-durable-p
 | [acceptance-2026-10-21-ask-every-call.md](docs/acceptance-2026-10-21-ask-every-call.md) | See what was tested for "ask every call" (the record) |
 | [acceptance-2026-10-21-hermes-0.22.3.md](docs/acceptance-2026-10-21-hermes-0.22.3.md) | See what was tested when Hermes v0.22.3 became the tested version (the record) |
 | [acceptance-2026-10-21-tool-search.md](docs/acceptance-2026-10-21-tool-search.md) | See what was verified when Hermes Tool Search was switched on, and the other live settings changed that day (the record) |
+| [acceptance-2026-10-22-langfuse.md](docs/acceptance-2026-10-22-langfuse.md) | See what was tested and audited when Langfuse tracing was switched on (the record) |
 | [plans/](docs/plans/) | The original build plan (historical) |
 
 Changing code? Update the docs and diagrams it affects in the same change - see [CONTRIBUTING.md](../CONTRIBUTING.md).

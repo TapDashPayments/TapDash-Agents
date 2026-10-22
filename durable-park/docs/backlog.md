@@ -20,8 +20,8 @@ connected to a real QuickBooks company.** Details of each finding: [acceptance-2
 ## Langfuse tracing gaps (from the 2026-10-22 audit)
 
 Found by auditing the live traces ([acceptance-2026-10-22-langfuse.md](acceptance-2026-10-22-langfuse.md)). Tracing is
-live and works; these need plugin or durable-park code, so each is a recommendation for Yaakov to decide. No code was
-changed in the tracing work.
+live and works. Items 1 to 4 need plugin or durable-park code, so each is a recommendation for Yaakov to decide; item 5
+is only noted. No code was changed in the tracing work.
 
 1. **No `userId` on any trace.** The Nous plugin never sets one. Recommend an upstream PR to pass the chat user id, or a
    small durable-park-side tag. Worth it once there is more than one user.
@@ -32,7 +32,7 @@ changed in the tracing work.
    request id as trace metadata or tags (for example `park:P-...`), and an event or span for the approval decision. It
    touches the park, wake and executor code, so it needs **its own plan, tests and independent review** (AGENTS.md Rule 2).
 4. **The root `CHAIN` has a parent observation id that points at a span that is never exported.** Cosmetic; upstream.
-5. **The Langfuse public key is in every span's metadata** (`scope.attributes.public_key`, an SDK default). An
+5. **Noted, not a gap: the Langfuse public key is in every span's metadata** (`scope.attributes.public_key`, an SDK default). An
    identifier, not a secret; nothing to do unless the SDK adds an option to leave it out.
 
 Also found on the way:
