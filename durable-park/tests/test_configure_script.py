@@ -96,7 +96,8 @@ def test_bridge_socket_unit_lets_systemd_hold_the_port():
     """A socket unit owns 127.0.0.1:8791 at all times, so nothing the bot runs can bind it while the bridge restarts."""
     sections = _unit_sections(BRIDGE_SOCKET)
     assert set(sections) == {"Unit", "Socket", "Install"}
-    assert sorted(sections["Socket"]) == ["Accept=no", "ListenStream=127.0.0.1:8791", "NoDelay=true"]
+    assert {"Accept=no", "ListenStream=127.0.0.1:8791", "NoDelay=true"} <= set(sections["Socket"])
+    assert [line for line in sections["Socket"] if line.startswith("ListenStream=")] == ["ListenStream=127.0.0.1:8791"]
     assert sections["Install"] == ["WantedBy=sockets.target"]
 
 
@@ -116,6 +117,22 @@ def test_bridge_unit_is_bound_to_its_socket_and_always_restarts():
     assert "Wants=network-online.target" in sections["Unit"]  # without it the After= ordering has no effect
     assert "Restart=always" in sections["Service"] and "RestartSec=1" in sections["Service"]
     assert not any(line.startswith("Restart=on-failure") for line in sections["Service"])
+
+
+def test_bridge_service_never_trips_systemds_start_limit():
+    """With Accept=no systemd fails the socket unit (service-start-limit-hit) and closes the listening fd when the
+    service trips its start limit, which frees 127.0.0.1:8791 for anyone. The default limit (5 starts in 10 s) trips
+    in about 6 s of a persistent start failure with RestartSec=1, so the service must have no start limit at all
+    (systemd.unit: StartLimitIntervalSec=0 disables the rate limiting)."""
+    assert "StartLimitIntervalSec=0" in _unit_sections(BRIDGE_SERVICE)["Unit"]
+    assert not any(line.startswith("StartLimitBurst") for lines in _unit_sections(BRIDGE_SERVICE).values() for line in lines)
+
+
+def test_bridge_socket_has_no_trigger_limit_that_could_fail_it():
+    """systemd.socket: when TriggerLimitIntervalSec/TriggerLimitBurst (default 20 activations per 2 s for Accept=no)
+    is hit, the socket unit is put into a failure mode and closes its listening fd, so a burst of connections while
+    the bridge restarts would free the port. 0 disables the limit; PollLimit* still slows a flood down temporarily."""
+    assert "TriggerLimitIntervalSec=0" in _unit_sections(BRIDGE_SOCKET)["Socket"]
 
 
 def test_bridge_unit_takes_the_socket_from_systemd_and_reads_secrets_as_credentials():
@@ -536,3 +553,51 @@ def test_bridge_check_is_installed_root_owned_run_isolated_and_a_failure_or_abse
 def test_bridge_health_gate_curl_has_a_time_limit():
     code = "\n".join(_code_lines())
     assert "curl -s -m 3 -o /dev/null -w '%{http_code}' -X POST \"$BRIDGE_LOCAL\"" in code
+
+
+def _socket_failure_handler():
+    """The bridge_socket_failed() function of the script, as text."""
+    match = re.search(r"^bridge_socket_failed\(\) \{\n.*?^\}\n", SCRIPT.read_text(), re.S | re.M)
+    assert match, "configure_hermes.sh has no bridge_socket_failed()"
+    return match.group(0)
+
+
+def test_a_socket_that_cannot_start_stops_the_script_and_may_be_a_security_incident(tmp_path):
+    """First migration: the old unit is stopped, then the socket must take 127.0.0.1:8791. If that fails, something
+    else holds the port, and with the bot's user that is an impostor answering withHuman. The script must say so, show
+    who holds the port (ss output names processes, never secrets) and tell the admin not to go on."""
+    code = "\n".join(_code_lines())
+    assert 'systemctl enable --now "$BRIDGE_UNIT.socket" || bridge_socket_failed' in code
+    argv_file = tmp_path / "ss-args"
+    harness = f"""
+die() {{ printf 'configure_hermes: ERROR: %s\\n' "$*" >&2; exit 1; }}
+ss() {{ printf '%s\\n' "$*" > {argv_file}; printf 'LISTEN 0 5 127.0.0.1:8791 0.0.0.0:* users:(("python3",pid=999,fd=3))\\n'; }}
+BRIDGE_UNIT=durable-park-bridge
+{_socket_failure_handler()}
+bridge_socket_failed
+echo REACHED-AFTER-DIE
+"""
+    done = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    assert done.returncode == 1 and "REACHED-AFTER-DIE" not in done.stdout
+    assert "security incident" in done.stderr.lower()
+    assert 'users:(("python3",pid=999,fd=3))' in done.stderr  # the listener's line is shown
+    assert "do not continue" in done.stderr.lower()
+    assert argv_file.read_text().strip() == "-ltnp sport = :8791"
+
+
+def _receiver_package_pins():
+    match = re.search(r"^RECEIVER_PACKAGES=\((.*)\)$", SCRIPT.read_text(), re.M)
+    assert match, "RECEIVER_PACKAGES not found"
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def test_the_venv_pins_httpx_which_the_bridge_imports_directly():
+    """bridge/whapi.py imports httpx. It must not depend on agentapprovalprotocol happening to pull it in, so the
+    venv pins it, to the version the VM's /opt/durable-park venv has (0.28.1) and the dev requirements test against."""
+    assert "httpx==0.28.1" in _receiver_package_pins()
+
+
+def test_every_venv_pin_is_the_version_the_tests_run_against():
+    dev = (SCRIPT.parents[1] / "requirements-dev.txt").read_text().split()
+    pins = _receiver_package_pins()
+    assert pins and all(pin in dev for pin in pins), [pin for pin in pins if pin not in dev]

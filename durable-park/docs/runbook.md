@@ -158,7 +158,7 @@ and what to do (the bridge runs as `dpbridge` and systemd's socket holds its por
 | `FAIL` about | Meaning | What to do |
 |---|---|---|
 | the socket (`durable-park-bridge.socket` is not active, or listens on something other than `127.0.0.1:8791`) | systemd no longer holds the port, so anything running as `hermes` could bind it and answer withHuman | Check no other process holds the port (`sudo ss -ltnp 'sport = :8791'`), then `sudo systemctl enable --now durable-park-bridge.socket`. If the start fails because the port is taken, treat it as the impostor listener below. |
-| the service (not active, or its main process runs as a user other than `dpbridge`) | The wrong unit file is installed (for example the old `User=hermes` one restored), or someone started the bridge another way | `systemctl cat durable-park-bridge` must show `User=dpbridge`. Re-install the units with `sudo bash deploy/configure_hermes.sh` (only when no row is `parked`, `approved` or `executing`) and read `sudo journalctl -u durable-park-bridge -n 20`. |
+| the service (not active, its main process runs as a user other than `dpbridge`, or it carries a supplementary group other than `dpbridge`'s own: the line names the groups, e.g. `hermes (gid 1001)` or `dpwake`) | The wrong unit file is installed (for example the old `User=hermes` one restored, or one with `SupplementaryGroups=`), or someone started the bridge another way | `systemctl cat durable-park-bridge` must show `User=dpbridge` and no `SupplementaryGroups=`. Re-install the units with `sudo bash deploy/configure_hermes.sh` (only when no row is `parked`, `approved` or `executing`) and read `sudo journalctl -u durable-park-bridge -n 20`. |
 | the listener (a process other than systemd or the bridge holds `127.0.0.1:8791`, or nothing listens) | An impostor answers withHuman's webhook, or the port is down. The line names the pid and its user | Security incident: tell the admin. After the admin confirms, stop that process, then `sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service`, and run the check again. Nothing listening: start the socket as in the first row. |
 | another process runs `bridge.app` | A second copy of the bridge (for example one started by hand as `hermes`) exists next to the real one | Same as the impostor listener: the admin confirms, then stop that process. |
 | a user-level unit named `durable-park-bridge*` exists | A leftover or planted `systemd --user` unit (for example under `~hermes/.config/systemd/user/`) could be started by the bot to run its own bridge | The admin confirms, then disable it as that user (`sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user disable --now <unit>`) and delete the file. |
@@ -427,11 +427,11 @@ Argument values and the key are never logged.
 | `redacted-args` | The approver saw `[redacted]` in the park's arguments, or the call carries a secret-looking key (`password`, `token`, `secret`, `authorization`, `api_key`) or arguments too large to show whole | Expected for such calls: look at the real values and decide |
 | `already-reported` | withHuman's record already holds an outcome for this approval. The plugin never reports outcomes (`report_outcomes=False`), so something else used the approval | Investigate: read the park request's history in withHuman to see what reported an outcome, and find the earlier call that used the approval |
 | `gateway-request-not-listed` | withHuman's list of the agent's requests did not hold the gateway request the webhook was about (not yet visible, or id mismatch) | Ask again; if it repeats, check the key's `request.read.unrouted` permission and withHuman's status |
-| `gateway-request-before-release` | The gateway request was created more than 5 s before the park was consumed: it is not the call the approval released | Expected for an old call someone re-ran; a person decides |
+| `gateway-request-before-release` | The gateway request's `created_at` is missing or unreadable, or is earlier than the park's `consumed_at`, by any amount (no skew is allowed: both stamps are withHuman's own clock): it is not the call the approval released | Expected for an old call someone re-ran; a person decides |
 | `gateway-request-mismatch` | The listed gateway request differs from the webhook's call (agent, server, tool or arguments) | Should not happen; compare the request in withHuman with the call and tell the developer |
-| `neighbours-truncated` | The agent's listing (200 newest requests) has nothing created before the park was released, so a second use could be hidden | Expected only under heavy traffic; a person decides. Nothing is lost |
+| `neighbours-truncated` | The agent's listing (200 newest requests) has nothing created more than 5 s before the park was consumed, so a second use could be hidden beyond its end | Expected only under heavy traffic; a person decides. Nothing is lost |
 | `neighbours-unsorted` | withHuman's listing of the agent's requests was not newest-first, so the bridge cannot tell whether a second use came after the park was consumed. Fails closed | A person decides. This should not happen with withHuman's listing as documented: tell the developer, and check whether withHuman changed the order |
-| `already-used` | Another gateway request for the same call (or for the same tool with `-` and `_` swapped) was created after the approval was consumed (a retry, or a replay) | Expected for a replay; for a first run, find the earlier gateway request |
+| `already-used` | Another gateway request for the same call (or for the same tool with `-` and `_` swapped, with the same arguments or arguments that cannot be compared) was created from 5 s before the approval was consumed onwards, or has no readable `created_at` (a retry, or a replay). The 5 s is margin, so a request made just before the release also counts | Expected for a replay; for a first run, find the earlier gateway request |
 | `no-request-id` | The delivery carried no gateway request id (only real deliveries have one; a preview or test does not) | Nothing for a test; for a real call, tell the developer |
 | `body-not-object`, `type`, `preview`, `malformed`, `arguments-not-object`, `agent`, `no-idempotency-key`, `idempotency-mismatch` | Checks on the webhook delivery itself, before any listing: the body is not a JSON object (`body-not-object`); it is not the gateway-call block (`type`); it is a preview or test (`preview`); it lacks the request or agent objects, or the server or tool names (`malformed`); the arguments are not an object (`arguments-not-object`); the agent is not `proto-agents` (`agent`); it has no `WithHuman-Idempotency-Key` header (`no-idempotency-key`); or the body's key differs from the header (`idempotency-mismatch`) | A test or preview: nothing to do. For a real call: check the webhook endpoint's block and agent in withHuman, then tell the developer. The call went to a person |
 | `error:<ExcClass>` | A bug raised an exception in the bridge or in the verdict code. Only the class name is logged, e.g. `error:KeyError` | The call went to a person, so nothing ran unapproved. Tell the developer the class name and the journal time, and fix it with a test |
@@ -642,12 +642,18 @@ neither is created by any script:
 1. Store both keys as above. `configure_hermes.sh` refuses to start, changing nothing, if either file is missing or
    empty, because the service cannot start without them (`LoadCredential`).
 2. Only for the first move from the old bridge that ran as `hermes`: that bridge held `127.0.0.1:8791` itself, so the
-   script stops it before systemd's socket can take the port, and for a moment nothing listens. First check that no
-   ledger row is `parked`, `approved` or `executing` ([waiting rows](#health-check)); a gateway call in that moment
-   goes to a person, never an auto-approve.
+   script stops it before systemd's socket can take the port, and for a moment nothing listens. **Keep the gateway
+   idle for the whole first migration**: check that no ledger row is `parked`, `approved` or `executing`
+   ([waiting rows](#health-check)), and do not start a new tool call in the chat until `bridge_check.py` has passed
+   (step 3). A gateway call in that moment goes to a person, never an auto-approve, but a parked or approved row
+   would be left waiting on a bridge that is not answering.
 3. Run `sudo bash deploy/configure_hermes.sh` ([deploy table](#deploy-a-change)). It creates `dpbridge`, sets
    `bridge_secret` to `root:root 0600`, installs both units, starts the socket and the service, and runs
-   `bridge_check.py`.
+   `bridge_check.py`. If it stops with `could not start durable-park-bridge.socket: something else may hold
+   127.0.0.1:8791`, **treat it as a possible security incident**: the old bridge was stopped just before, so another
+   process holds the port and may be answering withHuman's webhook. Read the `ss` output the script printed (process
+   names and pids, no secrets), tell the admin, and do not continue and do not re-run the script until the holder is
+   explained and stopped.
 4. Run the [check](#the-gateway-bridge) below and the [live acceptance](#the-gateway-bridge).
 
 **Rotate a key.** The service copies `bridge_secret` and `audit_key` only when it starts (`LoadCredential`), so after
@@ -682,7 +688,15 @@ Before the first move to `dpbridge` there is no socket unit yet: skip the last l
 **Back to the previous `dpbridge` version** (the backup holds both unit files):
 
 1. Confirm no ledger row is `parked`, `approved` or `executing` (the query under [Health check](#health-check)). If one is, stop.
-2. Restore the code and both unit files. Each `rm -rf` runs first, so the restore does not nest:
+2. First find out whether the socket unit file differs between the two versions (the restore below overwrites the
+   evidence, so run this before it):
+
+```sh
+sudo cmp -s /root/durable-park-bridge.socket.rollback /etc/systemd/system/durable-park-bridge.socket \
+  && echo "socket unit unchanged: restart only the service" || echo "socket unit changed: restart the socket too"
+```
+
+   Then restore the code and both unit files. Each `rm -rf` runs first, so the restore does not nest:
 
 ```sh
 sudo rm -rf /opt/durable-park/bridge && sudo cp -a /opt/durable-park/bridge.rollback /opt/durable-park/bridge
@@ -691,10 +705,20 @@ sudo cp -a /root/durable-park-bridge.service.rollback /etc/systemd/system/durabl
 sudo cp -a /root/durable-park-bridge.socket.rollback /etc/systemd/system/durable-park-bridge.socket
 ```
 
-3. Reload, restart the socket and the service together, and check:
+3. Reload and restart. **Restart the socket only if step 2 said the socket unit changed**: a socket restart closes
+   the listener and frees `127.0.0.1:8791` for a moment. Otherwise restart only the service; the socket keeps the
+   port and connections wait. Run one of the two lines:
 
 ```sh
+# the socket unit file did NOT change (the usual case): restart only the service
+sudo systemctl daemon-reload && sudo systemctl restart durable-park-bridge.service
+# the socket unit file DID change: restart both (the port is free for a moment, so no row parked, approved or executing)
 sudo systemctl daemon-reload && sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service
+```
+
+Then check:
+
+```sh
 systemctl is-active durable-park-bridge.socket durable-park-bridge                   # active active
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8791/wh/bridge     # 401 (unsigned)
 sudo python3 -I /opt/durable-park/deploy/bridge_check.py                             # seven ok: lines

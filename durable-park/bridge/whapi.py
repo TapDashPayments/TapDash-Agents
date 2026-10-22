@@ -1,8 +1,10 @@
 """Read-only lister of withHuman approval requests for the bridge.
 
 The bridge asks withHuman (``GET <base>/requests``) instead of reading the local ledger, with the organization
-key in ``/etc/durable-park/audit_key`` (it can read requests and audit events, nothing else). The key file is
-read on every call so a rotation takes effect without a restart; the key is never logged, never part of an
+key in ``/etc/durable-park/audit_key`` (it can read requests and audit events, nothing else). The file it is
+given is re-read on every call. Under the systemd unit that file is systemd's private copy
+(``LoadCredential``), made when the service starts, so rotating ``/etc/durable-park/audit_key`` reaches the
+bridge only after ``systemctl restart durable-park-bridge``. The key is never logged, never part of an
 exception message and never in a ``repr``. Any failure is a ``ListError`` with a short safe ``code``; the
 caller turns it into "ask a human".
 """
@@ -10,6 +12,7 @@ caller turns it into "ask a human".
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -69,6 +72,30 @@ class RequestLister:
         if q is not None:
             params["q"] = q
         headers = {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+        # httpx's timeouts are per phase and per read (httpcore fixes the read timeout when the body starts), so a
+        # server that stalls just before the budget ends could hold the caller for one more timeout, per phase. The
+        # fetch therefore runs in a worker thread and the caller waits for it only until the budget is spent. An
+        # abandoned worker ends by itself at its own httpx timeout and holds no state but its own connection.
+        outcome: dict = {}
+
+        def work() -> None:
+            try:
+                outcome["requests"] = self._fetch(params, headers, timeout, limit_at)
+            except ListError as exc:
+                outcome["error"] = exc
+            except BaseException:  # noqa: BLE001 - a worker thread must never die with an unhandled exception
+                outcome["error"] = ListError("transport")
+
+        worker = threading.Thread(target=work, name="bridge-whapi-list", daemon=True)
+        worker.start()
+        worker.join(max(0.0, limit_at - self._clock()))
+        if worker.is_alive():
+            raise ListError("deadline")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["requests"]
+
+    def _fetch(self, params: dict, headers: dict, timeout: float, limit_at: float) -> list:
         try:
             with httpx.Client(transport=self._transport, follow_redirects=False, trust_env=False) as client:
                 with client.stream("GET", f"{self._base_url}/requests", params=params, headers=headers,

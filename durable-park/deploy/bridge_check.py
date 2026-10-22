@@ -92,6 +92,19 @@ class Context:
                 return tuple(int(v) for v in line.split()[1:5])
         raise ValueError(f"no Uid line for pid {pid}")
 
+    def supplementary_gids(self, pid):
+        """The gids on the ``Groups:`` line of /proc/<pid>/status (empty tuple when the line is empty)."""
+        for line in (self.root / "proc" / str(pid) / "status").read_text().splitlines():
+            if line.startswith("Groups:"):
+                return tuple(int(v) for v in line.split()[1:])
+        raise ValueError(f"no Groups line for pid {pid}")
+
+    def group_name(self, gid):
+        try:
+            return self.run(["getent", "group", str(gid)]).split(":", 1)[0].strip() or f"gid {gid}"
+        except RunError:
+            return f"gid {gid}"
+
     def user_name(self, uid):
         try:
             return self.run(["getent", "passwd", str(uid)]).split(":", 1)[0].strip() or f"uid {uid}"
@@ -126,7 +139,8 @@ def check_socket(ctx):
 
 
 def check_service(ctx):
-    """2. The service is active and its MainPID process runs as dpbridge (all four uids)."""
+    """2. The service is active and its MainPID process runs as dpbridge (all four uids) with no supplementary
+    group but dpbridge's own."""
     state, pid = ctx.service_state()
     if state != "active":
         return Result(False, f"{SERVICE_UNIT} is {state}, not active")
@@ -143,7 +157,18 @@ def check_service(ctx):
     if uids != (expected,) * 4:
         return Result(False, f"main process {pid} runs as {ctx.user_name(uids[1])}, not {BRIDGE_USER} "
                              f"(uids {'/'.join(map(str, uids))})")
-    return Result(True, f"{SERVICE_UNIT} is active; main process {pid} runs as {BRIDGE_USER}")
+    try:
+        gids = ctx.supplementary_gids(pid)
+    except (OSError, ValueError) as exc:
+        return Result(False, f"cannot read the Groups of main process {pid}: {type(exc).__name__}")
+    own_gid = int(entry[3]) if len(entry) > 3 and entry[3].isdigit() else None
+    extra = [gid for gid in gids if gid != own_gid]
+    if extra:
+        named = ", ".join(f"{ctx.group_name(gid)} (gid {gid})" for gid in extra)
+        return Result(False, f"main process {pid} has supplementary groups {named}, "
+                             f"not only {BRIDGE_USER}'s own")
+    return Result(True, f"{SERVICE_UNIT} is active; main process {pid} runs as {BRIDGE_USER} "
+                        f"with no supplementary group but its own")
 
 
 def check_listener(ctx):
