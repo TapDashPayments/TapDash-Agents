@@ -658,19 +658,23 @@ cannot run from a checkout (design D8). CI does not run them yet ([backlog](back
 Not done yet. Do it only after the pull requests with `tracing/` and these docs are merged and the live clone is up to
 date (`git -C /home/hermes/tapdash-agents pull --ff-only`, as in [Deploy a change](#deploy-a-change)). As `hermes`:
 
-1. `bash tracing/run_tests.sh` in the live clone: all tests pass. Diff `on_pre_tool_call` against the upstream copy at
-   `c2a9596` (`diff <(sed -n '/^def on_pre_tool_call/,/^def /p' <upstream>/__init__.py) <(sed -n '/^def on_pre_tool_call/,/^def /p' tracing/tapdash_langfuse/__init__.py)` prints nothing).
+1. `bash tracing/run_tests.sh` in the live clone: all tests pass. Diff `on_pre_tool_call` against upstream: check out
+   <https://github.com/NousResearch/hermes-official-plugins> at commit `c2a95963c442f3f23e4bc6fe0da898e1dd1fb63d` into a
+   temporary directory (the plugin is its subdirectory `langfuse`), then
+   `diff <(sed -n '/^def on_pre_tool_call/,/^def /p' <temp dir>/langfuse/__init__.py) <(sed -n '/^def on_pre_tool_call/,/^def /p' tracing/tapdash_langfuse/__init__.py)`
+   must print nothing.
 2. Back up `~/.hermes/.env` and `~/.hermes/config.yaml` (suffix `.bak-langfuse-gaps-<UTC time>`).
 3. Add the new setting once, quoted so the backslashes stay (it holds no secret):
    `printf '%s\n' 'HERMES_LANGFUSE_TAG_PATTERNS=park=\bP-[0-9A-F]{8}\b' >> ~/.hermes/.env`
    (end the last line first if it has no newline, as in [Turn it on](#turn-it-on-admin)).
 4. `ln -s /home/hermes/tapdash-agents/tracing/tapdash_langfuse ~/.hermes/plugins/tapdash-langfuse`
-5. Set `observer_hooks` by hand in `config.yaml` ([Plugin settings](#plugin-settings)) to exactly these two:
+5. `hermes plugins disable langfuse`, then `hermes plugins enable tapdash-langfuse`.
+6. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)).
+7. **Last, immediately before the restart:** set `observer_hooks` by hand in `config.yaml`
+   ([Plugin settings](#plugin-settings)) to exactly these two:
    `hermes_plugins.platforms__raft.adapter._on_pre_tool_call` and `hermes_plugins.tapdash_langfuse.on_pre_tool_call`.
    This **removes** `hermes_plugins.langfuse.on_pre_tool_call`. Read it back with
-   `hermes config get plugins.entries.durable-park.settings.observer_hooks` (a list of 2 strings).
-6. `hermes plugins disable langfuse`, then `hermes plugins enable tapdash-langfuse`.
-7. Check that no row is `parked`, `approved` or `executing` ([health check](#health-check)), and restart
+   `hermes config get plugins.entries.durable-park.settings.observer_hooks` (a list of 2 strings), then restart
    `hermes-gateway` straight after, with **nothing restarted between steps 5 and 7**. Then run
    [Check it works](#check-it-works): `hermes plugins list` shows `tapdash-langfuse` enabled and `langfuse` disabled, the
    `durable-park loaded` line counts 2 observer hooks, and there is no `foreign pre_tool_call` line.
@@ -679,18 +683,24 @@ date (`git -C /home/hermes/tapdash-agents pull --ff-only`, as in [Deploy a chang
    the run are returned, `userId` is the sender's chat id, and the trace names are `telegram-turn`. The payment must
    still ask once and run once.
 
+**If the gateway restarts on its own** (a crash restart) between the plugin swap and the planned restart, and
+durable-park then refuses every call (the plugin that is loaded and the `observer_hooks` list do not match), do not leave
+it: check the ledger, finish the step that is missing (step 5 or step 7) and restart, or roll back (below). The window
+is short because the config edit is last, but it exists.
+
 **Why the old entry is removed in the same restart.** The observer list must match the plugins that are loaded.
 After this restart the catalog plugin is not loaded, so its hook name no longer needs to be listed, and the new
 plugin's name must be. **Removing the name of an observer whose plugin is still loaded makes durable-park refuse every
-tool call** (an outage, not a loss of safety; [Allow another hook](#allow-another-hook-observer_hooks)). So never take
-`hermes_plugins.langfuse.on_pre_tool_call` out while the catalog plugin is enabled, and never enable `tapdash-langfuse`
-without its name listed.
+tool call** (an outage, not a loss of safety; [Allow another hook](#allow-another-hook-observer_hooks)). So never let
+the gateway start with `hermes_plugins.langfuse.on_pre_tool_call` out of the list while the catalog plugin is enabled,
+or with `tapdash-langfuse` enabled and its name not listed: the plugin swap and the list edit go into the same restart.
 
-**Rollback** (any failure above): restore both backups, or put the observer list back to Raft plus
-`hermes_plugins.langfuse.on_pre_tool_call` by hand; `hermes plugins enable langfuse` and
-`hermes plugins disable tapdash-langfuse`; check the ledger; restart `hermes-gateway`; run
-[Check it works](#check-it-works) with the old names. The two plugin states and the two observer lists must match,
-for the reason above. The symlink and the `HERMES_LANGFUSE_TAG_PATTERNS` line can stay (the catalog plugin ignores the
+**Rollback** (any failure above). Put back only what the deploy changed: `hermes plugins enable langfuse` and
+`hermes plugins disable tapdash-langfuse`, and the `observer_hooks` list back to Raft plus
+`hermes_plugins.langfuse.on_pre_tool_call`, by hand, with the config edit **last**, immediately before the restart (or
+restore the backups from step 2, only if nothing else in `.env` or `config.yaml` has changed since they were taken);
+check the ledger; restart `hermes-gateway`; run [Check it works](#check-it-works) with the old names. The loaded plugin
+and the observer list must match, for the reason above. The symlink and the `HERMES_LANGFUSE_TAG_PATTERNS` line can stay (the catalog plugin ignores the
 setting, and a disabled plugin is not loaded).
 
 ### Turn it on (admin)
@@ -797,10 +807,33 @@ With the patched plugin (and `HERMES_LANGFUSE_TAG_PATTERNS` set as in the settin
 a park id carries the tag `park:P-XXXXXXXX`: the turn that parked the call (the id is in the tool result), the turn
 after the approval (`[durable-park] P-... was APPROVED ...`) and the run (`"park_id": "P-..."`, in the same trace as
 the approval turn). **Filter the traces by that tag.** In the Langfuse web app: Tracing, Filter, Tags, pick
-`park:P-XXXXXXXX`. From the VM, use the v2 observations call from [Read traces](#read-traces) with
-`fields=core,basic,trace_context` and a filter on the column `traceTags`, operator `any of`, value
-`["park:P-XXXXXXXX"]` (the `filter` parameter is a JSON list). The park id comes from the ledger or the approval
-message. Traces from before the deploy have no such tag: search them by the park id in the text.
+`park:P-XXXXXXXX` (the exact menu path in the web app has not been checked). From the VM, call the v2 observations
+endpoint with `fields=core,basic,trace_context` and a `filter` that is the URL-encoded JSON list below. The keys are
+loaded into the process only, as in [Read traces](#read-traces), and never printed. The park id comes from the ledger or
+the approval message.
+
+```sh
+python3 - <<'PY'
+import base64, json, os, urllib.parse, urllib.request
+env = {}
+for line in open(os.path.expanduser("~/.hermes/.env")):
+    if line.startswith("HERMES_LANGFUSE_"):
+        k, _, v = line.rstrip("\n").partition("=")
+        env[k] = v.strip().strip("'\"")
+auth = base64.b64encode(
+    (env["HERMES_LANGFUSE_PUBLIC_KEY"] + ":" + env["HERMES_LANGFUSE_SECRET_KEY"]).encode()).decode()
+flt = [{"type": "arrayOptions", "column": "traceTags", "operator": "any of", "value": ["park:P-XXXXXXXX"]}]
+url = (env["HERMES_LANGFUSE_BASE_URL"] + "/api/public/v2/observations?fields=core,basic,trace_context&limit=100&filter="
+       + urllib.parse.quote(json.dumps(flt)))
+body = json.load(urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": "Basic " + auth}), timeout=30))
+for r in body.get("data", []):
+    print(r["traceId"], r.get("type"), r.get("name"))   # ids and names only: the rows hold full content
+PY
+```
+
+It returns the observations of every trace that carries the tag: the parking turn, the approval turn and the run (the
+same `traceId` for the last two). Follow `meta.cursor` for more than 100 rows, as in Read traces. Traces from before
+the deploy have no such tag: search them by the park id in the text.
 
 ### Secret scan (how it was done, and how to repeat it)
 
