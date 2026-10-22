@@ -440,10 +440,10 @@ the outage was shorter than 5 minutes, both lines may arrive together.
 The model puts a short reason in `withhuman_context`. The withHuman gateway expects it at the top level and shows it
 to the approver; the park hook moves it there when the model nests it inside `params`. When it cannot (or a note is
 dropped, or the hook could not even look), the call still goes on exactly as before (the original arguments, approval
-is unaffected) and the sweep sends one chat alert per tool, kind, key and detail (state in `lift_alert_state.json`).
+is unaffected) and the sweep sends one chat alert line per tool and kind (state per key and detail in `lift_alert_state.json`; several new places of one problem are one line that names the first place and ends `(+N more places, e.g. ...)`).
 The report is `lift_status.json` next to the ledger (names, times and counts, never a value; the hook writes it under
-a lock, so the gateway and any other Hermes process share it; a write that fails is retried on the next problem and
-every 30 minutes). The same problem is said again once per 24 hours while it keeps happening
+a lock, so the gateway and any other Hermes process share it; a tool call waits at most 0.2 s for the lock; a write that fails is retried on the next problem and
+every 30 minutes, and while it keeps failing the hook leaves the marker `lift_status.unwritable` for the sweep to alert on). The same problem is said again once per 24 hours while it keeps happening
 (`durable-park ALERT (still happening, <n> times): ...`). The text tells you the kind:
 
 | Alert | Meaning | What to do |
@@ -456,6 +456,8 @@ every 30 minutes). The same problem is said again once per 24 hours while it kee
 | `the agent's note is still inside <key> for <tool> after the move` | A note is still inside the final arguments at that path (deeper than one level, inside a list, in JSON text, or another spelling of the name). A gateway tool whose rules do not list the top-level field is searched too | The note reaches the server (QuickBooks says "IGNORED"). Look at the tool's rules and at how the model nests it |
 | `could not finish checking <tool>'s arguments for the agent's note` | The arguments are too large or too deep for the bounded search | Look at what the model sent; the note may reach the server |
 | `could not read lift_status.json (<reason>)` | The report is unreadable or not the expected shape | Look at the file next to the ledger; the hook keeps an unparseable one as `lift_status.json.corrupt` before writing a new one |
+| `lift problems could not be saved (<ErrorType>)` | The hook cannot write `lift_status.json` (the marker `lift_status.unwritable` is next to it), so note problems are not being reported | Fix the permissions or space of the ledger directory, `lift_status.json` and `lift_status.json.lock`; the next successful write removes the marker and `durable-park: lift problems can be saved again.` follows |
+| `<file> was unreadable and was replaced` | The report was corrupt; the hook replaced it and kept the old one as `lift_status.json.corrupt` | Look at the `.corrupt` file for earlier problems |
 | `could not check for lift problems (<ErrorType>)` | The sweep's own check failed (for example its state file cannot be written) | Read the sweep's stderr (`~/.hermes/logs`), fix, and a line `durable-park: lift problems can be checked again.` follows |
 
 A problem that goes away and comes back alerts again. When adding tools from a new provider, expect these alerts

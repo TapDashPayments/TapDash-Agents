@@ -32,7 +32,7 @@ HTTP_TIMEOUT_SECONDS = 10.0
 # request whose canonical JSON is over 16 KiB gets every string cut to 1 KiB.
 MAX_ARGS_BYTES = 16384
 MAX_STRING_CHARS = 1024
-MAX_REASONING_CHARS = 2000  # the agent's own note shown to the approver (``Call.reasoning``)
+MAX_REASONING_UNITS = 2000  # the agent's own note shown to the approver (``Call.reasoning``), in UTF-16 code units
 CONTEXT_FIELD = "withhuman_context"  # the gateway's top-level note field
 REDACTED = "[redacted]"
 _SECRET_KEY = re.compile(r"password|token|secret|authorization|api[_-]?key", re.IGNORECASE)
@@ -86,6 +86,17 @@ def redact_arguments(args: Mapping) -> tuple[dict, bool]:
     if len(canonical_json(redacted).encode("utf-8")) > MAX_ARGS_BYTES:
         return _cut_strings(redacted), True
     return redacted, False
+
+
+def cut_utf16(text: str, limit: int = MAX_REASONING_UNITS) -> str:
+    """``text`` cut to at most ``limit`` UTF-16 code units (a character outside the BMP, such as an emoji, is two),
+    never in the middle of a pair: withHuman may count the way JavaScript and Java do, not in code points."""
+    units = 0
+    for index, char in enumerate(text):
+        units += 2 if ord(char) > 0xFFFF else 1
+        if units > limit:
+            return text[:index]
+    return text
 
 
 class _BoundedTransport(httpx.BaseTransport):
@@ -182,10 +193,15 @@ def _declares_context_in(schema: Any, root: Any, seen: frozenset = frozenset(), 
     return None if None in found else False
 
 
+_NOT_ALNUM = re.compile(r"[^a-z0-9]")
+_NOTE_PROSE = re.compile(r"with[-_]?human[-_]?context", re.IGNORECASE)
+
+
 def is_note_key(key: Any) -> bool:
-    """A key that is (a spelling of) the gateway's note field: ``withhuman_context`` ignoring case and any
-    leading or trailing underscores."""
-    return isinstance(key, str) and key.lower().strip("_") == CONTEXT_FIELD
+    """A key that is (a spelling of) the gateway's note field: ``withhuman_context`` ignoring case and every
+    character that is not a letter or digit (``withHumanContext``, ``with-human-context``, ``_withhuman_context_``).
+    Only the exact ``withhuman_context`` is ever moved; every other spelling found inside is reported."""
+    return isinstance(key, str) and _NOT_ALNUM.sub("", key.lower()) == "withhumancontext"
 
 
 def _key_declares(props: dict, key: Any, root: Any) -> bool | None:
@@ -244,7 +260,7 @@ def lift_gateway_context(args: Any, schema: dict | None,
             report("declared", str(key))
             continue
         removed = value.pop(CONTEXT_FIELD)
-        if isinstance(removed, str) and removed:
+        if isinstance(removed, str) and removed.strip():
             if note is None and not top_present:
                 note = removed
                 continue
@@ -252,7 +268,7 @@ def lift_gateway_context(args: Any, schema: dict | None,
                 continue  # an exact copy of the note the approver will see: nothing is lost
             reason = "more than one note" if note is not None else "another note was already at the top"
         else:
-            reason = "empty" if isinstance(removed, str) else "not text"
+            reason = "empty" if isinstance(removed, str) else "not text"  # blank text is empty: nobody could read it
         report("note_dropped", str(key), reason)
     if note is not None and not top_present:
         out[CONTEXT_FIELD] = note
@@ -296,18 +312,19 @@ def _decode_text(value: str) -> Any:
 
 
 def find_leftover_notes(args: Any, exclude: frozenset | set = frozenset()) -> tuple[list[str], bool]:
-    """Where a ``withhuman_context`` note is still inside ``args``, as key paths (names and list indices only, never
-    values), plus whether the walk was cut short. Walks dicts and lists at any depth and every string that strictly
-    decodes to an object, array or string; a string that does not decode but contains the field name counts as a
-    leftover too. A key counts as the note when it is ``withhuman_context`` ignoring case and leading or trailing
-    underscores. The top-level ``withhuman_context`` itself is the real note and is never reported; the paths in
-    ``exclude`` (positively declared locations) are skipped. Bounded: depth 50, 10 000 nodes, 20 hits (a bound
-    reached means incomplete)."""
+    """Where a ``withhuman_context`` note is still inside ``args``, as key paths (key names only, never values; every
+    list item is written ``[*]``, so a note in each of 30 items is one place), plus whether the walk was cut short.
+    Walks dicts and lists at any depth and every string that strictly decodes to an object, array or string; a
+    string that does not decode but names the field (``withhuman_context``, ``withHumanContext``,
+    ``with-human-context``) counts as a leftover too, so prose that merely mentions it is reported. A key counts as
+    the note when ``is_note_key`` says so. The top-level ``withhuman_context`` itself is the real note and is never
+    reported; the paths in ``exclude`` (positively declared locations) are skipped. Bounded: depth 50, 10 000
+    nodes, 20 hits (a bound reached means incomplete)."""
     hits: list[str] = []
     state = {"nodes": 0, "incomplete": False}
 
     def add(path: str) -> None:
-        if path in exclude:
+        if path in exclude or path[:MAX_PATH_CHARS] in hits:
             return
         if len(hits) >= MAX_LEFTOVER_HITS:
             state["incomplete"] = True
@@ -328,13 +345,13 @@ def find_leftover_notes(args: Any, exclude: frozenset | set = frozenset()) -> tu
                     continue  # never look inside a note
                 walk(child, child_path, depth + 1)
         elif isinstance(value, list):
-            for index, child in enumerate(value):
-                walk(child, f"{path}[{index}]", depth + 1)
+            for child in value:
+                walk(child, f"{path}[*]", depth + 1)
         elif isinstance(value, str):
             decoded = _decode_text(value)
             if decoded is not _NOT_JSON:
                 walk(decoded, path, depth + 1)
-            elif CONTEXT_FIELD in value.lower():
+            elif _NOTE_PROSE.search(value):
                 add(path)
 
     walk(args, "", 0)
@@ -342,29 +359,54 @@ def find_leftover_notes(args: Any, exclude: frozenset | set = frozenset()) -> tu
 
 
 LIFT_STATUS_FILENAME = "lift_status.json"
+LIFT_UNWRITABLE_FILENAME = "lift_status.unwritable"  # exists while the lift report cannot be written (the sweep alerts)
 MAX_LIFT_ENTRIES = 200
 LIFT_REWRITE_SECONDS = 60.0  # a repeat of a known problem rewrites the file at most this often (the count lags)
+LIFT_LOCK_WAIT_SECONDS = 0.2  # the most a tool call ever waits for the report's lock (retries every 20 ms)
+LIFT_LOCK_RETRY_SECONDS = 0.02
 LIFT_KINDS = ("declared", "note_dropped", "schema_unavailable", "args_unreadable", "lift_error",
-              "note_left_inside", "check_incomplete")
+              "note_left_inside", "check_incomplete", "report_reset")
+LIFT_OVERFLOW_TOOL = "*"  # problems beyond 200 waiting ones are counted here (per kind), never dropped
+LIFT_OVERFLOW_KEY = "(more than 200 problems waiting)"
+LIFT_RESET_TOOL = LIFT_STATUS_FILENAME  # ``report_reset``: the report was unreadable and was replaced
 _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+_MARKER_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+class LockTimeout(Exception):
+    """The report's lock was still held by someone else after ``LIFT_LOCK_WAIT_SECONDS``."""
 
 
 def _sweep_order(entry: dict) -> tuple:
     return (entry["last_seen"], entry["first_seen"], entry["tool"], entry["kind"], entry["key"], entry["detail"])
 
 
+def _ident(entry: dict) -> tuple[str, str, str, str]:
+    return (entry["tool"], entry["kind"], entry["key"], entry["detail"])
+
+
 class LiftStatus:
     """Where the lift reports what it could not do, for the sweep to alert on (``lift_status.json`` next to the
     ledger). One entry per (tool, kind, key, detail) with ``first_seen``, ``last_seen`` and ``count``: names and
-    times, never an argument value or note text. At most 200 entries (the least recently seen makes room).
+    times, never an argument value or note text (key names are chosen by the model and can themselves be data).
+    At most 200 entries are kept on disk: when the file is full the least recently seen WRITTEN entry makes room;
+    an entry that has not been written yet is never dropped (problems beyond 200 waiting ones are counted in one
+    ``*`` entry per kind).
 
     Several processes may write the file (the gateway, a CLI run that loads the plugin): every write takes an
     ``flock`` on a sidecar lock file, re-reads the file, adds this process's new occurrences to what is there and
-    replaces it atomically, so nobody drops another's entries. A file that cannot be parsed is kept as
-    ``lift_status.json.corrupt`` before it is replaced. A failed write keeps the occurrences in memory and is retried
-    on every later call and by ``flush`` (the form self-check thread calls it every 30 minutes); one error is logged
-    per outage. A repeat of a problem already in the file rewrites it only every 60 s (the count lags; ``flush``
-    catches up). Thread-safe and never raises. ``path=None`` only remembers."""
+    replaces it atomically, so nobody drops another's entries. The lock is only tried, never waited for: a tool
+    call waits at most 0.2 s for it and the entries then stay pending (written on the next record or ``flush``). A
+    file that cannot be parsed is kept as ``lift_status.json.corrupt`` before it is replaced, and the replacement
+    holds a ``report_reset`` entry so the sweep says so.
+
+    A failed write keeps the occurrences in memory and is retried on every later call and by ``flush`` (the form
+    self-check thread calls it every 30 minutes). One error is logged per outage, and a marker file
+    ``lift_status.unwritable`` (UTC time and error type, nothing else) is written next to the report for the sweep
+    to alert on, unless the whole directory is unwritable (the form-check report goes stale then and says so). A
+    mere lock timeout leaves no marker unless it fails again on a later ``flush``. The next successful write (or
+    ``flush``) removes the marker. A repeat of a problem already in the file rewrites it only every 60 s (the
+    count lags; ``flush`` catches up). Thread-safe and never raises. ``path=None`` only remembers."""
 
     def __init__(self, path: str | None = None, clock: Callable[[], float] = time.monotonic):
         self._path = path
@@ -374,6 +416,8 @@ class LiftStatus:
         self._known: set[tuple[str, str, str, str]] = set()
         self._last_write: float | None = None
         self._write_failed = False
+        self._marker_tried = False  # one attempt per outage to write the marker
+        self._corrupt_seen = False
         try:
             self._known = set(self._read_disk(keep_corrupt=False))
         except Exception:  # noqa: BLE001 - only used to tell a new problem from a repeat
@@ -382,6 +426,10 @@ class LiftStatus:
     @property
     def path(self) -> str | None:
         return self._path
+
+    @property
+    def marker_path(self) -> str | None:
+        return os.path.join(os.path.dirname(os.path.abspath(self._path)), LIFT_UNWRITABLE_FILENAME) if self._path else None
 
     def _read_disk(self, keep_corrupt: bool = True) -> dict[tuple[str, str, str, str], dict[str, Any]]:
         """The entries now in the file ({} when missing). An unparseable file is moved aside when ``keep_corrupt``;
@@ -404,6 +452,7 @@ class LiftStatus:
         except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
             if keep_corrupt:
                 os.replace(self._path, self._path + ".corrupt")
+                self._corrupt_seen = True
                 log.warning("%s was unreadable; kept as %s.corrupt", LIFT_STATUS_FILENAME, LIFT_STATUS_FILENAME)
             return {}
 
@@ -412,39 +461,78 @@ class LiftStatus:
             now = datetime.now(timezone.utc).strftime(_STAMP_FORMAT)
             with self._lock:
                 ident = (str(tool), str(kind), str(key), str(detail))
+                if ident not in self._pending and len(self._pending) >= MAX_LIFT_ENTRIES:
+                    # Never evict an entry that has not been written: count the newcomer in the overflow entry.
+                    ident = (LIFT_OVERFLOW_TOOL, ident[1], LIFT_OVERFLOW_KEY, "")
                 pending = self._pending.get(ident)
                 if pending is None:
-                    if len(self._pending) >= MAX_LIFT_ENTRIES:
-                        oldest = min(self._pending, key=lambda i: (self._pending[i]["last_seen"], i))
-                        del self._pending[oldest]
                     pending = self._pending[ident] = {"delta": 0, "first_seen": now, "last_seen": now}
                 pending["delta"] += 1
                 pending["last_seen"] = now
                 due = (ident not in self._known or self._write_failed or self._last_write is None
                        or self._clock() - self._last_write >= LIFT_REWRITE_SECONDS)
                 if due:
-                    self._flush_locked()
+                    self._flush_locked(from_tick=False)
         except Exception as exc:  # noqa: BLE001 - reporting must never break a tool call
             log.error("could not record a lift problem (%s)", type(exc).__name__)
 
     def flush(self) -> None:
-        """Write anything still waiting (a failed write, or counts held back). Never raises."""
+        """Write anything still waiting (a failed write, or counts held back), and clear a leftover marker once the
+        report can be written again. Never raises."""
         try:
             with self._lock:
-                if self._pending:
-                    self._flush_locked()
+                marker = self.marker_path
+                if self._pending or (marker is not None and os.path.lexists(marker)):
+                    self._flush_locked(from_tick=True)
         except Exception as exc:  # noqa: BLE001
             log.error("could not flush lift problems (%s)", type(exc).__name__)
 
-    def _flush_locked(self) -> None:
+    def _acquire(self, lock_file: Any) -> None:
+        deadline = time.monotonic() + LIFT_LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released when the file closes
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockTimeout() from None
+                time.sleep(LIFT_LOCK_RETRY_SECONDS)
+
+    def _write_marker(self, exc: BaseException) -> None:
+        """Tell the sweep the report cannot be written: UTC time and error type only. Best effort, once per outage."""
+        if self._marker_tried or not self._path:
+            return
+        self._marker_tried = True
+        try:
+            with open(self.marker_path, "w", encoding="utf-8") as handle:
+                handle.write(f"{datetime.now(timezone.utc).strftime(_MARKER_STAMP_FORMAT)} {type(exc).__name__}\n")
+        except OSError as err:  # the directory itself is unwritable: the form-check alert covers that case
+            log.warning("could not write the lift unwritable marker (%s)", type(err).__name__)
+
+    def _clear_marker(self) -> None:
+        try:
+            os.unlink(self.marker_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # the marker then stays and the sweep keeps alerting: loud, not silent
+            log.error("could not remove %s (%s)", LIFT_UNWRITABLE_FILENAME, type(exc).__name__)
+
+    def _flush_locked(self, from_tick: bool) -> None:
         if not self._path:
             self._known |= set(self._pending)
             self._pending.clear()
             return
         try:
             with open(self._path + ".lock", "a") as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)  # released when the file closes
+                self._acquire(lock_file)
                 entries = self._read_disk()
+                if self._corrupt_seen:
+                    self._corrupt_seen = False
+                    now = datetime.now(timezone.utc).strftime(_STAMP_FORMAT)
+                    reset = self._pending.setdefault((LIFT_RESET_TOOL, "report_reset", "", ""),
+                                                     {"delta": 0, "first_seen": now, "last_seen": now})
+                    reset["delta"] += 1
+                    reset["last_seen"] = now
                 for ident, pending in self._pending.items():
                     entry = entries.get(ident)
                     if entry is None:
@@ -455,8 +543,11 @@ class LiftStatus:
                         entry["count"] += pending["delta"]
                         entry["first_seen"] = min(entry["first_seen"], pending["first_seen"])
                         entry["last_seen"] = max(entry["last_seen"], pending["last_seen"])
-                ordered = sorted(entries.values(), key=_sweep_order)
-                kept = ordered[-MAX_LIFT_ENTRIES:]
+                # Only entries already on disk before this write may be pushed out; what this write adds stays.
+                fresh = [e for e in entries.values() if _ident(e) in self._pending]
+                older = sorted((e for e in entries.values() if _ident(e) not in self._pending), key=_sweep_order)
+                room = max(0, MAX_LIFT_ENTRIES - len(fresh))
+                kept = sorted((older[-room:] if room else []) + fresh, key=_sweep_order)
                 data = {"entries": kept, "updated_at": datetime.now(timezone.utc).strftime(_STAMP_FORMAT)}
                 fd, tmp = tempfile.mkstemp(prefix=".lift-", dir=os.path.dirname(os.path.abspath(self._path)))
                 try:
@@ -469,14 +560,20 @@ class LiftStatus:
                     except OSError:
                         pass
                     raise
-            self._known = {(e["tool"], e["kind"], e["key"], e["detail"]) for e in kept}
+            self._known = {_ident(e) for e in kept}
             self._pending.clear()
             self._last_write = self._clock()
             self._write_failed = False
+            self._marker_tried = False
+            self._clear_marker()
         except Exception as exc:  # noqa: BLE001 - keep the occurrences and retry; one error per outage
-            if not self._write_failed:
+            was_failed = self._write_failed
+            if not was_failed:
                 log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
             self._write_failed = True
+            # A busy lock is normal for a moment: it is an outage only when a later flush fails too.
+            if not isinstance(exc, LockTimeout) or (from_tick and was_failed):
+                self._write_marker(exc)
 
 
 def build_call(row: ParkRow) -> Call:
@@ -486,7 +583,7 @@ def build_call(row: ParkRow) -> Call:
     arguments, truncated = redact_arguments(stored)
     json.dumps(arguments, allow_nan=False)
     note = stored.get(CONTEXT_FIELD) if isinstance(stored, dict) else None
-    reasoning = note[:MAX_REASONING_CHARS] if isinstance(note, str) and note else None
+    reasoning = cut_utf16(note) if isinstance(note, str) and note else None
     context: dict[str, Any] = {
         "args_sha256": row.args_digest, "platform": platform_of(row.session_key), "session_key": row.session_key}
     if truncated:

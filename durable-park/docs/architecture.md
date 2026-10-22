@@ -521,8 +521,8 @@ flowchart TD
   **Every case where the note is not moved, is dropped, or the check could not run ends as a chat alert.** The hook
   records it in `lift_status.json` (next to the ledger; `gatecall.LiftStatus`: tool, kind, key, detail, `first_seen`,
   `last_seen`, `count`, never a value; at most 200 entries; written under a file lock that merges with other
-  processes' entries, and a failed write is kept in memory and retried on every later record and by the 30-minute
-  self-check thread). The sweep alerts once per (tool, kind, key, detail), again once per 24 hours while the count keeps
+  processes' entries, a tool call waits at most 0.2 s for that lock, and a failed write is kept in memory and retried on every later record and by the 30-minute
+  self-check thread; while writes fail the hook leaves `lift_status.unwritable` and the sweep alerts once per outage). The sweep alerts once per (tool, kind, key, detail) (one chat line per tool and kind, naming the first place and counting the others), again once per 24 hours while the count keeps
   growing, and once when the report is unreadable or the check itself fails
   ([runbook](runbook.md#the-agents-note-could-not-be-moved)). Kinds: `declared` (a key was left alone because its rules
   declare the field; the note goes to the server, not the approver), `note_dropped` (a nested note was removed but not

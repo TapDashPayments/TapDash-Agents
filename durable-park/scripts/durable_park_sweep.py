@@ -16,10 +16,14 @@
                                                        -> print one alert line for each change
 * the park hook's note-lift report (``lift_status.json``: the agent's ``withhuman_context`` note was not moved
   to the top level, was dropped, could not be checked for, or a tool declares its own field)
-                                                       -> print one alert line per (tool, kind, key, detail) not
-  alerted before (state in ``lift_alert_state.json``), again once per 24 h while its count keeps growing, one when
-  the report itself is unreadable (until it reads again), and one when the check itself fails
-  (``lift_check_alert_state.json``; a recovery line follows)
+                                                       -> print one alert line per (tool, kind) with new places
+  (a (tool, kind, key, detail) not alerted before; state in ``lift_alert_state.json``; the line names the first
+  place and says "+N more places, e.g. ..." for others), again once per 24 h while a count keeps growing (never for
+  ``declared``, which is intentional), one when the report itself is unreadable (until it reads again), and one
+  when the check itself fails (``lift_check_alert_state.json``; a recovery line follows)
+* the marker ``lift_status.unwritable`` (the hook could not write ``lift_status.json``)
+                                                       -> print one alert line per outage (and one when the marker
+  is gone; state in ``lift_unwritable_alert_state.json``)
 
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
@@ -62,7 +66,11 @@ POLICY_LOAD_STATE = "tool_policy_load_alert_state.json"
 LIFT_STATUS = "lift_status.json"  # what the park hook could not do with the agent's withhuman_context note
 LIFT_STATE = "lift_alert_state.json"
 LIFT_CHECK_STATE = "lift_check_alert_state.json"  # the lift check itself failed
+LIFT_UNWRITABLE = "lift_status.unwritable"  # exists while the hook cannot write the lift report
+LIFT_UNWRITABLE_STATE = "lift_unwritable_alert_state.json"
 LIFT_REALERT = timedelta(hours=24)  # a problem that keeps happening is said again this often
+LIFT_NO_REPEAT = frozenset({"declared"})  # intentional: said once, never again
+LIFT_EXAMPLES = 3  # at most this many other places are named in an aggregated line
 LIFT_TEXTS = {
     "declared": ("durable-park ALERT: {tool} has its own withhuman_context field inside {key}; the agent's note is "
                  "left there and goes to the server, not to the approver."),
@@ -77,6 +85,8 @@ LIFT_TEXTS = {
                      "approver ({reason})."),
     "check_incomplete": ("durable-park ALERT: could not finish checking {tool}'s arguments for the agent's note "
                          "(they are too large or nested too deep); it may reach the server."),
+    "report_reset": ("durable-park ALERT: {tool} was unreadable and was replaced; the earlier lift problems are kept "
+                     "in {tool}.corrupt."),
 }
 PLUGIN_LOAD = "plugin_load.json"  # the load proof the plugin writes in the gateway (pid of that process)
 PLUGIN_LOAD_STATE = "plugin_load_alert_state.json"
@@ -390,6 +400,7 @@ def _lift_alert(ledger_path: str, now: datetime) -> None:
     except Exception:  # noqa: BLE001 - for example RecursionError on a file nested absurdly deep
         unreadable_reason = "unexpected format"
     current: dict[tuple[str, str, str, str], dict] = {}
+    said: dict[tuple[str, str, bool], list] = {}  # (tool, kind, repeat) -> [(key, text, count)] in report order
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("tool"), str) or not isinstance(entry.get("kind"), str):
             continue
@@ -405,16 +416,25 @@ def _lift_alert(ledger_path: str, now: datetime) -> None:
             current[ident]["count"] = max(current[ident]["count"], count)
             continue
         if before is None:
-            print(text, flush=True)
+            said.setdefault((ident[0], ident[1], False), []).append((key, text, count))
             current[ident] = {"count": count, "at": stamp_now}
         else:
             last = _parse_stamp(before["at"])
-            if count > before["count"] and (last is None or now - last >= LIFT_REALERT):
-                print(text.replace("durable-park ALERT:", f"durable-park ALERT (still happening, {count} times):", 1),
-                      flush=True)
+            if (count > before["count"] and entry["kind"] not in LIFT_NO_REPEAT
+                    and (last is None or now - last >= LIFT_REALERT)):
+                said.setdefault((ident[0], ident[1], True), []).append((key, text, count))
                 current[ident] = {"count": count, "at": stamp_now}
             else:  # same leak, said recently or no new occurrence; a smaller count (file restarted) lowers the base
                 current[ident] = {"count": min(count, before["count"]), "at": before["at"] or stamp_now}
+    for (_tool, _kind, repeat), places in said.items():
+        first_key, text, first_count = places[0]
+        if repeat:
+            text = text.replace("durable-park ALERT:", f"durable-park ALERT (still happening, {first_count} times):", 1)
+        others = places[1:]
+        if others:
+            examples = [_clean(other_key, 200) for other_key, _text, _count in others if other_key][:LIFT_EXAMPLES]
+            text += f" (+{len(others)} more places" + (f", e.g. {', '.join(examples)}" if examples else "") + ")"
+        print(text, flush=True)
     if unreadable_reason is not None:
         if not unreadable_alerted:
             print(f"durable-park ALERT: could not read {LIFT_STATUS} ({_clean(unreadable_reason, 100)}).", flush=True)
@@ -426,12 +446,44 @@ def _lift_alert(ledger_path: str, now: datetime) -> None:
         _save_state(state_path, new_state)
 
 
+def _lift_unwritable_alert(ledger_path: str, now: datetime) -> None:
+    """Alert once per outage when the hook left ``lift_status.unwritable`` (it could not write the lift report, so
+    note problems are not being reported), and once when the marker is gone. May raise: ``_lift_check`` reports that."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    state_path = os.path.join(directory, LIFT_UNWRITABLE_STATE)
+    state = _load_state(state_path)
+    alerted = state.get("alerted") is True
+    text = ""
+    try:
+        with open(os.path.join(directory, LIFT_UNWRITABLE), encoding="utf-8", errors="replace") as handle:
+            text = handle.read(200)
+        present = True
+    except FileNotFoundError:
+        present = False
+    except OSError:  # it is there (for example a directory) but unreadable: still an outage, error unknown
+        present = True
+    if present:
+        parts = text.split()
+        error = parts[1] if len(parts) >= 2 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,59}", parts[1]) else "unknown error"
+        if not alerted:
+            print(f"durable-park ALERT: lift problems could not be saved ({_clean(error, 60)}); the agent's note may "
+                  "be reaching servers unreported. Check the permissions of lift_status.json and its lock next to "
+                  "the ledger.", flush=True)
+        alerted = True
+    elif alerted:
+        print("durable-park: lift problems can be saved again.", flush=True)
+        alerted = False
+    if (state.get("alerted") is True) != alerted:
+        _save_state(state_path, {"alerted": alerted})
+
+
 def _lift_check(ledger_path: str, now: datetime) -> None:
     """Run ``_lift_alert``; when the check itself fails (a bug, an unwritable state file, anything), print ONE stdout
     ALERT per error type until it works again, then one recovery line: a check that cannot run must not be silent."""
     directory = os.path.dirname(os.path.abspath(ledger_path))
     fail_path = os.path.join(directory, LIFT_CHECK_STATE)
     try:
+        _lift_unwritable_alert(ledger_path, now)
         _lift_alert(ledger_path, now)
     except Exception as exc:  # noqa: BLE001
         name = type(exc).__name__
