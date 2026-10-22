@@ -24,6 +24,16 @@ the wall clock) it re-posts a wake for every `parked` row and every decided row 
 about, so a lost wake costs at most one sweep interval. withHuman's own retries (up to 7 days) only cover the receiver being unreachable or
 answering non-2xx (e.g. 401 before provisioning).
 
+## System users and groups
+
+| User | Created by | What runs as it | Groups that matter |
+|---|---|---|---|
+| `aaprecv` | configure_hermes.sh | the receiver | `dpwake` (reads `wake_secret`) |
+| `dpbridge` | configure_hermes.sh (`useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --user-group`) | the gateway bridge | its own group only; deliberately not in `dpwake` or `hermes`, so the bot cannot signal it |
+| `hermes` | already on the VM | the agent, the plugin, the sweep | `dpwake` (reads `wake_secret`); no sudo |
+
+Group `dpwake` (members `hermes`, `aaprecv`) guards `wake_secret` only; the bridge does not use it.
+
 ## Files and owners
 
 | Path | Owner / mode | Written by | Holds |
@@ -32,10 +42,10 @@ answering non-2xx (e.g. 401 before provisioning).
 | `/etc/durable-park/provisioner_token` | root:root 0600 | an admin (Step 6) | `whp_` provisioner token; delete after provisioning |
 | `/etc/durable-park/receiver.json` | aaprecv:aaprecv 0600 | provision.py | signing secret, registration id, idempotency key, instance id, the receiver's own copy of the instance token |
 | `/etc/durable-park/instance_token` | root:hermes 0640 | provision.py | `whc_` instance credential (plugin gate + gateway) |
-| `/etc/durable-park/bridge_secret` | root:dpwake 0640 | an admin | the `durable-park-bridge` webhook endpoint's signing secret (bridge) |
-| `/etc/durable-park/audit_key` | root:hermes 0640 | an admin ([runbook](runbook.md#the-gateway-bridge)) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else: the bridge lists requests with it, the plugin (optional) names who decided |
+| `/etc/durable-park/bridge_secret` | root:root 0600 | an admin | the `durable-park-bridge` webhook endpoint's signing secret (bridge: systemd reads it as root and hands the bridge a private copy, `LoadCredential`; the bot cannot read it) |
+| `/etc/durable-park/audit_key` | root:hermes 0640 | an admin ([runbook](runbook.md#the-gateway-bridge)) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else: the bridge lists requests with it (systemd copies the file when the bridge starts: restart `durable-park-bridge` after a rotation), the plugin (optional) reads the file and names who decided |
 | `/etc/durable-park/tunnel.env` | root:root 0600 | an admin (`enter-secrets.sh`) | QuickBooks app keys, refresh token, realm id, withHuman tunnel token |
-| `/opt/durable-park/` | root 0755 | configure_hermes.sh | the receiver/bridge venv (`agentapprovalprotocol==0.3.3`, `uvicorn==0.54.0`, `starlette==1.9.0`); root-owned copies of `receiver/{app,wake_post,provision}.py`, `bridge/*.py` and `plugin/durable_park/*.py` (the bridge uses `ledger.py` for `args_digest` and `gatecall.py` for `gateway_slug`, never the ledger file); `libexec/hermes-secrets` |
+| `/opt/durable-park/` | root 0755 | configure_hermes.sh | the receiver/bridge venv (`agentapprovalprotocol==0.3.3`, `uvicorn==0.54.0`, `starlette==1.9.0`); root-owned copies of `receiver/{app,wake_post,provision}.py`, `bridge/*.py` and `plugin/durable_park/*.py` (the bridge uses `ledger.py` for `args_digest` and `gatecall.py` for `gateway_slug`, never the ledger file); `deploy/bridge_check.py` (the bridge's isolation check); `libexec/hermes-secrets` |
 | `~hermes/.hermes/plugin-data/durable-park/ledger.db` | hermes | the plugin | the ledger (`plugins.entries.durable-park.settings.ledger_path`; the sweep uses the same path; the bridge does not use the ledger) |
 | `~hermes/.hermes/plugin-data/durable-park/bridge_deliveries.db` | hermes | nobody (the old bridge) | unused: the bridge keeps no state; delete it once the new bridge is live |
 | `~hermes/.hermes/plugin-data/durable-park/formcheck_status.json`, `formcheck_alert_state.json` | hermes | the gateway's form self-check / the sweep | form checker health and the alert state |
@@ -85,6 +95,13 @@ Idempotent. It never prints a secret. Before provisioning, the receiver runs and
 with 401 (no `receiver.json` yet). It restarts the hermes user manager once (so the gateway and its
 cron scripts get the new `dpwake` group), later runs only restart `hermes-gateway`.
 
+**Before the first run, store `bridge_secret` and `audit_key`.** The script stops at the very start, changing nothing,
+when `/etc/durable-park/bridge_secret` or `/etc/durable-park/audit_key` is missing or empty, because the bridge unit
+loads both as credentials and cannot start without them ([gateway setup](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline),
+[runbook](runbook.md#the-gateway-bridge)). It creates the bridge's user `dpbridge`, installs the bridge's socket and
+service units, and after the bridge answers `401` to an unsigned request it runs `deploy/bridge_check.py`; a FAIL stops
+the script before the tool policy and the gateway restart.
+
 Checks after a deploy:
 
 ```sh
@@ -92,6 +109,8 @@ curl -s http://127.0.0.1:8644/health                               # {"status": 
 grep "durable-park loaded" ~/.hermes/logs/agent.log | tail -1        # plugin loaded, ledger path
 sudo tailscale funnel status                                       # /aap/events proxy http://127.0.0.1:8790/aap/events
 systemctl status durable-park-receiver                             # active (running)
+systemctl status durable-park-bridge.socket durable-park-bridge    # both active; the socket lists 127.0.0.1:8791
+sudo python3 -I /opt/durable-park/deploy/bridge_check.py           # seven "ok:" lines, exit 0
 hermes cron list                                                   # durable-park-sweep, */5 * * * *, telegram
 ~/.hermes/scripts/durable_park_sweep.sh                            # prints nothing when all is well
 ```

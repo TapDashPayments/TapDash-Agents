@@ -144,11 +144,17 @@ wall clock is checked after each chunk (`deadline`); `trust_env=False`; non-200 
 
 ## Deploy (bridge only; the bot is not touched)
 
-* Unit: drop `DURABLE_PARK_LEDGER` and `ReadWritePaths`; `ProtectHome=yes`; ExecStart adds
-  `--key-file /etc/durable-park/audit_key`. User stays `hermes` (reads `audit_key` root:hermes 0640 and
-  `bridge_secret` via group dpwake).
+* Unit: drop `DURABLE_PARK_LEDGER` and `ReadWritePaths`; `ProtectHome=yes`; ExecStart adds `--key-file`.
+  **Updated 2026-10-22 ([plan](../../durable-park/docs/plans/2026-10-22-bridge-own-user.md)): the user is now
+  `dpbridge`**, not `hermes` (a system user with no login, no home and no group but its own; not in `dpwake`), and the
+  key file is `--key-file %d/audit_key`: systemd (`LoadCredential`) reads `/etc/durable-park/audit_key` (root:hermes
+  0640, still read by the plugin) and `/etc/durable-park/bridge_secret` (root:root 0600) as root and gives the bridge
+  private copies when it starts, so rotating either key needs `sudo systemctl restart durable-park-bridge`. A socket
+  unit, `durable-park-bridge.socket`, holds 127.0.0.1:8791 and passes it to the service (`--systemd-socket`);
+  `Restart=always`. Why: withHuman does not sign the bridge's answers, and while the bridge ran as `hermes` anything
+  the bot ran could kill it and answer "approve" on its port.
 * Before restarting the bridge: no ledger row `parked`, `approved` or `executing`.
-* Rollback: copy `/opt/durable-park/bridge` and the unit file aside first; restore and restart.
+* Rollback: copy `/opt/durable-park/bridge` and the unit files (the service and, since the own-user change, the socket) aside first; restore and restart.
 * Live tests: one real payment passes once; replaying the same call through the gateway afterwards gets
   a human; the bridge works with the ledger unreadable to it.
 

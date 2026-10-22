@@ -235,12 +235,14 @@ an approved park is not asked about a second time.
 | Item | Value |
 | --- | --- |
 | Code | `bridge/app.py` (Starlette + uvicorn), POST `/wh/bridge` on `127.0.0.1:8791`; `bridge/verify.py` (the decision rule), `bridge/whapi.py` (the withHuman request list) |
-| Unit | `deploy/durable-park-bridge.service` (system unit, `User=hermes`, group `dpwake`, strict sandbox, `ProtectHome=yes`, no writable path; see the comments at its top) |
+| Unit | `deploy/durable-park-bridge.service` (system unit, `User=dpbridge`, `Restart=always`, strict sandbox, `ProtectHome=yes`, `ProtectProc=invisible`, no writable path; see the comments at its top) and `deploy/durable-park-bridge.socket` (socket unit: systemd holds `127.0.0.1:8791` permanently and passes it to the service as fd 3, `--systemd-socket`) |
+| Own user | `dpbridge`: system user, no login, no home, no group but its own (not in `dpwake`, not in `hermes`). See [Own user and own port](#own-user-and-own-port) |
 | Public URL | `https://proto-agents.taila95862.ts.net/wh/bridge` (Tailscale Funnel path, set up at deploy) |
-| Secret | `/etc/durable-park/bridge_secret` (0640 root:dpwake), read once at startup |
-| Org key | `/etc/durable-park/audit_key` (`--key-file`, env `DURABLE_PARK_WH_KEY_FILE`; 0640 root:hermes), read on every call, never logged. Permissions `audit.read`, `request.read`, `request.read.unrouted` and nothing else: it can read requests and cannot approve, deny or read rules or members. Missing or too weak: every delivery gets `human` ([runbook](runbook.md#the-gateway-bridge)). API base `--api-base` (env `DURABLE_PARK_WH_API_BASE`, default `https://app.withhuman.ai/api/v1`) |
+| Secret | `/etc/durable-park/bridge_secret` (0600 root:root: the bot cannot read it). systemd reads it as root when the service starts and hands the bridge a private copy (`LoadCredential`, `--secret-file %d/bridge_secret`) |
+| Org key | `/etc/durable-park/audit_key` (`--key-file %d/audit_key`, env `DURABLE_PARK_WH_KEY_FILE`; the file is 0640 root:hermes because the plugin reads it too, the bridge reads systemd's private copy made when it starts, so a rotation needs `sudo systemctl restart durable-park-bridge`), read on every call, never logged. Permissions `audit.read`, `request.read`, `request.read.unrouted` and nothing else: it can read requests and cannot approve, deny or read rules or members. Missing or too weak: every delivery gets `human` ([runbook](runbook.md#the-gateway-bridge)). API base `--api-base` (env `DURABLE_PARK_WH_API_BASE`, default `https://app.withhuman.ai/api/v1`) |
 | State | None. No ledger (the old `--ledger` option, `DURABLE_PARK_LEDGER` and `bridge_deliveries.db` are gone; the old file can be deleted once the new bridge is live) |
-| Other options | `--secret-file`, `--host 127.0.0.1`, `--port 8791`, `--expected-agent proto-agents` (env `DURABLE_PARK_BRIDGE_SECRET_FILE`, `DURABLE_PARK_EXPECTED_AGENT`). Budget: 3.5 s for the two withHuman lists (withHuman's webhook block gives up at 5 s) |
+| Other options | `--secret-file`, `--systemd-socket` (serve on the listening socket systemd passes as fd 3; it exits at once when systemd passes none; it cannot be combined with `--host` or `--port`), `--host 127.0.0.1` and `--port 8791` (only when run by hand, without `--systemd-socket`), `--expected-agent proto-agents` (env `DURABLE_PARK_BRIDGE_SECRET_FILE`, `DURABLE_PARK_EXPECTED_AGENT`). Budget: 3.5 s for the two withHuman lists (withHuman's webhook block gives up at 5 s) |
+| Health check | `deploy/bridge_check.py` (root-owned copy in `/opt/durable-park/deploy/`): `sudo python3 -I /opt/durable-park/deploy/bridge_check.py`; `configure_hermes.sh` runs it after the 401 gate and stops if it fails |
 
 Signature (confirmed against withHuman's open-source repo `internal/webhookdelivery`, and its webhook-endpoints
 docs): header `WithHuman-Signature: t=<unix>,v1=<hex>`; `v1` = HMAC-SHA256 over `"<t>." + raw body`, keyed with
@@ -274,9 +276,38 @@ Logs (`journalctl -u durable-park-bridge`): one line per delivery with the deliv
 argument **key names**, the arguments digest and the outcome, plus a short `why` tag. Argument values, the
 signing secret and the org key are never logged.
 
+### Own user and own port
+
+withHuman does not sign the bridge's answers: whoever answers on `127.0.0.1:8791` decides. If the bridge ran as
+`hermes` (the bot's user), anything the bot runs could kill it and, until systemd restarted it, bind the port and
+answer "approve" to every gateway call. So, since 2026-10-22:
+
+- The bridge runs as `dpbridge`: a system user with no login, no home and no group but its own (not in `dpwake`, not
+  in `hermes`). The bot cannot signal it or read its memory. (`ProtectProc=invisible` hides other users' processes
+  from the bridge, not the other way round; the separate user is what protects it.)
+- `durable-park-bridge.socket` holds `127.0.0.1:8791` permanently and passes it to the service as fd 3
+  (`--systemd-socket`). While the bridge restarts (`Restart=always`, `RestartSec=1`) connections wait in the socket's
+  backlog and nobody else can bind the port. Started without a socket from systemd, the bridge exits at once.
+- `bridge_secret` is `root:root 0600` and `audit_key` stays `root:hermes 0640`. systemd reads both as root when the
+  service starts (`LoadCredential`) and gives the bridge private copies, so the bot can no longer read the signing
+  secret. Rotating either key needs `sudo systemctl restart durable-park-bridge`.
+- `deploy/bridge_check.py` checks all of this, read-only, and prints `ok:` or `FAIL:` per check (exit 0 only if every
+  check passes): (1) the socket unit is active and listens on exactly `127.0.0.1:8791`; (2) the service is active and
+  its main process runs as `dpbridge`; (3) only systemd and that process hold the port; (4) no other process runs
+  `bridge.app` (a scan of `/proc/*/cmdline`: a heuristic, so a process that merely has `bridge.app` or
+  `bridge/app.py` among its arguments, such as an editor, also fails it); (5) no user-level `durable-park-bridge*` unit
+  exists for any user; (6) `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; (7) `bridge_secret`
+  is `root:root 0600` (stat only, the contents are never read). `configure_hermes.sh` runs it after the bridge answers
+  `401` to an unsigned request and stops if it fails; run it by hand any time ([runbook](runbook.md#health-check)).
+- Not checked yet ([backlog](backlog.md#later)): the running bridge's supplementary groups and the permissions of the
+  `/etc/durable-park` directory. An edit to the socket unit takes effect only after
+  `sudo systemctl restart durable-park-bridge.socket`.
+
 ### HUMAN STEP C (Task 7 Step 5): endpoint, secret, pipeline
 
-Do this after the bridge service and the Funnel path are deployed and started. Labels come from the
+C1 and C2 come first on a fresh VM, because `configure_hermes.sh` refuses to start unless `bridge_secret` and
+`audit_key` exist and are not empty (the bridge unit loads both as credentials and cannot start without them); C3 and
+C4 need the bridge service and the Funnel path deployed and started. Labels come from the
 withHuman docs (`webhook-endpoints`, `webhook-blocks`, `conditions`, `escalation-paths`); the exact screen layout
 is **unverified** on the live tenant.
 
@@ -297,14 +328,15 @@ is **unverified** on the live tenant.
 2. Run this one-liner, paste the secret when it prompts (nothing is shown), press Enter:
 
    ```bash
-   sudo bash -c 'set -eu; f=/etc/durable-park/bridge_secret; getent group dpwake >/dev/null || groupadd --system dpwake; mkdir -p /etc/durable-park; install -m 0640 -o root -g dpwake /dev/null "$f"; read -rs -p "Paste withHuman signing secret, then Enter: " S; echo; printf "%s" "$S" > "$f"; unset S; echo "saved $(wc -c < "$f") bytes to $f"'
+   sudo bash -c 'set -eu; f=/etc/durable-park/bridge_secret; mkdir -p /etc/durable-park; install -m 0600 -o root -g root /dev/null "$f"; read -rs -p "Paste withHuman signing secret, then Enter: " S; echo; printf "%s" "$S" > "$f"; unset S; echo "saved $(wc -c < "$f") bytes to $f"'
    ```
 
-   It creates the file empty with mode 0640 root:dpwake first, then writes the secret into it, so the value is
+   It creates the file empty with mode 0600 root:root first (only root can read it; systemd gives the bridge its own copy), then writes the secret into it, so the value is
    never in a wider-permission file. A `whsec_...` secret is about 49 bytes; a very different number means a bad paste,
    run it again.
-3. The bridge reads the secret only at startup, so restart it (root):
-   `sudo systemctl restart durable-park-bridge`.
+3. systemd copies the secret to the bridge only when the service starts, so restart it (root):
+   `sudo systemctl restart durable-park-bridge`. (The socket unit keeps the port during the restart. On a fresh VM
+   there is no bridge yet: store the secret and the org key first, then run `configure_hermes.sh`.)
 4. Close the withHuman secret tab. Type `exit` to leave the VM.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline), in this order**
@@ -357,10 +389,14 @@ holds when withHuman's own API is slow or down while the bridge asks it: the bri
   docs and source and verified live on 2026-10-22 ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).
 - UI names (Webhook endpoints menu location, Branch vs Delegate block, "Entry pipeline") are from the docs, not
   seen on the live tenant. Whether the endpoint **test** accepts a `human` answer for a non-block delivery type.
-- Deploy: `deploy/configure_hermes.sh` installs the bridge (Python `/opt/durable-park/bin/python`, the
-  receiver's venv; code copied to `/opt/durable-park/bridge` and `/opt/durable-park/plugin`), enables and starts
-  the unit and adds the Funnel path `/wh/bridge`. Until `bridge_secret` exists every delivery gets `401`; until
-  `audit_key` exists every delivery gets `human` (the script logs a warning for each).
+- Deploy: `deploy/configure_hermes.sh` creates the user `dpbridge` (once), makes an existing `bridge_secret`
+  `root:root 0600`, installs the bridge (Python `/opt/durable-park/bin/python`, the receiver's venv; code copied to
+  `/opt/durable-park/bridge` and `/opt/durable-park/plugin`), installs, enables and starts the socket unit, restarts
+  the service unit, waits for the 401 gate and runs `bridge_check.py` (a FAIL stops the script before the gateway is
+  touched), then adds the Funnel path `/wh/bridge`. It refuses to run at all, changing nothing, when
+  `/etc/durable-park/bridge_secret` or `/etc/durable-park/audit_key` is missing or empty (the unit's `LoadCredential`
+  could not start without them), or when `deploy/bridge_check.py` is missing from the checkout. (Before the bridge
+  had its own user it started without the keys and answered `401` or `human`; it no longer starts.)
 
 ## Hermes → gateway connection (MCP server `wh`, Task 3)
 
