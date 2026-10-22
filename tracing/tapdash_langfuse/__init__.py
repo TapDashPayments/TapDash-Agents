@@ -50,6 +50,8 @@ class TraceState:
     propagated: dict[str, Any] = field(default_factory=dict)
     # TapDash: tags found by HERMES_LANGFUSE_TAG_PATTERNS (a subset of propagated["tags"]), capped per trace.
     pattern_tags: list[str] = field(default_factory=list)
+    # TapDash: names of the scores HERMES_LANGFUSE_SCORE_PATTERNS already sent for this trace (each at most once).
+    scored_names: set = field(default_factory=set)
 
 
 _STATE_LOCK = threading.Lock()
@@ -784,6 +786,82 @@ def _add_trace_tags(state: TraceState, tags: list[str]) -> None:
         state.root_span._otel_span.set_attribute("langfuse.trace.tags", list(merged))
 
 
+# TapDash: HERMES_LANGFUSE_SCORE_PATTERNS="name=regex[=>literal];name=regex". The first match in the turn's original user
+# message scores the trace once per name: a categorical score "name" whose value is the named group "value", else the
+# "=>literal", else group 1, else the whole match (stripped, lower-cased). The comment joins the other named groups
+# ("comment" bare, any other as "group: text"). Nothing here knows what the patterns mean.
+_MAX_SCORE_VALUE_CHARS = 100
+_MAX_SCORE_COMMENT_CHARS = 500
+
+
+@functools.lru_cache(maxsize=16)
+def _parse_score_patterns(raw: str) -> tuple:
+    """Parse the raw setting into ``(name, compiled regex, literal or None)``. Cached on the raw string, so each bad
+    entry warns once per distinct value."""
+    parsed = []
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, rest = entry.partition("=")  # the name ends at the FIRST "="
+        name = name.strip()
+        regex, arrow, literal = rest.rpartition("=>")  # the literal starts at the LAST "=>", if there is one
+        if not arrow:
+            regex, literal = rest, ""
+        literal = literal.strip()
+        if not sep or not regex:
+            logger.warning("Langfuse plugin: ignoring HERMES_LANGFUSE_SCORE_PATTERNS entry %r (expected name=regex)", entry)
+            continue
+        if not _LABEL_RE.fullmatch(name):
+            logger.warning("Langfuse plugin: ignoring HERMES_LANGFUSE_SCORE_PATTERNS entry %r "
+                           "(name must be 1-40 characters of a-z 0-9 _ -)", entry)
+            continue
+        try:
+            parsed.append((name, re.compile(regex), literal or None))
+        except re.error as exc:
+            logger.warning("Langfuse plugin: ignoring HERMES_LANGFUSE_SCORE_PATTERNS entry %r (bad regex: %s)", entry, exc)
+    return tuple(parsed)
+
+
+def _score_patterns() -> list[tuple[str, "re.Pattern[str]", Optional[str]]]:
+    return list(_parse_score_patterns(_env("HERMES_LANGFUSE_SCORE_PATTERNS")))
+
+
+def _pattern_scores(value: Any) -> list[tuple[str, str, Optional[str]]]:
+    """TapDash: ``(name, value, comment)`` for each score the configured patterns find in ``value`` (the turn's
+    original user message); [] in ``metadata`` capture mode (a score would carry content). The first matching entry
+    per name wins; an entry whose value is empty or over 100 chars is skipped. Comment: at most 500 chars, None when
+    the regex has no named group besides ``value``."""
+    patterns = _score_patterns()
+    if not patterns or _capture_mode() == "metadata":
+        return []
+    text = _scan_text(value)
+    if not text:
+        return []
+    found: list[tuple[str, str, Optional[str]]] = []
+    for name, pattern, literal in patterns:
+        if any(name == done for done, _, _ in found):
+            continue
+        match = pattern.search(text)
+        if match is None:
+            continue
+        named = match.groupdict()
+        candidates = (named.get("value"), literal, match.group(1) if pattern.groups else None, match.group(0))
+        score = next((c.strip().lower() for c in candidates if c and c.strip()), "")
+        if not score or len(score) > _MAX_SCORE_VALUE_CHARS:
+            continue
+        parts = []
+        for group in sorted(pattern.groupindex, key=pattern.groupindex.get):  # in the order they appear in the regex
+            if group == "value":
+                continue
+            part = (named.get(group) or "").strip()
+            if part:
+                parts.append(part if group == "comment" else f"{group}: {part}")
+        comment = "; ".join(parts)[:_MAX_SCORE_COMMENT_CHARS] if parts else None
+        found.append((name, score, comment))
+    return found
+
+
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "", user_message: Any = None) -> TraceState:
@@ -825,6 +903,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
 
     root_span = None
     pattern_tags: list[str] = []
+    scanned: list[Any] = []
     with _failsafe("pattern tags"):
         # The turn's ORIGINAL user message, not the API copy: that copy carries injected context (memory recall,
         # plugin context, gateway notes), which would tag a turn with an id it never mentioned. The request's
@@ -854,8 +933,20 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     with _failsafe("set_trace_io(input)"):
         root_span.set_trace_io(input=trace_input)
 
+    # TapDash: pattern scores, from the same original user message the pattern tags came from.
+    scored_names: set = set()
+    with _failsafe("pattern scores"):
+        for name, value, comment in _pattern_scores(scanned[0]) if scanned else []:
+            if name in scored_names:
+                continue
+            with _failsafe(f"create score {name}"):
+                client.create_score(name=name, value=value, trace_id=trace_id, data_type="CATEGORICAL",
+                                    comment=comment, score_id=f"{trace_id}-{name}")
+                scored_names.add(name)
+
     _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated, pattern_tags=list(pattern_tags))
+    return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated, pattern_tags=list(pattern_tags),
+                      scored_names=scored_names)
 
 
 def _start_child_observation(state: TraceState, *, name: str, as_type: str, input_value: Any,

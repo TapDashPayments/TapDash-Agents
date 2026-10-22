@@ -121,6 +121,7 @@ HERMES_LANGFUSE_CAPTURE=sanitized    # content capture mode (see below)
 HERMES_LANGFUSE_DEBUG=true           # verbose plugin logging to agent.log
 OTEL_SERVICE_NAME=my-agent           # OTel service.name on traces (default: hermes-agent)
 HERMES_LANGFUSE_TAG_PATTERNS='park=\bP-[0-9A-F]{8}\b'   # TapDash patch: tag traces by pattern (see below)
+HERMES_LANGFUSE_SCORE_PATTERNS='name=regex[=>literal]'  # TapDash patch: score traces by pattern (see below)
 ```
 
 The standard SDK names (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`) are
@@ -160,6 +161,53 @@ a tool call's arguments or a tool's result, the trace gets the tag
   right before a match hides it from `\b`: in `{"a": "x\nP-0A9C15CE"}` the text is `x\nP-0A9C15CE` with a backslash and
   an `n`, so `\bP-...` finds no word boundary and no tag is added. A match after a space, a quote or other punctuation
   is found. A plain string (such as the user message) is scanned as it is, so a real newline is fine there.
+
+### Score traces by pattern (TapDash patch)
+
+`HERMES_LANGFUSE_SCORE_PATTERNS` is not in upstream. Its format is `name=regex[=>literal];name=regex`. When a regex
+matches the turn's original user message (the same source as the tag patterns above: what the person, or a plugin
+that injects a message, sent, not the model's copy; tool arguments and results are not scanned), the trace gets a
+categorical Langfuse score called `name`. The name ends at the first `=`; a literal starts at the last `=>`.
+
+- **Value:** the named group `value`, else the `=>literal`, else capture group 1, else the whole match, then
+  stripped and lower-cased. An entry whose value is empty or over 100 characters is skipped.
+- **Comment:** every named group except `value`, in the order they appear in the regex, skipping empty ones. A group
+  named `comment` is written as it is, any other as `group: text`; they are joined with `; ` and cut to 500
+  characters. A regex with no such group gives no comment.
+- **Once per trace and name.** The first matching entry for a name wins; the score is sent when the trace starts. The
+  score id is `<trace id>-<name>`, so a retry is idempotent. (Langfuse replaces a re-sent score only when id, name
+  and UTC date all match, so a retry across UTC midnight would add a second score. This does not happen in practice:
+  a score is sent once per trace, at its start.)
+- A name is 1-40 characters of `a-z 0-9 _ -`. A regex cannot contain `;`. An entry with no `=`, a bad name, an empty
+  regex or a regex that does not compile logs one warning naming the setting and is ignored; the other entries still
+  work.
+- With `HERMES_LANGFUSE_CAPTURE=metadata` no scores are sent: the plugin cannot tell whether a value or comment carries
+  content, so the rule is the same as for pattern tags.
+- Value and comment are taken from the raw text and are **not** passed through secret redaction, even in `sanitized`
+  mode. Only use patterns that match non-secret text. The regex runs on up to 200 000 characters, so it must avoid
+  catastrophic backtracking.
+- Scores follow the trace's sampling: with `HERMES_LANGFUSE_SAMPLE_RATE` below 1, a trace that is sampled out has no
+  score either.
+
+On proto-agents the setting turns durable-park's wake message into the `approval_decision` score (`approved`,
+`denied`, `cancelled` or `expired`), with the park id, the person who decided and their note in the comment:
+
+```
+HERMES_LANGFUSE_SCORE_PATTERNS=approval_decision=\A\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) (?:\("[^"]*"\) )?was (?P<value>APPROVED|DENIED|CANCELLED) in withHuman(?: by (?P<by>[^:]+?))?(?:: (?P<note>.+?))?\. (?:It did not run\.|Call parked_action_execute );approval_decision=\A\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) \("[^"]*"\) got no decision before its deadline\.=>expired
+```
+
+| The turn's user message starts with | Score `approval_decision` | Comment |
+|---|---|---|
+| `[durable-park] P-1A2B3C4D was APPROVED in withHuman. Call parked_action_execute ...` | `approved` | `P-1A2B3C4D` |
+| `[durable-park] P-1A2B3C4D was APPROVED in withHuman by Yaakov Yehuda (web). Call parked_action_execute ...` | `approved` | `P-1A2B3C4D; by: Yaakov Yehuda (web)` |
+| `[durable-park] P-1A2B3C4D ("tool") was DENIED in withHuman. It did not run. ...` | `denied` | `P-1A2B3C4D` |
+| `[durable-park] P-1A2B3C4D ("tool") was DENIED in withHuman by Yaakov Yehuda (web): wrong amount. It did not run. ...` | `denied` | `P-1A2B3C4D; by: Yaakov Yehuda (web); note: wrong amount` |
+| `[durable-park] P-1A2B3C4D ("tool") was CANCELLED in withHuman by Yaakov Yehuda (web). It did not run. ...` | `cancelled` | `P-1A2B3C4D; by: Yaakov Yehuda (web)` |
+| `[durable-park] P-1A2B3C4D ("tool") got no decision before its deadline. It did not run. ...` | `expired` | `P-1A2B3C4D` |
+
+A message that is not one of these (anything that does not start with `[durable-park]`) gets no score.
+`tests/test_pattern_scores.py` runs this exact setting against copies of the three message formats in durable-park's
+`wake.py` and fails if `wake.py` changes them.
 
 ## Capture modes
 
