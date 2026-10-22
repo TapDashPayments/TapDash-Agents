@@ -520,3 +520,38 @@ def test_nested_note_call_parks_lifted_and_executor_consumes_the_same_request(en
     assert env.dispatched == [(TOOL, lifted)]  # the lifted call, not the nested one
     assert len(env.provider.requests) == 1  # the replayed body matched: the SAME request was consumed
     assert env.provider.only().id == row.request_id and env.provider.only().consumed_at is not None
+
+
+def test_executor_sends_the_park_time_user_and_profile_whoever_is_in_the_chat_now(env, monkeypatch):
+    import sys
+    import types
+    sent = []
+    inner = env.gate_factory
+
+    def spying_factory():
+        gate = inner()
+        check = gate.check
+
+        def spy(call, **kw):
+            sent.append(call)
+            return check(call, **kw)
+        gate.check = spy
+        return gate
+
+    hook = make_pre_tool_call(env.ledger, spying_factory, RISKY, session_key_fn=lambda: SESSION_KEY,
+                              user_profile_fn=lambda: ("u1", "p1"))
+    hook(tool_name=TOOL, args=ARGS, session_id="sess-1", tool_call_id="call-1")
+    row = env.ledger.list_by_status("parked")[0]
+    assert (row.user_id, row.profile) == ("u1", "p1")
+    env.provider.decide(row.request_id, "approved")
+    assert env.ledger.transition(row.park_id, "parked", "approved")
+    module = types.ModuleType("gateway.session_context")  # another user, another profile now
+    module.get_session_env = lambda name, default="": {"HERMES_SESSION_USER_ID": "u2",
+                                                       "HERMES_SESSION_PROFILE": "p2"}.get(name, default)
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.session_context", module)
+    out = run(make_executor(env.ledger, spying_factory, lambda tool, args, **kw: '{"ok": true}',
+                            session_key_fn=lambda: SESSION_KEY), row.park_id)
+    assert out["status"] == "executed"
+    assert sent[0].context == sent[-1].context and sent[-1].context["user_id"] == "u1"
+    assert env.provider.only().consumed_at is not None

@@ -146,6 +146,15 @@ def default_session_key() -> str:
     return get_session_env("HERMES_SESSION_KEY", "") or ""
 
 
+def default_user_profile() -> tuple[str, str]:
+    """The Hermes user id and profile of the running turn; empty outside a chat."""
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return "", ""
+    return get_session_env("HERMES_SESSION_USER_ID", "") or "", get_session_env("HERMES_SESSION_PROFILE", "") or ""
+
+
 # The SDK's denial text puts the reviewer's note after this marker (agentapprovalprotocol/_gate.py ``_settled``).
 _NOTE_MARKER = "Their note: "
 
@@ -174,6 +183,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                        exempt: Iterable[str] = DEFAULT_EXEMPT_TOOLS, breaker: Breaker | None = None,
                        foreign_hooks_fn: Callable[[], list[str]] | None = None,
                        session_key_fn: Callable[[], str] | None = None,
+                       user_profile_fn: Callable[[], tuple[str, str]] | None = None,
                        form_checker: FormChecker | None = None,
                        schema_fn: Callable[[str], dict | None] | None = None,
                        coerce_fn: Callable[[str, dict], dict] | None = None,
@@ -339,9 +349,11 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
             status.record_many(tool, lift_problems)  # one write attempt for the whole call
 
             # Step 5: one row per (session_id, tool_call_id); a replay gets the existing row.
+            user_id, profile = (user_profile_fn or default_user_profile)()
             row = ledger.park(
                 session_key=session_key, session_id=session_id, tool_call_id=tool_call_id, tool=tool,
-                args=args, call_key=call_key(session_id, tool_call_id), server=server_label(tool))
+                args=args, call_key=call_key(session_id, tool_call_id), server=server_label(tool),
+                user_id=user_id or None, profile=profile or None)
             park_id = row.park_id
             if row.tool != tool or row.args_digest != args_digest(args):
                 # Providers may reuse a tool_call_id; never answer for a different call with the old row.

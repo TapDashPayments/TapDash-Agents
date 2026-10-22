@@ -1084,12 +1084,25 @@ def test_teams_not_posted_when_there_is_no_alert(world, monkeypatch):
     assert sent == []
 
 
-@pytest.mark.parametrize("outcome", [OSError("boom"), 500])
-def test_teams_failure_is_surfaced_not_silent(world, monkeypatch, capsys, outcome):
+@pytest.mark.parametrize("outcome, reason", [
+    (OSError("boom"), "OSError"),
+    (urllib.error.HTTPError(TEAMS_URL, 500, "Server Error", {}, None), "HTTP 500")])
+def test_teams_failure_is_one_plain_alert_line_and_exit_zero(world, monkeypatch, capsys, outcome, reason):
     _teams(monkeypatch, outcome)
     world.row("executing", executing_minutes_ago=30)
-    assert world.main(monkeypatch) == 1  # the cron run shows as failed
+    assert world.main(monkeypatch) == 0  # the cron wrapper must not wrap the Telegram message in "exit code 1"
     out = capsys.readouterr()
-    assert "outcome UNKNOWN" in out.out  # the Telegram alert still goes out
-    assert "teams alert" in out.err and ("failed" in out.err or "HTTP 500" in out.err)
+    lines = out.out.splitlines()
+    assert "outcome UNKNOWN" in lines[0]  # the Telegram alert still goes out
+    assert lines[1:] == [f"durable-park ALERT: Teams post failed ({reason})."]  # one plain line, no URL
+    assert "teams alert failed" in out.err
     assert "SECRET-TOKEN" not in out.out + out.err  # the webhook URL is never logged
+
+
+def test_a_crashing_sweep_still_posts_what_it_printed_and_raises(world, monkeypatch, capsys):
+    sent = _teams(monkeypatch)
+    world.row("executing", executing_minutes_ago=30)
+    monkeypatch.setattr(sweep, "_wake_targets", lambda ledger: (_ for _ in ()).throw(RuntimeError("bug")))
+    with pytest.raises(RuntimeError, match="bug"):  # the sweep's own error is not hidden
+        world.main(monkeypatch)
+    assert len(sent) == 1 and "outcome UNKNOWN" in sent[0][1]["text"]
