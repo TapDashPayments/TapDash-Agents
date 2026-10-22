@@ -52,6 +52,46 @@ setting of Nous's `langfuse` plugin (v2.0.0 @ `c2a9596`) can fix:
   (`tracing/run_tests.sh`). Upstream's 4 `TestSystemPromptCrossesHookBoundary` tests are deselected: they run
   Hermes core's request builder, which reinstalls packages and re-executes the process, dropping the test path;
   they do not cover patched code. CI does not run these tests yet (backlog).
+- **D9 — tools offered on each LLM call (addendum, TAP2-125).** Each "LLM call N" generation records the names of the
+  tools the model was offered (`tools_offered`, `tools_offered_count`), read from the provider request body in
+  `on_pre_llm_request`. Names only, so it is recorded in every capture mode. Details in "Tools offered on each LLM
+  call (D9)" below.
+- **D10 — approval decision score (addendum, TAP2-125).** New optional setting `HERMES_LANGFUSE_SCORE_PATTERNS`:
+  `name=regex[=>literal]` entries separated by `;`, generic like D4 (nothing in the plugin knows about durable-park).
+  The turn's ORIGINAL user message is searched (same source and cap as D4; not tool arguments or results). A match
+  sends one categorical score `name` when the trace starts, with `client.create_score(...)` and the score id
+  `<trace id>-<name>`; a name is scored at most once per trace (`TraceState.scored_names`), the first matching entry
+  wins. Value: named group `value`, else the literal, else group 1, else the whole match, lower-cased, at most 100
+  characters. Comment: the other named groups in pattern order (`comment` bare, others `group: text`, joined with
+  `; `, at most 500 characters). On proto-agents it turns durable-park's wake text into `approval_decision` =
+  `approved | denied | cancelled | expired` with comment `P-…; by: <decider>; note: <note>` (exact setting in the
+  README). Decisions taken with Yaakov (2026-10-22):
+  - **`metadata` capture mode sends no scores** (A3). The plugin is generic and cannot tell whether a value or comment
+    carries content; for this use the values are fixed words, but the comment holds a reviewer's note. Same rule as D6.
+  - **Retries** (A5). Langfuse replaces a re-sent score only when id, name and UTC date all match: the deterministic
+    id makes a same-day retry idempotent; a retry across UTC midnight would add a second score. Not an issue in
+    practice: a score is sent once per trace, at trace start.
+  - **Sampling** (A6). In SDK 4.15.2 `create_score` calls `add_score_task(force_sample=False)` for a valid 32-hex trace
+    id, so scores follow the trace's sampling: a sampled-out trace has no score either (consistent: the score would
+    point at a trace that does not exist).
+  - A drift test reads durable-park's `wake.py` (parsed with `ast`, not imported) and fails when its three message
+    formats change, because the setting depends on their exact words.
+
+## Tools offered on each LLM call (D9)
+
+Each "LLM call N" generation records which tools the model was offered, so a trace shows whether a tool was even
+available when the model did not use it (for example with Hermes Tool Search on, where only a small set is sent).
+`on_pre_llm_request` reads `request["body"]["tools"]` and adds two metadata keys: `tools_offered` (sorted names) and
+`tools_offered_count` (int).
+
+- Both request styles are read: OpenAI `{"type": "function", "function": {"name": ...}}` and Anthropic / flat
+  `{"name": ...}`. Anything else is skipped; if no name is found, both keys are left out. The code runs inside
+  `_failsafe`, so an odd shape can never break the generation.
+- Names only (never descriptions or schemas), so it is safe in every capture mode, `metadata` included.
+- At most 200 names, each cut to 64 characters. Order of steps: dedupe on the full name, count (`tools_offered_count`
+  is that distinct count, before the cap and the cut), cut to 64, dedupe again, sort, cap. The count can therefore be
+  larger than the list when the cap applies or when long names collapse after the cut.
+- Only `on_pre_llm_request` changes; `_start_child_observation`, `on_pre_tool_call` and `register` stay as they are.
 
 ## Out of scope
 

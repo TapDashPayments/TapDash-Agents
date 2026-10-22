@@ -81,8 +81,71 @@ Keep this list complete: every difference from upstream goes here, in the commit
    paragraph and `hermes plugins remove langfuse` are marked as not applying here; the stale "Hermes turn" text
    now names the per-platform trace names; the tuning section documents `HERMES_LANGFUSE_TAG_PATTERNS`, marked as a
    TapDash patch (with its JSON-escape limit).
+7. `__init__.py`: every "LLM call N" generation records which tools were offered to the model (TAP2-125, design D9). Not in
+   upstream.
+   - `on_pre_llm_request` reads `request["body"]["tools"]` (only when `request` and its `body` are dicts) through the
+     new helper `_tools_offered(body)`, called inside `_failsafe("tools offered")`, and adds two keys to the
+     generation's metadata: `tools_offered` (sorted list of tool names) and `tools_offered_count` (int).
+   - Shapes: OpenAI style `{"type": "function", "function": {"name": ...}}` and Anthropic / flat style
+     `{"name": ...}`. Any other entry (not a dict, no usable name, name not a non-empty string) is skipped. If `tools`
+     is missing, is not a list or yields no name, both keys are left out.
+   - Limits: at most 200 names (`_MAX_TOOLS_OFFERED`), each cut to 64 characters (`_MAX_TOOL_NAME_CHARS`).
+   - Order of steps (decision): (1) collect the distinct FULL names; (2) `tools_offered_count` = how many there are,
+     before any cut or cap (250 distinct tools give 200 names and count 250); (3) cut each name to 64 characters and
+     deduplicate again, so the list never holds a duplicate even when two long names share their first 64
+     characters; (4) sort; (5) keep the first 200. So the count can be higher than the list for two reasons: the cap,
+     and long names that collapse into one after the cut.
+   - Names only, never descriptions or schemas, so it is recorded in every capture mode (including `metadata`).
+   - `_start_child_observation`, `on_pre_tool_call` and `register` are unchanged.
+   - New: `_tools_offered`, `_MAX_TOOLS_OFFERED`, `_MAX_TOOL_NAME_CHARS` and tests in `tests/test_tools_offered.py`.
+   - Docs: README ("What each generation's metadata shows") and the design doc ("Tools offered on each LLM call (D9)").
+8. `__init__.py`: `HERMES_LANGFUSE_SCORE_PATTERNS` scores a trace by pattern (design D10). Not in upstream.
+   - Setting: `name=regex[=>literal];name=regex`. The name ends at the FIRST `=`; a literal starts at the LAST `=>`.
+     Name `[a-z0-9_-]{1,40}` (the tag-label rule). A regex cannot contain `;`. A bad entry (no `=`, bad name, empty
+     or non-compiling regex) logs one `logger.warning` naming the setting, once per distinct raw value (parsing is
+     cached on the raw string), and is skipped.
+   - Matching: `re.search` on the turn's ORIGINAL user message only (the same source and the same 200 000-char cap
+     as the pattern tags; the request copy only when Hermes passes no original). Tool arguments and results are not
+     scanned. The first matching entry per name wins, so a name is scored at most once per trace
+     (`TraceState.scored_names`).
+   - Value: the named group `value`, else the `=>literal`, else group 1, else the whole match; stripped and
+     lower-cased. An entry whose value is empty or over 100 chars is skipped (a later entry with the same name can
+     still win). Comment: every named group except `value`, in the order they appear in the regex, skipping empty
+     ones; a group named `comment` is written bare, any other as `<group>: <text>`; joined with `; `, cut to 500
+     chars; none when there is no such group.
+   - Emission: `_start_root_trace`, after the root span exists, inside `_failsafe`: `client.create_score(name=...,
+     value=..., trace_id=..., data_type="CATEGORICAL", comment=..., score_id=f"{trace_id}-{name}")` (signature
+     checked against langfuse 4.15.2). A `create_score` that raises is swallowed per score.
+   - `HERMES_LANGFUSE_CAPTURE=metadata`: no scores (the generic plugin cannot tell whether a value carries content,
+     the same rule as pattern tags).
+   - Privacy and safety: values and comments are taken from the raw text and are not passed through secret
+     redaction, even in `sanitized` mode, so only use patterns that match non-secret text (a reviewer's note ends up
+     in the comment). The regex runs on up to 200 000 chars under `_STATE_LOCK`: avoid catastrophic backtracking.
+   - Idempotency limit: Langfuse replaces a re-sent score only when id, name AND UTC date all match. The
+     deterministic `score_id` makes a same-day retry idempotent; a retry across UTC midnight would add a second score.
+     Not an issue in practice: a score is sent once per trace, at trace start.
+   - Sampling: `create_score` follows the trace's sampling (`add_score_task(force_sample=False)` for a valid 32-hex
+     trace id): with `HERMES_LANGFUSE_SAMPLE_RATE` below 1 a sampled-out trace gets no score either.
+   - New: helpers `_parse_score_patterns`, `_score_patterns`, `_pattern_scores`, the `TraceState.scored_names` field,
+     and `tests/test_pattern_scores.py` (which also fails when durable-park's `wake.py` texts drift from the copies it
+     holds as fixtures).
+   - Value on proto-agents (durable-park's approval decision; see the README for the sample texts):
+     `HERMES_LANGFUSE_SCORE_PATTERNS=approval_decision=(?m)^(?:\[[^\]\n]*\] )?\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) (?:\("[^"]*"\) )?was (?P<value>APPROVED|DENIED|CANCELLED) in withHuman(?: by (?P<by>[^:]+?))?(?:: (?P<note>.+?))?\. (?:It did not run\.|Call parked_action_execute );approval_decision=(?m)^(?:\[[^\]\n]*\] )?\s*\[durable-park\] (?P<comment>P-[0-9A-F]{8}) \("[^"]*"\) got no decision before its deadline\.=>expired`
+   - The patterns start with `(?m)^(?:\[[^\]\n]*\] )?\s*`, not `\A\s*`: Hermes rewrites a message in a shared
+     session to `[<user name>] <text>` and puts observed-group backfill before a `[New message]` line, and the
+     hook's `user_message` is taken after that, so a start-of-text anchor never matched a threaded session
+     (final review of TAP2-125). A `[durable-park]` mid-line still does not score.
+   - `tests/test_pattern_scores.py` also runs the real `wake.inject_text` on stub rows, so a change to the
+     ` by {decider}` / `: {note}` glue fails there too (the three text constants alone would not catch it).
+   - `README.md` documents the setting in the tuning list and under "Score traces by pattern (TapDash patch)".
 
 `on_pre_tool_call` is unchanged from upstream.
+
+Tool failures (addendum item 3, TAP2-125): **verified, not patched.** Upstream's `on_post_tool_call` already maps a
+tool result with status `error` to level ERROR and `blocked`/`cancelled` to WARNING, with the error type as
+`status_message`. `TestToolObservationKeying.test_failed_mcp_tool_call_ends_observation_at_error_level` drives a failed
+MCP call (`mcp_quickbooks_create_bill`, `McpError`) through `on_pre_tool_call` and `on_post_tool_call` and pins that
+result. It passes on the unpatched code, so no code change was made.
 
 ## Known upstream hints left unchanged
 
@@ -100,7 +163,7 @@ bash tracing/run_tests.sh            # as the hermes user on the test VM
 bash tracing/run_tests.sh -k attribution   # extra pytest arguments are added; the deselection below always stays
 ```
 
-Expected today: `167 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
+Expected today: `253 passed, 4 deselected`. The 4 deselected tests (`CrossesHookBoundary`) re-exec the process
 through Hermes's dependency installer, which would run against the gateway's shared Hermes environment and drops the
 test path, so they cannot run from a checkout. The script deselects them with `--deselect` by node id, so a `-k` or
 `-m` of your own cannot bring them back. It runs under the Python of the Hermes environment the running gateway
