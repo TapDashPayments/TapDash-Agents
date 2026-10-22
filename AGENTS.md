@@ -37,7 +37,12 @@ When in doubt, fail closed (block, or ask a person). Never auto-approve.
 - Through the connector, every heredoc gets a **unique** delimiter, never reused inside the script.
 - **Never print, paste or commit a secret.** Secrets live in `/etc/durable-park/` and are typed in by an admin with
   `read -rs`. If a user pastes one into chat, don't use it; ask them to revoke it.
-- Root steps (copying into `/opt`, restarting system units) are an admin's. Give them the exact one-line command.
+- Commands through the connector run as the admin user `ubuntu` (passwordless sudo) since 2026-10-22; the agent's own
+  user `hermes` has no sudo. Reach Hermes files and user units with `sudo -u hermes -H ...` and
+  `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user ...` ([runbook](durable-park/docs/runbook.md#access-and-ground-rules)).
+- Root steps (copying into `/opt`, restarting system units) no longer need the admin at a terminal, but the admin
+  confirms anything risky first. Give them the exact one-line command, and wait for a yes before anything destructive,
+  hard to undo, or touching secrets, sudoers, sshd or Tailscale.
 - Before restarting the gateway or the bridge, make sure no row is `parked`, `approved` or `executing`
   ([runbook](durable-park/docs/runbook.md#health-check)).
 - Work on a git worktree or branch, not in the live clone's working tree. The gateway and the 5-minute sweep load

@@ -27,18 +27,23 @@ the root README's [Built on](../../README.md#built-on) table.
    used it); arguments must match the saved ones.
 3. **A crash never causes a silent retry.** If the outcome is unclear the row becomes `unknown` and a person checks.
 
-How strong is the first guarantee today? **On proto-agents it is not a security boundary.** The plugin and the
+How strong is the first guarantee today? **On proto-agents it is not yet a full security boundary.** The plugin and the
 ledger trust the user `hermes`, which is also the user the agent runs as. The bridge no longer trusts the ledger: it
 keeps no state and asks withHuman with a read-only organization key, so a forged ledger row cannot get a gateway
-call approved. It still runs as `hermes`, from a root-owned copy that `hermes` can change with sudo. The agent has **no file or
+call approved. It still runs as `hermes` (the key `audit_key` is one of the secrets `hermes` reads by design), but from a
+root-owned copy that `hermes` cannot change, since it has no sudo (Clean Setup Phase 1). The agent has **no file or
 terminal tools** (the v1 tool lockdown, `deploy/hermes_tool_policy.py`); that holds the first guarantee against an
-agent that goes looking for a way round it, but it is a configuration guard, not a permission boundary.
+agent that goes looking for a way round it. Since Clean Setup Phase 1 (2026-10-22 02:22 UTC) `hermes` has no sudo, so
+the root-owned parts (`/opt/durable-park`, `tunnel.env`, the other root-only secrets) are out of its reach. The ledger is
+still owned by `hermes` (Phase 2, not done), so the lockdown remains a configuration guard for the ledger and the
+`instance_token`.
 
 Since 2026-10-21 03:16 UTC the v1 tool lockdown is re-applied on proto-agents as a stopgap: the agent can reach only
 `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*` (on every platform key; `hermes_tool_policy.py check` prints the key count and ends `ok`).
-Hermes approvals stay off. The user `hermes` still has passwordless sudo until Clean Setup Phase 1
-([spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1); the lockdown is a configuration guard,
-not a permission boundary. Tools open again only through that spec (§4.4). Re-running `configure_hermes.sh` or
+Hermes approvals stay off. Clean Setup Phase 1 is done (2026-10-22 02:22 UTC, 2026-10-21 10:22 PM ET;
+[spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1): `hermes` has no sudo. The ledger is still owned
+by `hermes` (Phase 2, §4.5, not done), so the lockdown is still a configuration guard for the ledger, not a permission
+boundary. Tools open again only through that spec (§4.4); file, terminal and code tools stay off until Phase 2. Re-running `configure_hermes.sh` or
 `hermes_tool_policy.py` re-applies the current state and restarts the gateway, so the "no parked/approved/executing
 row" rule applies.
 
@@ -46,27 +51,30 @@ What that means today:
 
 - The agent can reach only `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*`. Hermes's own approvals are
   off (`approvals.mode: off`).
-- The user `hermes` has **passwordless sudo**. If the agent ever got a terminal or file tool (a configuration change,
-  a Hermes upgrade, a hijack), it could read everything in `/etc/durable-park/`, including the QuickBooks client
-  secret, the refresh token and the withHuman tunnel token in `tunnel.env`; change the code in `/opt/durable-park`;
-  forge ledger rows (they no longer get a gateway call approved: the bridge checks withHuman); and call QuickBooks
-  directly, **bypassing withHuman**.
+- The user `hermes` has **no sudo** since 2026-10-22 02:22 UTC (Clean Setup Phase 1; `/etc/sudoers.d/90-hermes` is gone,
+  `sudo -u hermes sudo -n true` is refused). If the agent ever got a terminal or file tool (a configuration change,
+  a Hermes upgrade, a hijack), it still could **not** read the QuickBooks client secret, the refresh token or the
+  withHuman tunnel token in `tunnel.env` (root-only), or change the code in `/opt/durable-park`. It **could** still read
+  the secrets `hermes` uses by design (`instance_token`, `audit_key`, `wake_secret`, `bridge_secret`), and, because the
+  ledger is still owned by `hermes` (Phase 2 not done), forge ledger rows (they no longer get a gateway call approved:
+  the bridge checks withHuman). That is why file, terminal and code tools stay off until Phase 2.
 - Even so, durable-park asks withHuman about every tool call except `parked_action_execute`, `clarify` and the two
   read-only Tool Search catalog tools (`tool_search`, `tool_describe`, [section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)), and
   withHuman's pipeline decides which need a person; with the lockdown the only non-QuickBooks tool the agent reaches
-  is `clarify`. It is an approval gate, not a boundary, while the agent could reach a terminal.
-- Yaakov accepted this on 2026-10-20 for the exploration phase, on a test VM with a QuickBooks **sandbox** company.
-  The decision: Clean Setup Phase 1 (spec §4.1), then Phase 2 (§4.5) before any local tool opens; the docker backend
-  and `approvals.deny` were dropped. Both are the first items in the [backlog](backlog.md#before-real-books) and are
-  needed before any real credentials.
+  is `clarify`. It is an approval gate, not a full boundary, while the agent could reach a terminal and the ledger is
+  owned by `hermes`.
+- Yaakov accepted the earlier, wider risk on 2026-10-20 for the exploration phase, on a test VM with a QuickBooks
+  **sandbox** company. The decision: Clean Setup Phase 1 (spec §4.1, **done 2026-10-22 02:22 UTC**), then Phase 2 (§4.5,
+  open) before any local tool opens; the docker backend and `approvals.deny` were dropped. What is left is in the
+  [backlog](backlog.md#before-real-books) and is needed before any real credentials.
 
 ## 1. System map
 
 Everything durable-park adds runs on the test VM next to Hermes. By design the agent does not hold QuickBooks
 credentials: QuickBooks is reached only through the withHuman MCP gateway and its tunnel. The v1 lockdown
 (re-applied 2026-10-21 03:16 UTC) enforces that with a configuration guard; it is not a permission boundary, because the
-credentials sit in `/etc/durable-park/tunnel.env` and `hermes` has passwordless sudo (see
-[the three guarantees](#the-three-guarantees)).
+credentials sit in `/etc/durable-park/tunnel.env` (root-only; `hermes` has had no sudo since Clean Setup Phase 1,
+2026-10-22) and the ledger is still owned by `hermes` (see [the three guarantees](#the-three-guarantees)).
 
 ```mermaid
 flowchart LR
@@ -561,7 +569,7 @@ dropped is never retried.
 | Hermes gateway (agent + plugin, Telegram and Teams adapters) | `hermes` | `~/.hermes/plugins/durable-park` -> `/home/hermes/durable-park/plugin/durable_park` (the git clone) | `127.0.0.1:8644` (webhook route `durable-park-wake`), `127.0.0.1:3978` (Teams bot "TapDash Agent") | systemd user unit `hermes-gateway` |
 | Hermes web dashboard | `hermes` | the `hermes` install (`hermes dashboard`, basic-auth user `TapDash`) | `100.99.171.75:9119` (Tailscale only), HTTPS via Tailscale Serve on `:8443` | systemd user unit `hermes-dashboard` |
 | Teams tunnel | `ubuntu` | Microsoft devtunnel `proto-agents-bot`, forwards to the gateway's `127.0.0.1:3978` | outbound only | systemd user unit `devtunnel-hermes` (user `ubuntu`) |
-| Claude connector "Proto-Agents" | `hermes` | `/home/hermes/hermes-shell-mcp` (shell access for Claude on this VM) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
+| Claude connector "Proto-Agents" | `ubuntu` (the admin; was `hermes` until 2026-10-22) | `/home/ubuntu/hermes-shell-mcp` (shell access for Claude on this VM; reaches Hermes with `sudo -u hermes ...`) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
 | bridge | `hermes` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` | system unit `durable-park-bridge` |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
@@ -571,8 +579,8 @@ dropped is never retried.
 - The git clone is `/home/hermes/tapdash-agents`; `/home/hermes/durable-park` is a link to its `durable-park/`
   folder, so older paths keep working.
 - The receiver and bridge run from **root-owned copies** in `/opt/durable-park`, so the agent's user could not change
-  the code that says "approved" (today the user `hermes` has passwordless sudo, so these copies are not yet a boundary;
-  that changes with Clean Setup Phase 1, [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1). Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
+  the code that says "approved" (since Clean Setup Phase 1, 2026-10-22, `hermes` has no sudo, so these copies are now a
+  boundary for the code, [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) §4.1). Changing them needs a root copy step (runbook: [Deploy a change](runbook.md#deploy-a-change)).
 - Data lives in `/home/hermes/.hermes/plugin-data/durable-park/`: `ledger.db`,
   `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
   `plugin_load.json` (the load proof) and `plugin_load_alert_state.json`. The bridge keeps nothing here: the
@@ -581,7 +589,7 @@ dropped is never retried.
   `parked_action_execute`, `clarify` and `mcp__wh__quickbooks__*`, plus Hermes's three Tool Search bridge tools (Tool Search has been on since
   2026-10-21 19:59 UTC) ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); on every platform key, `check` ok) and Hermes's own
   approvals are off (`approvals.mode: off`). `gateway.strict: true` and `gateway.trust_recent_files: false` are set;
-  with passwordless sudo they do not protect the ledger. Re-running `deploy/configure_hermes.sh` or
+  while `hermes` owns the ledger (Phase 2 not done) they do not protect it. Re-running `deploy/configure_hermes.sh` or
   `hermes_tool_policy.py` re-applies this state and restarts the gateway, so the "no parked/approved/executing row"
   rule applies. Tools open again only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4.
 - Two agents ran on the VM until 2026-10-21 (this install and an `ubuntu` user install for Teams and the
@@ -602,7 +610,7 @@ the repo) and never printed by any script.
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
 | `audit_key` | 0640 root:hermes | bridge (every gateway call), plugin (optional) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
 
-The user `hermes` has passwordless sudo, so an agent that got a terminal or file tool could read every file in this table. The v1 lockdown withholds those tools today. See backlog item 0.
+Since Clean Setup Phase 1 (2026-10-22) the user `hermes` has no sudo: an agent that got a terminal or file tool could still read the files that `hermes` reads by design (`instance_token`, `audit_key`, and `wake_secret` and `bridge_secret` through group `dpwake`), but not `tunnel.env` or `provisioner_token` (root-only) or `receiver.json` (`aaprecv`). The ledger is still `hermes`-owned until Phase 2, and the v1 lockdown withholds those tools today. See backlog items 0 and 7.
 
 Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before-production).
 
