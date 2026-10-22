@@ -675,9 +675,12 @@ LIFT_TEXTS = {
 }
 
 
-def write_lift(tmp_path, *entries):
-    rows = [{"tool": t, "kind": k, "key": key, "first_seen": "2026-10-22T10:00:00Z",
-             "last_seen": "2026-10-22T10:00:00Z", "count": 1} for t, k, key in entries]
+def write_lift(tmp_path, *entries, count=1):
+    rows = []
+    for entry in entries:
+        t, k, key, *rest = entry
+        rows.append({"tool": t, "kind": k, "key": key, "detail": rest[0] if rest else "",
+                     "first_seen": "2026-10-22T10:00:00Z", "last_seen": "2026-10-22T10:00:00Z", "count": count})
     (tmp_path / "lift_status.json").write_text(json.dumps({"entries": rows, "updated_at": "2026-10-22T10:00:00Z"}))
 
 
@@ -741,3 +744,108 @@ def test_lift_alert_state_and_garbage_entries_do_not_stop_the_sweep(world, monke
                                                                                          "kind": "lift_error"}]}))
     out, = runs(world, monkeypatch, capsys, 1)
     assert out.count("durable-park ALERT:") >= 1
+
+
+LIFT_TEXTS["note_dropped"] = ("durable-park ALERT: the agent's note inside {key} for {tool} was removed but not shown "
+                              "to the approver ({reason}).")
+LIFT_TEXTS["check_incomplete"] = ("durable-park ALERT: could not finish checking {tool}'s arguments for the agent's note "
+                                  "(they are too large or nested too deep); it may reach the server.")
+
+
+@pytest.mark.parametrize("reason", ["not text", "empty", "another note was already at the top", "more than one note"])
+def test_note_dropped_alert_names_the_reason_and_alerts_once_per_reason(world, monkeypatch, capsys, tmp_path, reason):
+    write_lift(tmp_path, (LIFT_TOOL, "note_dropped", "params", reason))
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [LIFT_TEXTS["note_dropped"].format(tool=LIFT_TOOL, key="params", reason=reason)]
+    assert second == ""
+
+
+def test_check_incomplete_alert_text(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "check_incomplete", ""))
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == [LIFT_TEXTS["check_incomplete"].format(tool=LIFT_TOOL)] and second == ""
+
+
+def test_a_second_reason_for_the_same_key_alerts_separately(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "note_dropped", "params", "empty"))
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, (LIFT_TOOL, "note_dropped", "params", "empty"), (LIFT_TOOL, "note_dropped", "params", "not text"))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert out.splitlines() == [LIFT_TEXTS["note_dropped"].format(tool=LIFT_TOOL, key="params", reason="not text")]
+
+
+def set_alerted_at(tmp_path, hours_ago):
+    state = json.loads((tmp_path / "lift_alert_state.json").read_text())
+    at = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for item in state["alerted"]:
+        item["at"] = at
+    (tmp_path / "lift_alert_state.json").write_text(json.dumps(state))
+
+
+def test_a_problem_that_keeps_growing_alerts_again_after_24_hours(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), count=3)
+    first, = runs(world, monkeypatch, capsys, 1)
+    assert first.splitlines() == [LIFT_TEXTS["declared"].format(tool=LIFT_TOOL, key="params")]
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), count=40)
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # growing, but said less than 24 h ago
+    set_alerted_at(tmp_path, 25)
+    again, quiet = runs(world, monkeypatch, capsys, 2)
+    assert again.splitlines() == [LIFT_TEXTS["declared"].format(tool=LIFT_TOOL, key="params").replace(
+        "durable-park ALERT:", "durable-park ALERT (still happening, 40 times):", 1)]
+    assert quiet == ""
+    set_alerted_at(tmp_path, 25)
+    assert runs(world, monkeypatch, capsys, 1) == [""]  # 25 h passed but the count did not grow: silent
+    write_lift(tmp_path, (LIFT_TOOL, "declared", "params"), count=41)
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "(still happening, 41 times)" in out
+
+
+def test_a_count_that_restarted_lowers_the_base_so_later_growth_is_seen(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""), count=50)
+    runs(world, monkeypatch, capsys, 1)
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""), count=2)  # the report was recreated
+    assert runs(world, monkeypatch, capsys, 1) == [""]
+    set_alerted_at(tmp_path, 25)
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""), count=3)
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "(still happening, 3 times)" in out
+
+
+def test_a_deeply_nested_report_is_an_unreadable_report_not_a_silent_failure(world, monkeypatch, capsys, tmp_path):
+    (tmp_path / "lift_status.json").write_text("[" * 200_000 + "]" * 200_000)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == ["durable-park ALERT: could not read lift_status.json (unexpected format)."]
+    assert second == ""
+
+
+def test_a_failing_lift_check_alerts_once_on_stdout_then_says_it_recovered(world, monkeypatch, capsys, tmp_path):
+    def boom(ledger_path, now):
+        raise RuntimeError("bug")
+
+    real = sweep._lift_alert
+    monkeypatch.setattr(sweep, "_lift_alert", boom)
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.splitlines() == ["durable-park ALERT: could not check for lift problems (RuntimeError)."]
+    assert second == ""
+    monkeypatch.setattr(sweep, "_lift_alert", real)
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.splitlines() == ["durable-park: lift problems can be checked again."] and fourth == ""
+
+
+def test_a_new_error_type_in_the_lift_check_alerts_again(world, monkeypatch, capsys, tmp_path):
+    errors = iter([RuntimeError("a"), RuntimeError("a"), KeyError("b")])
+
+    def boom(ledger_path, now):
+        raise next(errors)
+
+    monkeypatch.setattr(sweep, "_lift_alert", boom)
+    outs = runs(world, monkeypatch, capsys, 3)
+    assert outs[0].count("RuntimeError") == 1 and outs[1] == "" and "KeyError" in outs[2]
+
+
+def test_a_lift_state_file_that_cannot_be_written_alerts_instead_of_staying_silent(world, monkeypatch, capsys, tmp_path):
+    write_lift(tmp_path, (LIFT_TOOL, "lift_error", ""))
+    monkeypatch.setattr(sweep, "_save_state", lambda path, state: (_ for _ in ()).throw(PermissionError("read-only")))
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert LIFT_TEXTS["lift_error"].format(tool=LIFT_TOOL, key="") in out
+    assert "could not check for lift problems (PermissionError)" in out

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import logging
 import os
 import re
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
@@ -180,47 +182,79 @@ def _declares_context_in(schema: Any, root: Any, seen: frozenset = frozenset(), 
     return None if None in found else False
 
 
+def is_note_key(key: Any) -> bool:
+    """A key that is (a spelling of) the gateway's note field: ``withhuman_context`` ignoring case and any
+    leading or trailing underscores."""
+    return isinstance(key, str) and key.lower().strip("_") == CONTEXT_FIELD
+
+
+def _key_declares(props: dict, key: Any, root: Any) -> bool | None:
+    """Do the tool's rules for the top-level ``key`` declare their own ``withhuman_context``? A key the rules do not
+    list (Hermes may show the model a sanitized spelling of a property name) is judged by every other property:
+    when any of them declares the field the key is left alone (when in doubt, skip, and say so)."""
+    if key in props:
+        return _declares_context_in(props[key], root)
+    found = [_declares_context_in(rules, root) for name, rules in props.items() if name != CONTEXT_FIELD]
+    return True if True in found else False
+
+
 def lift_gateway_context(args: Any, schema: dict | None,
-                         on_problem: Callable[[str, str], None] | None = None) -> Any:
+                         on_problem: Callable[[str, str, str], None] | None = None) -> Any:
     """Move a ``withhuman_context`` note the model nested inside an argument object up to the top level.
 
     The withHuman gateway's schema has ``withhuman_context`` as a sibling of the tool's own fields and strips only
     the top-level one before forwarding, so a nested copy would reach the server as an unknown parameter. Only
-    tools whose ``schema`` advertises the field at the top level are touched, one level deep, in sorted key order.
-    For each top-level key holding a nested ``withhuman_context``, the tool's own rules for that key decide
+    tools whose ``schema`` advertises the field at the top level are touched, and the move is one level deep
+    (the values of top-level keys), in sorted key order; deeper notes are not moved (``find_leftover_notes`` finds
+    them). For each top-level key holding a nested ``withhuman_context``, the tool's own rules for that key decide
     (``_declares_context_in``: ``properties``, ``patternProperties``, ``allOf``/``anyOf``/``oneOf``, and local
     ``$ref`` such as ``#/$defs/X`` resolved inside ``schema``). Only a positive declaration leaves the key alone
-    (the server really has that field; ``on_problem("declared", key)`` is called, the key name only, never a
-    value). Rules that do not declare it, or cannot be judged (remote ``$ref``, a bad pattern, a cycle), mean the
-    note is removed. The first removed non-empty string becomes the top-level note unless the top level already
-    has the key (it always wins); other removed values are dropped. A JSON-string value is not parsed here (the
-    hook runs Hermes's type fixing first). Pure and idempotent: the input is never mutated (a deep copy is
-    returned when anything is touched, the same object otherwise), and a bug while judging or reporting never
-    raises."""
+    (the server really has that field): ``on_problem("declared", key, "")``. Rules that do not declare it, or cannot
+    be judged (remote ``$ref``, a bad pattern, a cycle), mean the note is removed. The first removed non-empty
+    string becomes the top-level note unless the top level already has the key. Every removed value that did not
+    become the note, and is not an exact copy of the note the approver will see, is reported:
+    ``on_problem("note_dropped", key, reason)`` with reason ``not text``, ``empty``,
+    ``another note was already at the top`` or ``more than one note``. ``on_problem`` gets key names, never
+    values. A JSON-string value is not parsed here (the hook runs Hermes's type fixing first). Pure and
+    idempotent: the input is never mutated (a deep copy is returned when anything is touched, the same object
+    otherwise), and a bug while judging or reporting never raises."""
     if not isinstance(args, dict) or not declares_context(schema):
         return args
     props = schema["properties"]
     out = copy.deepcopy(args)
+    top_present = CONTEXT_FIELD in out
     note: str | None = None
+
+    def report(kind: str, key: str, detail: str = "") -> None:
+        if on_problem is not None:
+            try:
+                on_problem(kind, key, detail)
+            except Exception:  # noqa: BLE001 - a reporting bug must not stop the lift
+                pass
+
     for key in sorted(out, key=str):
         value = out[key]
         if not isinstance(value, dict) or CONTEXT_FIELD not in value:
             continue
         try:
-            declared = _declares_context_in(props.get(key), schema)
+            declared = _key_declares(props, key, schema)
         except Exception:  # noqa: BLE001 - never raise out of the lift; "cannot tell" lifts
             declared = None
         if declared is True:
-            if on_problem is not None:
-                try:
-                    on_problem("declared", str(key))
-                except Exception:  # noqa: BLE001 - a reporting bug must not stop the lift
-                    pass
+            report("declared", str(key))
             continue
         removed = value.pop(CONTEXT_FIELD)
-        if note is None and isinstance(removed, str) and removed:
-            note = removed
-    if note is not None and CONTEXT_FIELD not in out:
+        if isinstance(removed, str) and removed:
+            if note is None and not top_present:
+                note = removed
+                continue
+            if removed == (out[CONTEXT_FIELD] if top_present else note):
+                continue  # an exact copy of the note the approver will see: nothing is lost
+            reason = "more than one note" if note is not None else "another note was already at the top"
+        else:
+            reason = "empty" if isinstance(removed, str) else "not text"
+        report("note_dropped", str(key), reason)
+    if note is not None and not top_present:
         out[CONTEXT_FIELD] = note
     return out
 
@@ -236,101 +270,210 @@ def _text_form_object(value: Any) -> dict | None:
     return decoded if isinstance(decoded, dict) and CONTEXT_FIELD in decoded else None
 
 
-def first_text_form_note_key(args: Any) -> str | None:
-    """The first top-level key (sorted) whose value is a JSON string of an object holding the note, if any."""
-    if not isinstance(args, dict):
-        return None
-    for key in sorted(args, key=str):
-        if _text_form_object(args[key]) is not None:
-            return str(key)
-    return None
-
-
-def keys_still_holding_note(args: Any) -> list[str]:
-    """Top-level keys (sorted) whose value still holds a ``withhuman_context``: an object with it, or a JSON string
-    of such an object. The top-level note itself does not count."""
+def text_form_note_keys(args: Any) -> list[str]:
+    """The top-level keys (sorted) whose value is a JSON string of an object holding the note."""
     if not isinstance(args, dict):
         return []
-    found = []
-    for key in sorted(args, key=str):
-        value = args[key]
-        if isinstance(value, dict) and CONTEXT_FIELD in value:
-            found.append(str(key))
-        elif key != CONTEXT_FIELD and _text_form_object(value) is not None:
-            found.append(str(key))
-    return found
+    return [str(key) for key in sorted(args, key=str) if _text_form_object(args[key]) is not None]
+
+
+MAX_WALK_DEPTH = 50
+MAX_WALK_NODES = 10_000
+MAX_LEFTOVER_HITS = 20
+MAX_PATH_CHARS = 200
+_NOT_JSON = object()
+
+
+def _decode_text(value: str) -> Any:
+    """What a string strictly decodes to when it looks like JSON (an object, array or string), else ``_NOT_JSON``."""
+    stripped = value.lstrip()
+    if not stripped or stripped[0] not in '{["':
+        return _NOT_JSON
+    try:
+        return json.loads(value)
+    except Exception:  # noqa: BLE001 - not JSON (a RecursionError on absurd nesting counts too)
+        return _NOT_JSON
+
+
+def find_leftover_notes(args: Any, exclude: frozenset | set = frozenset()) -> tuple[list[str], bool]:
+    """Where a ``withhuman_context`` note is still inside ``args``, as key paths (names and list indices only, never
+    values), plus whether the walk was cut short. Walks dicts and lists at any depth and every string that strictly
+    decodes to an object, array or string; a string that does not decode but contains the field name counts as a
+    leftover too. A key counts as the note when it is ``withhuman_context`` ignoring case and leading or trailing
+    underscores. The top-level ``withhuman_context`` itself is the real note and is never reported; the paths in
+    ``exclude`` (positively declared locations) are skipped. Bounded: depth 50, 10 000 nodes, 20 hits (a bound
+    reached means incomplete)."""
+    hits: list[str] = []
+    state = {"nodes": 0, "incomplete": False}
+
+    def add(path: str) -> None:
+        if path in exclude:
+            return
+        if len(hits) >= MAX_LEFTOVER_HITS:
+            state["incomplete"] = True
+            return
+        hits.append(path[:MAX_PATH_CHARS])
+
+    def walk(value: Any, path: str, depth: int) -> None:
+        state["nodes"] += 1
+        if depth > MAX_WALK_DEPTH or state["nodes"] > MAX_WALK_NODES:
+            state["incomplete"] = True
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                if is_note_key(key):
+                    if not (depth == 0 and key == CONTEXT_FIELD):
+                        add(child_path)
+                    continue  # never look inside a note
+                walk(child, child_path, depth + 1)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, f"{path}[{index}]", depth + 1)
+        elif isinstance(value, str):
+            decoded = _decode_text(value)
+            if decoded is not _NOT_JSON:
+                walk(decoded, path, depth + 1)
+            elif CONTEXT_FIELD in value.lower():
+                add(path)
+
+    walk(args, "", 0)
+    return hits, state["incomplete"]
 
 
 LIFT_STATUS_FILENAME = "lift_status.json"
 MAX_LIFT_ENTRIES = 200
-LIFT_KINDS = ("declared", "schema_unavailable", "args_unreadable", "lift_error", "note_left_inside")
+LIFT_REWRITE_SECONDS = 60.0  # a repeat of a known problem rewrites the file at most this often (the count lags)
+LIFT_KINDS = ("declared", "note_dropped", "schema_unavailable", "args_unreadable", "lift_error",
+              "note_left_inside", "check_incomplete")
+_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
+def _sweep_order(entry: dict) -> tuple:
+    return (entry["last_seen"], entry["first_seen"], entry["tool"], entry["kind"], entry["key"], entry["detail"])
 
 
 class LiftStatus:
     """Where the lift reports what it could not do, for the sweep to alert on (``lift_status.json`` next to the
-    ledger). One entry per (tool, kind, key) with ``first_seen``, ``last_seen`` and ``count``: names and times,
-    never an argument value or note text. At most 200 entries (the least recently seen makes room for a new one).
-    Thread-safe and never raises: a write error logs one error until a write works again. ``path=None`` only
-    remembers. An existing file is read at start, so a restart keeps ``first_seen`` and ``count``."""
+    ledger). One entry per (tool, kind, key, detail) with ``first_seen``, ``last_seen`` and ``count``: names and
+    times, never an argument value or note text. At most 200 entries (the least recently seen makes room).
 
-    def __init__(self, path: str | None = None):
+    Several processes may write the file (the gateway, a CLI run that loads the plugin): every write takes an
+    ``flock`` on a sidecar lock file, re-reads the file, adds this process's new occurrences to what is there and
+    replaces it atomically, so nobody drops another's entries. A file that cannot be parsed is kept as
+    ``lift_status.json.corrupt`` before it is replaced. A failed write keeps the occurrences in memory and is retried
+    on every later call and by ``flush`` (the form self-check thread calls it every 30 minutes); one error is logged
+    per outage. A repeat of a problem already in the file rewrites it only every 60 s (the count lags; ``flush``
+    catches up). Thread-safe and never raises. ``path=None`` only remembers."""
+
+    def __init__(self, path: str | None = None, clock: Callable[[], float] = time.monotonic):
         self._path = path
+        self._clock = clock
         self._lock = threading.Lock()
-        self._entries: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._pending: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        self._known: set[tuple[str, str, str, str]] = set()
+        self._last_write: float | None = None
         self._write_failed = False
-        self._load()
+        try:
+            self._known = set(self._read_disk(keep_corrupt=False))
+        except Exception:  # noqa: BLE001 - only used to tell a new problem from a repeat
+            self._known = set()
 
-    def _load(self) -> None:
+    @property
+    def path(self) -> str | None:
+        return self._path
+
+    def _read_disk(self, keep_corrupt: bool = True) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+        """The entries now in the file ({} when missing). An unparseable file is moved aside when ``keep_corrupt``;
+        any other read error raises (a write must not replace what it could not read)."""
         if not self._path:
-            return
+            return {}
         try:
             with open(self._path, encoding="utf-8") as handle:
                 rows = json.load(handle)["entries"]
+            entries: dict[tuple[str, str, str, str], dict[str, Any]] = {}
             for row in rows[-MAX_LIFT_ENTRIES:]:
-                key = (row["tool"], row["kind"], row["key"])
-                if all(isinstance(part, str) for part in key) and isinstance(row["count"], int):
-                    self._entries[key] = {"tool": key[0], "kind": key[1], "key": key[2],
-                                          "first_seen": str(row["first_seen"]), "last_seen": str(row["last_seen"]),
-                                          "count": row["count"]}
-        except Exception:  # noqa: BLE001 - a missing or corrupt old file just starts a fresh record
-            self._entries = {}
+                ident = (row["tool"], row["kind"], row["key"], row.get("detail", ""))
+                if all(isinstance(part, str) for part in ident) and isinstance(row["count"], int):
+                    entries[ident] = {"tool": ident[0], "kind": ident[1], "key": ident[2], "detail": ident[3],
+                                      "first_seen": str(row["first_seen"]), "last_seen": str(row["last_seen"]),
+                                      "count": row["count"]}
+            return entries
+        except FileNotFoundError:
+            return {}
+        except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+            if keep_corrupt:
+                os.replace(self._path, self._path + ".corrupt")
+                log.warning("%s was unreadable; kept as %s.corrupt", LIFT_STATUS_FILENAME, LIFT_STATUS_FILENAME)
+            return {}
 
-    def record(self, tool: str, kind: str, key: str = "") -> None:
+    def record(self, tool: str, kind: str, key: str = "", detail: str = "") -> None:
         try:
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            now = datetime.now(timezone.utc).strftime(_STAMP_FORMAT)
             with self._lock:
-                ident = (str(tool), str(kind), str(key))
-                entry = self._entries.get(ident)
-                if entry is None:
-                    if len(self._entries) >= MAX_LIFT_ENTRIES:
-                        oldest = min(self._entries, key=lambda k: self._entries[k]["last_seen"])
-                        del self._entries[oldest]
-                    entry = self._entries[ident] = {"tool": ident[0], "kind": ident[1], "key": ident[2],
-                                                    "first_seen": now, "last_seen": now, "count": 0}
-                entry["count"] += 1
-                entry["last_seen"] = now
-                self._write(now)
+                ident = (str(tool), str(kind), str(key), str(detail))
+                pending = self._pending.get(ident)
+                if pending is None:
+                    if len(self._pending) >= MAX_LIFT_ENTRIES:
+                        oldest = min(self._pending, key=lambda i: (self._pending[i]["last_seen"], i))
+                        del self._pending[oldest]
+                    pending = self._pending[ident] = {"delta": 0, "first_seen": now, "last_seen": now}
+                pending["delta"] += 1
+                pending["last_seen"] = now
+                due = (ident not in self._known or self._write_failed or self._last_write is None
+                       or self._clock() - self._last_write >= LIFT_REWRITE_SECONDS)
+                if due:
+                    self._flush_locked()
         except Exception as exc:  # noqa: BLE001 - reporting must never break a tool call
             log.error("could not record a lift problem (%s)", type(exc).__name__)
 
-    def _write(self, now: str) -> None:
-        if not self._path:
-            return
-        data = {"entries": list(self._entries.values()), "updated_at": now}
+    def flush(self) -> None:
+        """Write anything still waiting (a failed write, or counts held back). Never raises."""
         try:
-            fd, tmp = tempfile.mkstemp(prefix=".lift-", dir=os.path.dirname(os.path.abspath(self._path)))
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(data, handle)
-                os.replace(tmp, self._path)
-            except BaseException:
+            with self._lock:
+                if self._pending:
+                    self._flush_locked()
+        except Exception as exc:  # noqa: BLE001
+            log.error("could not flush lift problems (%s)", type(exc).__name__)
+
+    def _flush_locked(self) -> None:
+        if not self._path:
+            self._known |= set(self._pending)
+            self._pending.clear()
+            return
+        try:
+            with open(self._path + ".lock", "a") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)  # released when the file closes
+                entries = self._read_disk()
+                for ident, pending in self._pending.items():
+                    entry = entries.get(ident)
+                    if entry is None:
+                        entries[ident] = {"tool": ident[0], "kind": ident[1], "key": ident[2], "detail": ident[3],
+                                          "first_seen": pending["first_seen"], "last_seen": pending["last_seen"],
+                                          "count": pending["delta"]}
+                    else:
+                        entry["count"] += pending["delta"]
+                        entry["first_seen"] = min(entry["first_seen"], pending["first_seen"])
+                        entry["last_seen"] = max(entry["last_seen"], pending["last_seen"])
+                ordered = sorted(entries.values(), key=_sweep_order)
+                kept = ordered[-MAX_LIFT_ENTRIES:]
+                data = {"entries": kept, "updated_at": datetime.now(timezone.utc).strftime(_STAMP_FORMAT)}
+                fd, tmp = tempfile.mkstemp(prefix=".lift-", dir=os.path.dirname(os.path.abspath(self._path)))
                 try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                        json.dump(data, handle)
+                    os.replace(tmp, self._path)
+                except BaseException:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
+            self._known = {(e["tool"], e["kind"], e["key"], e["detail"]) for e in kept}
+            self._pending.clear()
+            self._last_write = self._clock()
             self._write_failed = False
-        except Exception as exc:  # noqa: BLE001 - one error per outage, not per call
+        except Exception as exc:  # noqa: BLE001 - keep the occurrences and retry; one error per outage
             if not self._write_failed:
                 log.error("could not write %s (%s)", LIFT_STATUS_FILENAME, type(exc).__name__)
             self._write_failed = True
