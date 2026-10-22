@@ -49,21 +49,24 @@ def test_withhuman_echoes_a_2000_character_reasoning_exactly():
     assert reasoning.startswith("  ") and reasoning.endswith("\n") and "\n" in reasoning[:-1]
     assert not reasoning.isascii()
     gate = GateHolder(BASE_URL, TOKEN_FILE).get()
-    unique = uuid.uuid4().hex
-    call = Call(
-        key=uuid.uuid4().hex + uuid.uuid4().hex,
-        tool=TOOL,
-        arguments={"params": {}},
-        server=SERVER,
-        reasoning=reasoning,
-        context={"platform": "live-check", "session_key": f"agent:main:live-check:{unique}"},
-        resume={"framework": "hermes", "park_id": f"P-LIVE-{unique[:8]}",
-                "session_key": f"agent:main:live-check:{unique}"},
-    )
-    verdict = gate.check(call, can_pause=True)
-    if isinstance(verdict, Pending):
-        gate.client.cancel(verdict.request_id)
-        pytest.fail("pipeline did not approve instantly; a person may have been paged - request cancelled")
-    if isinstance(verdict, Deny):
-        pytest.fail(f"withHuman did not allow the call: status={verdict.status} reason={verdict.reason}")
-    assert isinstance(verdict, Allow), type(verdict).__name__
+    try:
+        unique = uuid.uuid4().hex
+        call = Call(
+            key=uuid.uuid4().hex + uuid.uuid4().hex,
+            tool=TOOL,
+            arguments={"params": {}},
+            server=SERVER,
+            reasoning=reasoning,
+            context={"platform": "live-check", "session_key": f"agent:main:live-check:{unique}"},
+            resume={"framework": "hermes", "park_id": f"P-LIVE-{unique[:8]}",
+                    "session_key": f"agent:main:live-check:{unique}"},
+        )
+        verdict = gate.check(call, can_pause=True)
+        if isinstance(verdict, Pending):
+            gate.client.cancel(verdict.request_id)
+            pytest.fail("pipeline did not approve instantly; a person may have been paged - request cancelled")
+        if isinstance(verdict, Deny):
+            pytest.fail(f"withHuman did not allow the call: status={verdict.status} reason={verdict.reason}")
+        assert isinstance(verdict, Allow), type(verdict).__name__
+    finally:
+        gate.client.close()
