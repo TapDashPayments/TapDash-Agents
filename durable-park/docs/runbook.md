@@ -863,6 +863,12 @@ put one there, each with its own name format:
 | a `config.yaml` outbound webhook subscribed to `pre_tool_call` (Hermes `agent/outbound_webhooks.py:236`) | `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name`, else its URL |
 | another Hermes plugin's `ctx.register_middleware("tool_request" or "tool_execution", ...)` (Hermes `hermes_cli/plugins.py:937`) | `<module>.<qualname>` of its function |
 
+**Hooks with two names (TAP2-129).** Hermes Deck's hook is `hermes_plugins.hermes_deck.hermes_deck_pre_tool_call`
+when Deck's bridge starts and `hermes_plugins.hermes_deck.events.on_pre_tool_call` when the bridge is off or fails to
+start. Listing either one accepts both (`OBSERVER_HOOK_ALIASES` in the plugin's `__init__.py`), so a bridge that does
+not come up no longer stops every tool call. List both anyway so the config says what is trusted, and review both
+paths (the composed one adds the bridge handler; the events one carries the `computer_use` `modify` path).
+
 Outbound webhooks only notify: the callback queues a POST and always returns `None`, so it can never change
 arguments and is safe to list. Shell hooks can return any directive their command prints (including `modify`), and
 the name holds the whole command, so review the script.
