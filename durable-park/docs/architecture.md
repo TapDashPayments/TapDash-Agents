@@ -114,6 +114,7 @@ flowchart LR
   approver(["Approver in the withHuman app"])
   qbo[("QuickBooks Online<br/>sandbox company")]
   lf[("Langfuse Cloud US<br/>trace store, 30 days")]
+  deckapp(["Deck app<br/>on your computer"])
 
   subgraph WH["withHuman cloud"]
     aap["AAP API<br/>approval requests"]
@@ -130,7 +131,9 @@ flowchart LR
       selfck["form self-check<br/>every 30 min"]
       mcp["MCP client wh"]
       lfp["Langfuse plugin<br/>(observer hook)"]
+      deckp["Hermes Deck plugin<br/>(observer hook)"]
     end
+    relay["Deck relay<br/>Tailscale only"]
     ledger[("ledger.db")]
     fstatus[("formcheck_status.json")]
     bstatus[("breaker_status.json")]
@@ -148,6 +151,9 @@ flowchart LR
   agent -->|"every tool call<br/>(except exempt)"| hook
   agent -->|"every turn, model call,<br/>tool call"| lfp
   lfp -->|"traces out, one way, full content;<br/>fails open"| lf
+  agent -->|"every tool call,<br/>watch only"| deckp
+  deckp -->|"events"| relay
+  deckapp <-->|"Tailscale, with a token"| relay
   hook -->|"saves the exact call"| ledger
   hook -->|"asks once: server park:slug,<br/>mcp:alias or hermes"| aap
   aap -->|"allow (tool runs), refuse,<br/>or pending (parked)"| hook
@@ -186,6 +192,7 @@ flowchart LR
 | Part | Code | What it does |
 |---|---|---|
 | Langfuse plugin (Nous Research's, patched by us) | Live since 2026-10-22: TapDash's patched copy `tapdash-langfuse`, in [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse) of this repo (changes listed in its `PATCHES.md`), installed as a symlink `~/.hermes/plugins/tapdash-langfuse` into the live clone. It replaced Nous Research's unpatched `langfuse` plugin, which is no longer enabled | Sends traces to Langfuse Cloud: one per turn, one generation per model call, one observation per tool call, full content ([runbook](runbook.md#tracing-langfuse)). The patched copy also sets the chat sender id as `userId`, names traces by platform and tags traces by configured patterns such as `park:P-...`. Its `pre_tool_call` hook only observes and is listed in `observer_hooks` (`hermes_plugins.tapdash_langfuse.on_pre_tool_call`; the function is byte-identical to upstream's). No durable-park code or approval behaviour changes. A one-way arrow out: Langfuse sends nothing back and cannot change a call. Tracing live since 2026-10-22 04:37 UTC (unpatched at first, patched copy since about 19:52 UTC). |
+| Hermes Deck plugin and relay (Hermes-Deck, third party) | Live since 2026-10-22: the plugin in `~/.hermes/plugins/hermes-deck`, the relay as the user service `hermes-deck-relay`. Shows the Deck app what the agent is doing; its one `pre_tool_call` hook is a reviewed observer ([runbook](runbook.md#hermes-deck-desktop-app)) |
 | plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook and middleware registries on every call for other plugins' `pre_tool_call` hooks and `tool_request` / `tool_execution` middleware (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
 | park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); lifts a `withhuman_context` note the model nested inside an argument object to the top level (gateway tools only, [section 4](#4-tool-call-form-check-then-one-question-to-withhuman)); checks the form (form-checked tools only), saves the call, and asks withHuman once, with the note as the approver's reason. An instant approval lets the tool run (row `allowed`; Hermes gets the lifted arguments when anything was lifted); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
