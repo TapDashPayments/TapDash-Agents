@@ -107,15 +107,12 @@ GATEWAY_DEFAULT_SCOPE = "default"
 
 
 def _whole_floats_to_ints(value: Any) -> Any:
-    """Recursively convert float values that are whole numbers into integers.
-
-    Optimized using type() checks for faster primitive dispatch during deep traversal.
-    """
-    if type(value) is float:
+    """Recursively convert float values that are whole numbers into integers."""
+    if isinstance(value, float):
         return int(value) if value.is_integer() else value
-    if type(value) is dict:
+    if isinstance(value, dict):
         return {k: _whole_floats_to_ints(v) for k, v in value.items()}
-    if type(value) is list:
+    if isinstance(value, list):
         return [_whole_floats_to_ints(v) for v in value]
     return value
 
@@ -124,7 +121,7 @@ def normalize_args(args: Any) -> Any:
     """Arguments as the gateway's approval pipeline sees them, for digesting only (never for dispatch).
 
     ⚡ Optimization: Perform single-pass structural copy, float-to-int conversion, and gateway scope/context
-    adjustments in one go rather than executing a expensive copy.deepcopy() followed by secondary traversal.
+    adjustments in one go rather than executing an expensive copy.deepcopy() followed by secondary traversal.
     Provides ~3-4x speedup for argument normalization and hashing.
 
     Top-level ``withhuman_context`` dropped; top-level ``withhuman_scope`` defaulted to
@@ -132,7 +129,7 @@ def normalize_args(args: Any) -> Any:
     floats become ints everywhere (live finding: the model sent ``2.0``, the gateway delivered ``2``, the
     same number to the server). Non-object arguments are returned as a copy, otherwise unchanged.
     """
-    if type(args) is dict:
+    if isinstance(args, dict):
         normalized = {}
         for k, v in args.items():
             if k == GATEWAY_CONTEXT_KEY:
@@ -141,7 +138,7 @@ def normalize_args(args: Any) -> Any:
         if GATEWAY_SCOPE_KEY not in normalized:
             normalized[GATEWAY_SCOPE_KEY] = GATEWAY_DEFAULT_SCOPE
         return normalized
-    elif type(args) is list:
+    elif isinstance(args, list):
         return [_whole_floats_to_ints(v) for v in args]
     else:
         return _whole_floats_to_ints(args)

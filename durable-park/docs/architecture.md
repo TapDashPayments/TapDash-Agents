@@ -379,7 +379,7 @@ Notes:
   the replay is not parked again.
 - Step 18: the bridge matches on the Hermes tool name (built the way Hermes builds it, `bridge.verify.hermes_tool_name`)
   and a digest of the arguments (`ledger.normalize_args`: ignores `withhuman_context`, defaults `withhuman_scope`,
-  treats `2.0` as `2`; names must be plain, see [the decision rule](#the-bridges-decision-rule)). The normalization is done in a single pass (no separate deep copy). Anything that does not match goes to a person - never auto-approved. The bridge keeps no
+  treats `2.0` as `2`; names must be plain, see [the decision rule](#the-bridges-decision-rule)). Anything that does not match goes to a person - never auto-approved. The bridge keeps no
   record of its answers. A retried delivery of the **same** gateway request gets the same answer, because the
   request never counts against itself.
 
