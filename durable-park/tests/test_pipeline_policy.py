@@ -20,14 +20,16 @@ PIPELINE = Path(__file__).resolve().parent.parent / "deploy" / "withhuman" / "en
 EXPECTED_ORDER = [
     "pa-park-money",
     "block-06ebcdd6",
-    "pa-gateway-other",
-    "pa-park-quickbooks-other",
+    "pa-gateway-read",
+    "qb-gateway-write-bridge",
+    "pa-park-quickbooks-read",
     "pa-hermes-read",
     "pa-hermes-local-deny",
+    "money-server-human",
     "pa-mcp-human",
     "pa-default-human",
     "hermes",
-    "approve-every-call",
+    "ask-unruled-call",
 ]
 
 MONEY_TYPES = [
@@ -76,14 +78,21 @@ REV8_HERMES = {
     },
 }
 
-REV8_APPROVE_EVERY_CALL = {
-    "id": "approve-every-call",
-    "name": "Approve every call",
+# The catch-all asks a person (safety/default-deny). It replaced rev 8's ``approve-every-call``, which approved every call
+# (money included) for every agent other than proto-agents, including a new tool whose Deck "Ask me" setting
+# was still a pending change.
+ASK_UNRULED_CALL = {
+    "id": "ask-unruled-call",
+    "name": "Ask about every unruled call",
     "type": "outcome",
     "enabled": True,
     "timeout": "50ms",
     "max_attempts": 1,
-    "config": {"outcome": "approve", "reason": "No rule sent this call to a person."},
+    "config": {
+        "outcome": "human",
+        "reason": "No rule covers this tool yet, so a person decides. Nothing unruled is auto-approved.",
+        "escalation_path": "notify-yaakov-yehuda",
+    },
 }
 
 REV8_QUICKBOOKS_WEBHOOK = {
@@ -204,7 +213,7 @@ def test_condition_ids_are_unique_uuids(blocks):
 
 def test_order_and_tail(blocks):
     assert [b["id"] for b in blocks] == EXPECTED_ORDER
-    assert blocks[-2:] == [REV8_HERMES, REV8_APPROVE_EVERY_CALL]
+    assert blocks[-2:] == [REV8_HERMES, ASK_UNRULED_CALL]
     assert blocks[1] == REV8_QUICKBOOKS_WEBHOOK
 
 
@@ -264,19 +273,50 @@ def test_park_money_outcome(blocks):
 QB = "mcp__wh__quickbooks__"
 DECISIONS = [
     ("proto-agents", "park:quickbooks", QB + "create_payment", "pa-park-money", "human"),
-    ("proto-agents", "park:quickbooks", QB + "search_customers", "pa-park-quickbooks-other", "approve"),
+    ("proto-agents", "park:quickbooks", QB + "search_customers", "pa-park-quickbooks-read", "approve"),
+    ("proto-agents", "park:quickbooks", QB + "get_company_info", "pa-park-quickbooks-read", "approve"),
+    # a non-money-looking QuickBooks write is no longer approved by name: the server makes it money (TAP2-115)
+    ("proto-agents", "park:quickbooks", QB + "create_customer", "money-server-human", "human"),
+    ("proto-agents", "park:quickbooks", QB + "update_company_info", "money-server-human", "human"),
+    ("proto-agents", "park:quickbooks", QB + "pay_vendor", "money-server-human", "human"),
+    ("proto-agents", "park:quickbooks", QB + "wire_funds", "money-server-human", "human"),
     ("proto-agents", "quickbooks", "create_payment", "block-06ebcdd6", "webhook"),
     ("proto-agents", "quickbooks", "create-bill", "block-06ebcdd6", "webhook"),
-    ("proto-agents", "quickbooks", "search_customers", "pa-gateway-other", "approve"),
+    ("proto-agents", "quickbooks", "search_customers", "pa-gateway-read", "approve"),
+    ("proto-agents", "quickbooks", "quickbooks__get_bill", "pa-gateway-read", "approve"),
+    # the gateway replay of any other QuickBooks write goes to the bridge: approved only with a matching approved park
+    ("proto-agents", "quickbooks", "create_customer", "qb-gateway-write-bridge", "webhook"),
+    ("proto-agents", "quickbooks", "pay_vendor", "qb-gateway-write-bridge", "webhook"),
     ("proto-agents", "park:docusign", "mcp__wh__docusign__createEnvelope", "pa-default-human", "human"),
     ("proto-agents", "hermes", "web_search", "pa-hermes-read", "approve"),
     ("proto-agents", "hermes", "terminal", "pa-hermes-local-deny", "deny"),
     ("proto-agents", "hermes", "process_manage", "pa-hermes-local-deny", "deny"),
     ("proto-agents", "hermes", "browser_navigate", "pa-default-human", "human"),
     ("proto-agents", "mcp:github", "mcp__github__x", "pa-mcp-human", "human"),
-    ("proto-agents", None, QB + "create_payment", "pa-default-human", "human"),
-    ("hermes", None, "terminal", "approve-every-call", "approve"),
+    ("proto-agents", None, QB + "create_payment", "money-server-human", "human"),
+    ("proto-agents", None, "some_tool", "pa-default-human", "human"),
+    ("hermes", None, "terminal", "ask-unruled-call", "human"),
+    ("new-agent", "brand-new-server", "brand_new_tool", "ask-unruled-call", "human"),
     ("hermes", None, "StripeRefund", "hermes", "human"),
+    # money by SERVER for every other agent: payments and accounting servers always ask
+    ("tapdash-ops", "quickbooks", "get_company_info", "money-server-human", "human"),
+    ("tapdash-ops", "quickbooks", "quickbooks__create_customer", "money-server-human", "human"),
+    ("tapdash-ops", "park:quickbooks", QB + "search_customers", "money-server-human", "human"),
+    ("tapdash-ops", "stripe", "list_customers", "money-server-human", "human"),
+    ("tapdash-ops", "maverick", "lookup", "money-server-human", "human"),
+    ("tapdash-ops", "accept-blue", "lookup", "money-server-human", "human"),
+    ("tapdash-ops", "authorize_net", "lookup", "money-server-human", "human"),
+    ("tapdash-ops", "mcp:payments", "mcp__payments__anything", "money-server-human", "human"),
+    ("tapdash-ops", "tapdash-pay", "anything", "money-server-human", "human"),
+    ("tapdash-ops", "mcp:accept_blue", "mcp__accept_blue__lookup", "money-server-human", "human"),
+    ("tapdash-ops", None, "mcp__wh__stripe__list_charges", "money-server-human", "human"),
+    # name heuristics are an extra: a money verb on any server asks too
+    ("tapdash-ops", "github", "pay_vendor", "money-server-human", "human"),
+    ("tapdash-ops", "github", "wire_funds", "money-server-human", "human"),
+    ("tapdash-ops", "acme", "send_money", "money-server-human", "human"),
+    ("tapdash-ops", "acme", "issue_refund", "money-server-human", "human"),
+    ("tapdash-content", "outlook", "send_mail", "ask-unruled-call", "human"),
+    ("tapdash-content", "mcp:reach", "mcp__reach__search", "ask-unruled-call", "human"),
 ]
 
 
@@ -293,3 +333,76 @@ def test_every_listed_hermes_tool_decides_as_its_block_says(blocks):
         assert len(leaf["value"]) == 12
         for tool in leaf["value"]:
             assert _decide(blocks, "proto-agents", "hermes", tool) == (block["id"], outcome)
+
+
+def test_no_unconditional_approve(blocks):
+    """Nothing unruled is ever auto-approved: the only top-level outcome block is the last one and it asks a
+    person, and no branch that approves has an empty or agent-only condition."""
+    outcomes = [b for b in blocks if b["type"] == "outcome"]
+    assert outcomes == [blocks[-1]]
+    assert blocks[-1]["config"]["outcome"] == "human"
+    assert blocks[-1]["config"]["escalation_path"] == "notify-yaakov-yehuda"
+    assert all(b["id"] != "approve-every-call" for b in blocks)
+    for block in blocks:
+        if block["type"] != "branch":
+            continue
+        inner = block["config"]["blocks"][0]
+        if inner["type"] == "outcome" and inner["config"]["outcome"] == "approve":
+            fields = {leaf["field"] for leaf in block_leaves(block)}
+            assert "/request/tool" in fields or "/request/server" in fields, block["id"]
+
+
+@pytest.mark.parametrize("agent", ["hermes", "tapdash-ops", "tapdash-content", "some-new-agent"])
+@pytest.mark.parametrize("server,tool", [
+    (None, "a_tool_nobody_has_seen"), ("hermes", "web_search"), ("outlook", "send_mail"), ("mcp:new", "mcp__new__x"),
+])
+def test_a_tool_with_no_rule_asks_for_any_agent(blocks, agent, server, tool):
+    assert _decide(blocks, agent, server, tool) == ("ask-unruled-call", "human")
+
+
+MONEY_SERVERS = ["quickbooks", "park:quickbooks", "stripe", "park:stripe", "mcp:stripe", "paypal", "square",
+                 "plaid", "maverick", "accept-blue", "accept_blue", "authorize-net", "authnet", "mcp:payments",
+                 "payments", "tapdash-pay", "mercury", "brex", "xero", "bill.com", "mcp:bank-feed"]
+
+
+@pytest.mark.parametrize("agent", ["proto-agents", "hermes", "tapdash-ops", "some-new-agent"])
+@pytest.mark.parametrize("server", MONEY_SERVERS)
+@pytest.mark.parametrize("tool", ["pay_vendor", "wire_funds", "create_customer", "do_the_thing", "batch_update"])
+def test_no_tool_on_a_money_server_is_approved(blocks, agent, server, tool):
+    """Money by server: any tool name on a payments or accounting server is never approved by a rule (a
+    QuickBooks gateway replay may only be approved by the bridge, which needs an approved park)."""
+    for name in (tool, f"quickbooks__{tool}", f"mcp__wh__{server.split(':')[-1].replace('-', '_')}__{tool}"):
+        _, outcome = _decide(blocks, agent, server, name)
+        assert outcome in ("human", "webhook", "deny"), (agent, server, name, outcome)
+
+
+def test_the_only_quickbooks_approvals_are_reads(blocks):
+    """The two QuickBooks approve rules name read verbs only (get/search/list/read/query/find)."""
+    for block_id in ("pa-gateway-read", "pa-park-quickbooks-read"):
+        block = next(b for b in blocks if b["id"] == block_id)
+        pattern = next(l["value"] for l in block_leaves(block) if l["field"] == "/request/tool")
+        assert "(get|search|list|read|query|find)[_-]" in pattern
+        for write in ("create_customer", "update_vendor", "delete_item", "pay_vendor", "void_invoice", "wire_funds"):
+            for name in (write, "quickbooks__" + write, QB + write):
+                assert not re.search(pattern, name), (block_id, name)
+
+
+def test_write_bridge_block_matches_the_money_bridge_block(blocks):
+    money_bridge = blocks[1]["config"]["blocks"][0]
+    write_bridge = next(b for b in blocks if b["id"] == "qb-gateway-write-bridge")["config"]["blocks"][0]
+    assert write_bridge["id"] != money_bridge["id"]
+    assert {k: v for k, v in write_bridge.items() if k != "id"} == {k: v for k, v in money_bridge.items() if k != "id"}
+
+
+def test_money_rule_is_before_every_non_proto_agents_rule(blocks):
+    ids = [b["id"] for b in blocks]
+    assert ids.index("money-server-human") < ids.index("hermes") < ids.index("ask-unruled-call")
+    outcome = next(b for b in blocks if b["id"] == "money-server-human")["config"]["blocks"][0]["config"]
+    assert outcome["outcome"] == "human" and outcome["escalation_path"] == "notify-yaakov-yehuda"
+
+
+def test_regexes_avoid_inline_flags_and_lookaround(blocks):
+    """withHuman's regex engine is not known to support (?i) or lookaround, so the file uses neither."""
+    for node in _all_condition_nodes(blocks):
+        if node.get("operator") == "regex":
+            assert "(?" not in node["value"], node["value"]

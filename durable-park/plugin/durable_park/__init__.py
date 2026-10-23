@@ -31,6 +31,18 @@ DEFAULT_AUDIT_KEY_FILE = "/etc/durable-park/audit_key"  # optional: org key with
 DEFAULT_AUDIT_BASE_URL = "https://app.withhuman.ai"
 EXECUTOR_TOOL = EXECUTE_SCHEMA["name"]
 HOOK_REGISTRY_UNAVAILABLE = "<hook registry unavailable>"
+# TAP2-129: Hermes Deck registers ONE pre_tool_call hook whose name depends on whether its bridge started.
+# Bridge up: hooks() wraps the events and bridge handlers with _compose() into ``hermes_deck_pre_tool_call``.
+# Bridge off (HERMES_DECK_BRIDGE=0, ``bridge: false``) or "Hermes Deck bridge could not start": the hook is the
+# bare ``events.on_pre_tool_call`` (the same function the composed one calls first). An admin who reviewed Deck
+# and listed either name in ``observer_hooks`` has reviewed both, so listing one accepts the other; otherwise a
+# bridge restart would refuse every tool call until someone edited the config. Nothing is accepted unless one of
+# the pair is listed.
+DECK_HOOK_NAMES = (
+    "hermes_plugins.hermes_deck.hermes_deck_pre_tool_call",
+    "hermes_plugins.hermes_deck.events.on_pre_tool_call",
+)
+OBSERVER_HOOK_ALIASES: tuple[tuple[str, ...], ...] = (DECK_HOOK_NAMES,)
 POLICY_STATUS_FILENAME = "tool_policy_status.json"
 POLICY_LOAD_FILENAME = "tool_policy_load.json"
 PLUGIN_LOAD_FILENAME = "plugin_load.json"  # the load proof: deploy/plugin_load_check.sh and the sweep read it
@@ -207,6 +219,16 @@ def _compile_form_checked(patterns: list[str]) -> list[re.Pattern]:
     return compiled
 
 
+def expand_observer_hooks(names: Any) -> frozenset[str]:
+    """``observer_hooks`` plus the other name(s) of any listed hook that registers under more than one name
+    (``OBSERVER_HOOK_ALIASES``; today Hermes Deck's two ``pre_tool_call`` names, TAP2-129)."""
+    allowed = set(names)
+    for group in OBSERVER_HOOK_ALIASES:
+        if allowed.intersection(group):
+            allowed.update(group)
+    return frozenset(allowed)
+
+
 def _callback_name(cb: Any) -> str:
     """``module.qualname`` of a hook callback (of its class, for a callable object)."""
     module = getattr(cb, "__module__", None) or type(cb).__module__
@@ -326,7 +348,7 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
     form_checked = _compile_form_checked(
         _names("form_checked_tools", ctx.get_config("form_checked_tools", list(DEFAULT_FORM_CHECKED_TOOLS))))
     exempt = _exempt_tools(ctx, form_checked)
-    observers = frozenset(_names("observer_hooks", ctx.get_config("observer_hooks", [])))
+    observers = expand_observer_hooks(_names("observer_hooks", ctx.get_config("observer_hooks", [])))
 
     ledger_path = ctx.get_config("ledger_path", str(Path(ctx.state.data_dir) / "ledger.db"))
     default_policy = str(Path(ledger_path).expanduser().parent / POLICY_STATUS_FILENAME)

@@ -44,7 +44,7 @@ When tool calls are processed by `gatecall.py`, `user_id` and `profile` context 
    - Chat messaging send tools (Telegram, Teams, Discord)
    - Status: **no rule yet.** The spec proposed one (§4.3 row 5, approve on the test VM), but it was never written:
      there is no messaging rule in `entry-pipeline.json`. A messaging call is a `hermes` call that no earlier block
-     matches, so it hits the pipeline's catch-all rule (block 8, `pa-default-human`) and asks an approver every time.
+     matches, so it hits the pipeline's catch-all rule (block 10, `pa-default-human`) and asks an approver every time.
 
 3. **Group C (Browser automation)**:
    - `browser_*` without credential fields.

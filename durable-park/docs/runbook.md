@@ -487,6 +487,21 @@ if its rules differ from the QuickBooks ones.
 
 ## Troubleshooting
 
+### Backup approver and unanswered approvals (TAP2-121)
+
+The sweep reads `/etc/durable-park/approvers.json` (root:root 0644, no secrets; the shape is in
+[`deploy/approvers.example.json`](../deploy/approvers.example.json)). With no file, approvals wait for their approver as
+before. With the file, a `parked` row whose approval request nobody answered:
+
+- after `primary_minutes`, when `backup_approver` is set: one alert line names the backup approver and their withHuman
+  escalation path (also posted to their own Teams webhook when `teams_webhook_env` names a set variable). The backup
+  can only decide it if they are on that escalation path in withHuman (Approval pipelines -> Escalation paths): add
+  them there first.
+- after the backup's `minutes` as well, or right after `primary_minutes` when `backup_approver` is `null`: the row is
+  DENIED with the note `no approver answered within N minutes ...; denied by the sweep`, and the chat is told by the
+  usual wake. The request stays open in withHuman; approving it later does nothing (the row is no longer `parked`).
+- an invalid file: one ALERT line, nothing changes until it reads again.
+
 ### An approver was asked twice for one action
 
 The park was approved, but the bridge did not confirm the gateway call, so withHuman asked a person again. That
@@ -862,6 +877,12 @@ put one there, each with its own name format:
 | a `config.yaml` `hooks:` shell hook for `pre_tool_call` (Hermes `agent/shell_hooks.py:376`) | `agent.shell_hooks.shell_hook[pre_tool_call:<command>]` |
 | a `config.yaml` outbound webhook subscribed to `pre_tool_call` (Hermes `agent/outbound_webhooks.py:236`) | `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name`, else its URL |
 | another Hermes plugin's `ctx.register_middleware("tool_request" or "tool_execution", ...)` (Hermes `hermes_cli/plugins.py:937`) | `<module>.<qualname>` of its function |
+
+**Hooks with two names (TAP2-129).** Hermes Deck's hook is `hermes_plugins.hermes_deck.hermes_deck_pre_tool_call`
+when Deck's bridge starts and `hermes_plugins.hermes_deck.events.on_pre_tool_call` when the bridge is off or fails to
+start. Listing either one accepts both (`OBSERVER_HOOK_ALIASES` in the plugin's `__init__.py`), so a bridge that does
+not come up no longer stops every tool call. List both anyway so the config says what is trusted, and review both
+paths (the composed one adds the bridge handler; the events one carries the `computer_use` `modify` path).
 
 Outbound webhooks only notify: the callback queues a POST and always returns `None`, so it can never change
 arguments and is safe to list. Shell hooks can return any directive their command prints (including `modify`), and

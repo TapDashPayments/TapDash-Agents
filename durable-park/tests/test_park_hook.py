@@ -14,7 +14,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import durable_park
-from durable_park import POLICY_MESSAGE, foreign_pre_tool_call_hooks, policy_problem, register
+from durable_park import (DECK_HOOK_NAMES, POLICY_MESSAGE, _callback_name, expand_observer_hooks,
+                          foreign_pre_tool_call_hooks, policy_problem, register)
 from durable_park.executor import EXECUTE_SCHEMA
 from durable_park.gatecall import GateHolder, build_call, bounded_http, make_gate
 from durable_park.ledger import Ledger, call_key
@@ -2333,3 +2334,45 @@ def test_build_call_stays_pure_when_the_note_is_cut(env):
                           args={"params": {}, "withhuman_context": "x" * 3000}, call_key="k" * 64, server="park:quickbooks")
     assert build_call(row).reasoning == build_call(row).reasoning == "x" * 2000
     assert not (env.tmp_path / "lift_status.json").exists()
+
+
+# TAP2-129: Hermes Deck's pre_tool_call hook has one of two names depending on whether its bridge started.
+def _named(module, qualname):
+    def hook(**kw):
+        return None
+    hook.__module__, hook.__qualname__ = module, qualname
+    return hook
+
+
+DECK_COMPOSED = _named("hermes_plugins.hermes_deck", "hermes_deck_pre_tool_call")
+DECK_EVENTS = _named("hermes_plugins.hermes_deck.events", "on_pre_tool_call")
+
+
+@pytest.mark.parametrize("listed", list(DECK_HOOK_NAMES))
+@pytest.mark.parametrize("registered", [DECK_COMPOSED, DECK_EVENTS])
+def test_either_deck_hook_name_listed_accepts_both(tmp_path, with_session, fake_withhuman, listed, registered):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token, "observer_hooks": [listed]})
+    register(ctx)
+    ctx.register_hook("pre_tool_call", registered)
+    hook = ctx.hook_lists["pre_tool_call"][0]
+    result = hook(tool_name="web_search", args={"q": 1}, session_id="s", tool_call_id="c")
+    assert result["message"].startswith("PARKED P-")  # not refused: it went on to ask withHuman
+    assert len(fake_withhuman.provider.requests) == 1
+
+
+@pytest.mark.parametrize("registered", [DECK_COMPOSED, DECK_EVENTS])
+def test_deck_hook_unlisted_is_still_refused(tmp_path, with_session, fake_withhuman, registered):
+    ctx = FakeCtx(tmp_path / "data", {"token_file": fake_withhuman.token, "observer_hooks": [FOREIGN_NAME]})
+    register(ctx)
+    ctx.register_hook("pre_tool_call", registered)
+    hook = ctx.hook_lists["pre_tool_call"][0]
+    result = hook(tool_name="web_search", args={"q": 1}, session_id="s", tool_call_id="c")
+    assert result["action"] == "block"
+    assert _callback_name(registered) in result["message"]
+    assert len(fake_withhuman.provider.requests) == 0
+
+
+def test_expand_observer_hooks_only_adds_the_pair():
+    assert expand_observer_hooks([]) == frozenset()
+    assert expand_observer_hooks(["x.y"]) == frozenset({"x.y"})
+    assert expand_observer_hooks([DECK_HOOK_NAMES[1], "x.y"]) == frozenset({*DECK_HOOK_NAMES, "x.y"})

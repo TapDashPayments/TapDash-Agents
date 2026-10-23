@@ -21,6 +21,10 @@
   place and says "+N more places, e.g. ..." for others), again once per 24 h while a count keeps growing (never for
   ``declared``, ``note_cut`` and ``note_not_text``, which are said once per tool), one when the report itself is unreadable (until it reads again), and one
   when the check itself fails (``lift_check_alert_state.json``; a recovery line follows)
+* a ``parked`` row with an approval request nobody answered (TAP2-121, only when ``--approvers-file`` exists):
+  after ``primary_minutes`` it is routed to the configured backup approver (one alert line naming them, also
+  posted to their own Teams webhook when one is configured); after the backup's ``minutes`` too, or at once
+  when no backup approver is configured, it is DENIED with a note saying why (the chat is told by the usual wake)
 * the markers ``lift_status.unwritable.<pid>`` (one per process that could not write ``lift_status.json``)
                                                        -> print one alert line per marker (and one when the last
   marker is gone; state in ``lift_unwritable_alert_state.json``)
@@ -53,6 +57,8 @@ sys.path.insert(0, os.path.join(_REPO, "receiver"))
 from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
 
 DEFAULT_SECRET_FILE = "/etc/durable-park/wake_secret"
+DEFAULT_APPROVERS_FILE = "/etc/durable-park/approvers.json"  # TAP2-121; absent = no timeout, parks wait as before
+APPROVER_STATE = "approver_alert_state.json"
 STALE_EXECUTING = timedelta(minutes=10)
 ORPHAN_PARK = timedelta(minutes=10)  # a parked row with no request id this old will never get one attached
 DEFAULT_RETENTION_DAYS = 30
@@ -129,6 +135,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--ledger", required=True, help="path of the ledger SQLite file")
     parser.add_argument("--wake-secret-file", default=DEFAULT_SECRET_FILE)
     parser.add_argument("--wake-url", default=DEFAULT_WAKE_URL)
+    parser.add_argument("--approvers-file", default=DEFAULT_APPROVERS_FILE,
+                        help="backup approver / unanswered-approval timeout config (TAP2-121); absent = off")
     parser.add_argument("--retention-days", type=_positive_int, default=DEFAULT_RETENTION_DAYS,
                         help="delete allowed/refused/cancelled rows not updated for this many days (>= 1)")
     return parser.parse_args(argv)
@@ -224,6 +232,138 @@ def _cancel_orphan_parks(ledger, now: datetime) -> None:
                              note="no approval request after 10 minutes (cancelled by the sweep)"):
             print(f"durable-park: {row.park_id} ({row.tool}) never got an approval request; "
                   "cancelled after 10 minutes", flush=True)
+
+
+class ApproversConfigError(ValueError):
+    pass
+
+
+def load_approvers(path: str) -> dict | None:
+    """The TAP2-121 settings, or None when the file does not exist (the feature is off and parks wait for their
+    approver as before). Shape::
+
+        {"primary_minutes": 60,
+         "backup_approver": null | {"name": "<person>", "escalation_path": "<withHuman path key>",
+                                    "minutes": 60, "teams_webhook_env": "<ENV VAR holding their webhook URL>"}}
+
+    ``backup_approver`` null means: after ``primary_minutes`` an unanswered approval is denied. Any other shape
+    raises ``ApproversConfigError`` (the sweep then alerts and changes nothing)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise ApproversConfigError(f"not JSON ({exc.msg})") from None
+    if not isinstance(data, dict):
+        raise ApproversConfigError("not a JSON object")
+
+    def minutes(value, key):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ApproversConfigError(f"{key} must be a whole number of minutes >= 1")
+        return value
+
+    out = {"primary_minutes": minutes(data.get("primary_minutes"), "primary_minutes"), "backup": None}
+    backup = data.get("backup_approver")
+    if backup is not None:
+        if not isinstance(backup, dict):
+            raise ApproversConfigError("backup_approver must be null or an object")
+        name = backup.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ApproversConfigError("backup_approver.name must be a non-empty string")
+        path_key = backup.get("escalation_path")
+        if path_key is not None and (not isinstance(path_key, str) or not path_key.strip()):
+            raise ApproversConfigError("backup_approver.escalation_path must be a non-empty string or absent")
+        env = backup.get("teams_webhook_env")
+        if env is not None and (not isinstance(env, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", env)):
+            raise ApproversConfigError("backup_approver.teams_webhook_env must be an environment variable name")
+        out["backup"] = {"name": " ".join(name.split())[:80],
+                         "escalation_path": path_key.strip() if path_key else None,
+                         "minutes": minutes(backup.get("minutes"), "backup_approver.minutes"),
+                         "teams_webhook_env": env}
+    return out
+
+
+def _route_unanswered(ledger, ledger_path: str, approvers_path: str, now: datetime) -> None:
+    """TAP2-121: a backup approver, or a clear denial, for approvals nobody answered.
+
+    Only ``parked`` rows WITH a request id are waiting on a person (rows without one are the orphan check's).
+    Routing prints one alert line per row (state in ``approver_alert_state.json``, so it is said once) and posts it
+    to the backup's own Teams webhook when ``teams_webhook_env`` names a set variable. A denial is a CAS
+    ``parked -> denied``: it never races an approval that landed first, and an approval that lands later at
+    withHuman does nothing (the row is no longer ``parked``, so the executor refuses and the gateway replay finds
+    no approved row). The chat hears the denial through the usual wake (a decided row not yet notified)."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    state_path = os.path.join(directory, APPROVER_STATE)
+    state = _load_state(state_path)
+    try:
+        config = load_approvers(approvers_path)
+    except ApproversConfigError as exc:
+        problem = _clean(str(exc), 200)
+        if state.get("config_problem") != problem:
+            print(f"durable-park ALERT: {approvers_path} is invalid ({problem}); no backup approver and no "
+                  "timeout until it is fixed (approvals wait as before).", flush=True)
+            state["config_problem"] = problem
+            _save_state(state_path, state)
+        return
+    except OSError as exc:
+        problem = f"unreadable ({type(exc).__name__})"
+        if state.get("config_problem") != problem:
+            print(f"durable-park ALERT: {approvers_path} is {problem}; no backup approver and no timeout until "
+                  "it is fixed (approvals wait as before).", flush=True)
+            state["config_problem"] = problem
+            _save_state(state_path, state)
+        return
+    if state.pop("config_problem", None) is not None:
+        print(f"durable-park: {approvers_path} reads again.", flush=True)
+    if config is None:
+        if state:
+            _save_state(state_path, {})
+        return
+    routed = state.setdefault("routed", {})
+    primary = timedelta(minutes=config["primary_minutes"])
+    backup = config["backup"]
+    waiting = set()
+    for row in ledger.list_by_status("parked"):
+        if not row.request_id:
+            continue
+        waiting.add(row.park_id)
+        try:
+            created = datetime.strptime(row.created_at, _STAMP).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        age = now - created
+        if age <= primary:
+            continue
+        if backup is not None and age <= primary + timedelta(minutes=backup["minutes"]):
+            if row.park_id in routed:
+                continue
+            where = f" (withHuman escalation path {backup['escalation_path']})" if backup["escalation_path"] else ""
+            line = (f"durable-park: approval for {row.park_id} ({row.tool}) unanswered for "
+                    f"{config['primary_minutes']} min; routed to backup approver {backup['name']}{where}. "
+                    f"Decide it in withHuman within {backup['minutes']} min or it is denied.")
+            print(line, flush=True)
+            routed[row.park_id] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            webhook = os.environ.get(backup["teams_webhook_env"] or "", "").strip() if backup["teams_webhook_env"] else ""
+            if webhook:
+                _post_teams(webhook, line)
+            continue
+        total = config["primary_minutes"] + (backup["minutes"] if backup else 0)
+        if backup is not None:
+            note = (f"no approver answered within {total} minutes (backup approver {backup['name']} included); "
+                    "denied by the sweep")
+        else:
+            note = (f"no approver answered within {total} minutes and no backup approver is configured; "
+                    "denied by the sweep")
+        if ledger.transition(row.park_id, "parked", "denied", note=note):
+            print(f"durable-park: {row.park_id} ({row.tool}) DENIED: {note}.", flush=True)
+            routed.pop(row.park_id, None)
+    for park_id in list(routed):
+        if park_id not in waiting:
+            del routed[park_id]
+    _save_state(state_path, state)
 
 
 def _apply_retention(ledger, now: datetime, days: int) -> None:
@@ -650,6 +790,10 @@ def _sweep(argv=None) -> int:
         _cancel_orphan_parks(ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
         _err(f"orphan cancel failed ({type(exc).__name__})")
+    try:
+        _route_unanswered(ledger, args.ledger, args.approvers_file, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+        _err(f"backup approver step failed ({type(exc).__name__})")
     try:
         _formcheck_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the self-check alert must never stop the sweep
