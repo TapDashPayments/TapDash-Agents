@@ -1,0 +1,5 @@
+{
+  "_comment": "TAP2-121. Install as /etc/durable-park/approvers.json (root:root 0644; no secrets). primary_minutes: how long Yaakov has to answer an approval. backup_approver: null = deny after primary_minutes with a clear note; or {\"name\": \"<the backup person>\", \"escalation_path\": \"<withHuman escalation path that includes them>\", \"minutes\": 60, \"teams_webhook_env\": \"<optional env var with their Teams webhook URL>\"}.",
+  "primary_minutes": 60,
+  "backup_approver": null
+}

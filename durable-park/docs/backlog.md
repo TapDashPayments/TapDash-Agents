@@ -90,7 +90,7 @@ The agent's keys moved to Bitwarden Secrets Manager on 2026-10-22/23 ([runbook](
   decision is left: stop the sweep's Telegram cron delivery so alerts go only to Teams.
 - Widen `risky_tools` beyond QuickBooks money moves: withHuman decides every call (spec 2026-10-21 §4.2); today the
   agent has no terminal or file tools, so nothing else needs gating yet.
-- More than one approver, or a backup approver (a withHuman escalation-path change; no code).
+- More than one approver, or a backup approver: branch `safety/default-deny` adds the sweep side (TAP2-121, `/etc/durable-park/approvers.json`: route to a named backup after N minutes, deny when none is configured); naming the person and adding them to a withHuman escalation path is still to do.
 - Tool Search: on since 2026-10-21 19:59 UTC and verified ([record](acceptance-2026-10-21-tool-search.md)); what is left is `docs/tool-rollout.md` (spec [section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md), section 8 item 9).
 - Replace the GitHub login on the VM (`gh` as the admin user `ubuntu`) with a **fine-grained token limited to this repository**. Today it is a broad classic OAuth token (scopes `repo`, `workflow`, `read:org`, `gist`) that reaches every repository of that account ([runbook](runbook.md#open-a-pull-request-from-the-vm)).
 - Optional: run the sweep from a systemd timer instead of Hermes cron, so it can alert when the gateway is down (today it runs inside the gateway, so a dead gateway also silences it). The cost is about 1 s of CPU per run, effectively negligible.

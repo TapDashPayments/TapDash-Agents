@@ -487,6 +487,21 @@ if its rules differ from the QuickBooks ones.
 
 ## Troubleshooting
 
+### Backup approver and unanswered approvals (TAP2-121)
+
+The sweep reads `/etc/durable-park/approvers.json` (root:root 0644, no secrets; the shape is in
+[`deploy/approvers.example.json`](../deploy/approvers.example.json)). With no file, approvals wait for their approver as
+before. With the file, a `parked` row whose approval request nobody answered:
+
+- after `primary_minutes`, when `backup_approver` is set: one alert line names the backup approver and their withHuman
+  escalation path (also posted to their own Teams webhook when `teams_webhook_env` names a set variable). The backup
+  can only decide it if they are on that escalation path in withHuman (Approval pipelines -> Escalation paths): add
+  them there first.
+- after the backup's `minutes` as well, or right after `primary_minutes` when `backup_approver` is `null`: the row is
+  DENIED with the note `no approver answered within N minutes ...; denied by the sweep`, and the chat is told by the
+  usual wake. The request stays open in withHuman; approving it later does nothing (the row is no longer `parked`).
+- an invalid file: one ALERT line, nothing changes until it reads again.
+
 ### An approver was asked twice for one action
 
 The park was approved, but the bridge did not confirm the gateway call, so withHuman asked a person again. That

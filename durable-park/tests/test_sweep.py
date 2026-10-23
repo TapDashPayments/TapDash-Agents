@@ -1121,3 +1121,110 @@ def test_a_crashing_sweep_still_posts_what_it_printed_and_raises(world, monkeypa
     with pytest.raises(RuntimeError, match="bug"):  # the sweep's own error is not hidden
         world.main(monkeypatch)
     assert len(sent) == 1 and "outcome UNKNOWN" in _card_text(sent[0][1])
+
+
+
+# TAP2-121: backup approver / unanswered-approval timeout -------------------------------------------------------
+
+def write_approvers(tmp_path, data):
+    path = tmp_path / "approvers.json"
+    path.write_text(data if isinstance(data, str) else json.dumps(data))
+    return str(path)
+
+
+BACKUP = {"name": "Backup Person", "escalation_path": "notify-backup", "minutes": 30}
+
+
+def test_no_approvers_file_leaves_waiting_parks_alone(world, monkeypatch, capsys, tmp_path):
+    park_id = world.row("parked")
+    world.backdate(park_id, 600)
+    world.main(monkeypatch, "--approvers-file", str(tmp_path / "absent.json"))
+    assert world.ledger.get(park_id).status == "parked"
+    assert "DENIED" not in capsys.readouterr().out
+
+
+def test_no_backup_configured_denies_after_primary_minutes(world, monkeypatch, capsys, tmp_path):
+    path = write_approvers(tmp_path, {"primary_minutes": 60, "backup_approver": None})
+    young, old = world.row("parked"), world.row("parked")
+    world.backdate(young, 59)
+    world.backdate(old, 61)
+    world.main(monkeypatch, "--approvers-file", path)
+    assert world.ledger.get(young).status == "parked"
+    row = world.ledger.get(old)
+    assert row.status == "denied" and row.decided_by is None
+    assert row.note == ("no approver answered within 60 minutes and no backup approver is configured; "
+                        "denied by the sweep")
+    out = capsys.readouterr().out
+    assert f"durable-park: {old} ({TOOL}) DENIED: no approver answered within 60 minutes" in out
+    assert old in [p for p, _, _ in world.posted]  # the chat is told through the usual wake
+
+
+def test_backup_is_routed_once_then_denied_after_its_minutes(world, monkeypatch, capsys, tmp_path):
+    path = write_approvers(tmp_path, {"primary_minutes": 60, "backup_approver": BACKUP})
+    park_id = world.row("parked")
+    world.backdate(park_id, 61)
+    world.main(monkeypatch, "--approvers-file", path)
+    out = capsys.readouterr().out
+    assert (f"durable-park: approval for {park_id} ({TOOL}) unanswered for 60 min; routed to backup approver "
+            "Backup Person (withHuman escalation path notify-backup). Decide it in withHuman within 30 min or it "
+            "is denied.") in out
+    assert world.ledger.get(park_id).status == "parked"
+    world.main(monkeypatch, "--approvers-file", path)
+    assert "routed to backup" not in capsys.readouterr().out  # said once
+    world.backdate(park_id, 91)
+    world.main(monkeypatch, "--approvers-file", path)
+    row = world.ledger.get(park_id)
+    assert row.status == "denied"
+    assert "backup approver Backup Person included" in row.note
+    assert "DENIED" in capsys.readouterr().out
+
+
+def test_backup_teams_webhook_gets_the_routing_line(world, monkeypatch, capsys, tmp_path):
+    path = write_approvers(tmp_path, {"primary_minutes": 5,
+                                      "backup_approver": {**BACKUP, "teams_webhook_env": "BACKUP_TEAMS_URL"}})
+    monkeypatch.setenv("BACKUP_TEAMS_URL", "https://example.invalid/hook")
+    posts = []
+    monkeypatch.setattr(sweep, "_post_teams", lambda url, text: posts.append((url, text)))
+    park_id = world.row("parked")
+    world.backdate(park_id, 6)
+    world.main(monkeypatch, "--approvers-file", path)
+    assert len(posts) == 1 and posts[0][0] == "https://example.invalid/hook"
+    assert park_id in posts[0][1] and "Backup Person" in posts[0][1]
+
+
+def test_an_approval_that_landed_first_is_never_denied(world, monkeypatch, capsys, tmp_path):
+    path = write_approvers(tmp_path, {"primary_minutes": 1, "backup_approver": None})
+    approved = world.row("approved")
+    world.backdate(approved, 600)
+    orphan = world.row("parked", request_id=None)  # no request: the orphan check's, not this step's
+    world.backdate(orphan, 5)
+    world.main(monkeypatch, "--approvers-file", path)
+    assert world.ledger.get(approved).status == "approved"
+    assert world.ledger.get(orphan).status == "parked"
+
+
+@pytest.mark.parametrize("bad", [
+    "{not json", "[]", {"primary_minutes": 0}, {"primary_minutes": "60"}, {"primary_minutes": True},
+    {"primary_minutes": 60, "backup_approver": "someone"},
+    {"primary_minutes": 60, "backup_approver": {"name": "", "minutes": 5}},
+    {"primary_minutes": 60, "backup_approver": {"name": "X"}},
+    {"primary_minutes": 60, "backup_approver": {"name": "X", "minutes": 5, "teams_webhook_env": "https://x"}},
+])
+def test_invalid_approvers_file_alerts_once_and_changes_nothing(world, monkeypatch, capsys, tmp_path, bad):
+    path = write_approvers(tmp_path, bad)
+    park_id = world.row("parked")
+    world.backdate(park_id, 600)
+    world.main(monkeypatch, "--approvers-file", path)
+    assert world.ledger.get(park_id).status == "parked"
+    assert "approvers.json is invalid" in capsys.readouterr().out
+    world.main(monkeypatch, "--approvers-file", path)
+    assert "is invalid" not in capsys.readouterr().out
+    write_approvers(tmp_path, {"primary_minutes": 60000, "backup_approver": None})
+    world.main(monkeypatch, "--approvers-file", path)
+    assert "reads again" in capsys.readouterr().out
+
+
+def test_example_approvers_file_is_valid_and_has_no_person():
+    example = Path(sweep.__file__).resolve().parent.parent / "deploy" / "approvers.example.json"
+    config = sweep.load_approvers(str(example))
+    assert config == {"primary_minutes": 60, "backup": None}
