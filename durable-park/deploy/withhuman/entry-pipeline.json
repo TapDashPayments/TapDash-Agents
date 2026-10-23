@@ -429,15 +429,16 @@
       }
     },
     {
-      "id": "approve-every-call",
-      "name": "Approve every call",
+      "id": "ask-unruled-call",
+      "name": "Ask about every unruled call",
       "type": "outcome",
       "enabled": true,
       "timeout": "50ms",
       "max_attempts": 1,
       "config": {
-        "outcome": "approve",
-        "reason": "No rule sent this call to a person."
+        "outcome": "human",
+        "reason": "No rule covers this tool yet, so a person decides. Nothing unruled is auto-approved.",
+        "escalation_path": "notify-yaakov-yehuda"
       }
     }
   ]

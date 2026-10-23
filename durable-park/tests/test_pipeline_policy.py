@@ -27,7 +27,7 @@ EXPECTED_ORDER = [
     "pa-mcp-human",
     "pa-default-human",
     "hermes",
-    "approve-every-call",
+    "ask-unruled-call",
 ]
 
 MONEY_TYPES = [
@@ -76,14 +76,21 @@ REV8_HERMES = {
     },
 }
 
-REV8_APPROVE_EVERY_CALL = {
-    "id": "approve-every-call",
-    "name": "Approve every call",
+# The catch-all asks a person (safety/default-deny). It replaced rev 8's ``approve-every-call``, which approved every call
+# (money included) for every agent other than proto-agents, including a new tool whose Deck "Ask me" setting
+# was still a pending change.
+ASK_UNRULED_CALL = {
+    "id": "ask-unruled-call",
+    "name": "Ask about every unruled call",
     "type": "outcome",
     "enabled": True,
     "timeout": "50ms",
     "max_attempts": 1,
-    "config": {"outcome": "approve", "reason": "No rule sent this call to a person."},
+    "config": {
+        "outcome": "human",
+        "reason": "No rule covers this tool yet, so a person decides. Nothing unruled is auto-approved.",
+        "escalation_path": "notify-yaakov-yehuda",
+    },
 }
 
 REV8_QUICKBOOKS_WEBHOOK = {
@@ -204,7 +211,7 @@ def test_condition_ids_are_unique_uuids(blocks):
 
 def test_order_and_tail(blocks):
     assert [b["id"] for b in blocks] == EXPECTED_ORDER
-    assert blocks[-2:] == [REV8_HERMES, REV8_APPROVE_EVERY_CALL]
+    assert blocks[-2:] == [REV8_HERMES, ASK_UNRULED_CALL]
     assert blocks[1] == REV8_QUICKBOOKS_WEBHOOK
 
 
@@ -275,7 +282,9 @@ DECISIONS = [
     ("proto-agents", "hermes", "browser_navigate", "pa-default-human", "human"),
     ("proto-agents", "mcp:github", "mcp__github__x", "pa-mcp-human", "human"),
     ("proto-agents", None, QB + "create_payment", "pa-default-human", "human"),
-    ("hermes", None, "terminal", "approve-every-call", "approve"),
+    ("hermes", None, "terminal", "ask-unruled-call", "human"),
+    ("tapdash-content", "outlook", "send_mail", "ask-unruled-call", "human"),
+    ("new-agent", "brand-new-server", "brand_new_tool", "ask-unruled-call", "human"),
     ("hermes", None, "StripeRefund", "hermes", "human"),
 ]
 
@@ -293,3 +302,28 @@ def test_every_listed_hermes_tool_decides_as_its_block_says(blocks):
         assert len(leaf["value"]) == 12
         for tool in leaf["value"]:
             assert _decide(blocks, "proto-agents", "hermes", tool) == (block["id"], outcome)
+
+
+def test_no_unconditional_approve(blocks):
+    """Nothing unruled is ever auto-approved: the only top-level outcome block is the last one and it asks a
+    person, and no branch that approves has an empty or agent-only condition."""
+    outcomes = [b for b in blocks if b["type"] == "outcome"]
+    assert outcomes == [blocks[-1]]
+    assert blocks[-1]["config"]["outcome"] == "human"
+    assert blocks[-1]["config"]["escalation_path"] == "notify-yaakov-yehuda"
+    assert all(b["id"] != "approve-every-call" for b in blocks)
+    for block in blocks:
+        if block["type"] != "branch":
+            continue
+        inner = block["config"]["blocks"][0]
+        if inner["type"] == "outcome" and inner["config"]["outcome"] == "approve":
+            fields = {leaf["field"] for leaf in block_leaves(block)}
+            assert "/request/tool" in fields or "/request/server" in fields, block["id"]
+
+
+@pytest.mark.parametrize("agent", ["hermes", "tapdash-ops", "tapdash-content", "some-new-agent"])
+@pytest.mark.parametrize("server,tool", [
+    (None, "a_tool_nobody_has_seen"), ("hermes", "web_search"), ("outlook", "send_mail"), ("mcp:new", "mcp__new__x"),
+])
+def test_a_tool_with_no_rule_asks_for_any_agent(blocks, agent, server, tool):
+    assert _decide(blocks, agent, server, tool) == ("ask-unruled-call", "human")

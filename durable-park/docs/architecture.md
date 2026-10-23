@@ -312,7 +312,7 @@ configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 
 | 7 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
 | 8 | `pa-default-human` | any other `proto-agents` call (including a missing server) | Ask an approver |
 | 9 | `hermes` | other agents: tool name contains `Stripe` | Ask an approver |
-| 10 | `approve-every-call` | everything else | Approve |
+| 10 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
 
 Rev 8 and the earlier approve-all behaviour end when the revision above is activated; activate it before this park
 hook goes live. A tool name missing from rules 5 and 6 falls through to rule 8, so a person decides.

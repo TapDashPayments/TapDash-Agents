@@ -374,7 +374,7 @@ slug. Every "ask an approver" uses the escalation path `notify-yaakov-yehuda`.
 | 7 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
 | 8 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
 | 9 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
-| 10 | `approve-every-call` | everything else | Approve |
+| 10 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
 
 The exact tool lists and regexes are in the JSON file; the file wins over this table. A tool that no block names
 falls to block 8, so a person decides. If DocuSign is ever added, its six write tools need their own block (their
