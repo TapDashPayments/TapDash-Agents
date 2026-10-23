@@ -1162,19 +1162,27 @@ for the old v1 calls** (`/api/public/traces`, `/api/public/observations`, `/api/
 observations call, or `npx langfuse-cli` (the Langfuse agent skill recommends it). Load the keys into the process
 only: never put them on a command line (they would show in `ps` and in shell history) and never print them.
 
-**Note (2026-10-23):** the two scripts below read the keys from `~/.hermes/.env`. The keys are now in Bitwarden, so
-they are no longer there, and the scripts will not find them. Only the base URL is still in `.env`. Until the scripts
-are updated, type the two keys into the script's environment with `read -rs` (no echo) for that one run. This change
-was not re-tested.
+The two scripts below take the base URL from `~/.hermes/.env` and fetch the two keys from Bitwarden inside the
+script ([Secrets: Bitwarden](#secrets-bitwarden)), with the `bws` tool Hermes installed. Nothing is printed or put on a
+command line. Both were run live on 2026-10-23. Run them as `hermes`.
 
 ```sh
 python3 - <<'PY'
-import base64, json, os, urllib.parse, urllib.request
+import base64, glob, json, os, subprocess, urllib.parse, urllib.request
+H = os.path.expanduser("~/.hermes")
 env = {}
-for line in open(os.path.expanduser("~/.hermes/.env")):
-    if line.startswith("HERMES_LANGFUSE_"):
-        k, _, v = line.rstrip("\n").partition("=")
+for line in open(H + "/.env"):                      # the base URL and the Bitwarden token are in .env
+    k, _, v = line.rstrip("\n").partition("=")
+    if k.startswith("HERMES_LANGFUSE_") or k == "BWS_ACCESS_TOKEN":
         env[k] = v.strip().strip("'\"")
+# The two keys are in Bitwarden (see "Secrets: Bitwarden"). bws gets its token from the environment, never argv.
+bws = sorted(glob.glob(H + "/tools/bws-*/bws"))[-1]
+listed = subprocess.run([bws, "secret", "list", "94af3d93-ad3d-486b-908d-b4ec00050dfd", "--output", "json"],
+                        capture_output=True, text=True, check=True,
+                        env=dict(os.environ, BWS_ACCESS_TOKEN=env.pop("BWS_ACCESS_TOKEN")))
+for s in json.loads(listed.stdout):
+    if s["key"] in ("HERMES_LANGFUSE_PUBLIC_KEY", "HERMES_LANGFUSE_SECRET_KEY"):
+        env[s["key"]] = s["value"]
 auth = base64.b64encode(
     (env["HERMES_LANGFUSE_PUBLIC_KEY"] + ":" + env["HERMES_LANGFUSE_SECRET_KEY"]).encode()).decode()
 base = env["HERMES_LANGFUSE_BASE_URL"] + "/api/public/v2/observations"
@@ -1195,7 +1203,7 @@ PY
 
 Change `fromStartTime` (UTC) to the start of the window you want. Print only what you need from each row (name, type,
 level, trace id): the rows hold full chat and tool content. With `npx langfuse-cli`, export the keys into the
-process environment the same way (from the `.env` lines, without echoing) and do not pass them as arguments.
+process environment the same way (fetched from Bitwarden, without echoing) and do not pass them as arguments.
 
 ### Find everything about one approval
 
@@ -1210,12 +1218,21 @@ the approval message.
 
 ```sh
 python3 - <<'PY'
-import base64, json, os, urllib.parse, urllib.request
+import base64, glob, json, os, subprocess, urllib.parse, urllib.request
+H = os.path.expanduser("~/.hermes")
 env = {}
-for line in open(os.path.expanduser("~/.hermes/.env")):
-    if line.startswith("HERMES_LANGFUSE_"):
-        k, _, v = line.rstrip("\n").partition("=")
+for line in open(H + "/.env"):                      # the base URL and the Bitwarden token are in .env
+    k, _, v = line.rstrip("\n").partition("=")
+    if k.startswith("HERMES_LANGFUSE_") or k == "BWS_ACCESS_TOKEN":
         env[k] = v.strip().strip("'\"")
+# The two keys are in Bitwarden (see "Secrets: Bitwarden"). bws gets its token from the environment, never argv.
+bws = sorted(glob.glob(H + "/tools/bws-*/bws"))[-1]
+listed = subprocess.run([bws, "secret", "list", "94af3d93-ad3d-486b-908d-b4ec00050dfd", "--output", "json"],
+                        capture_output=True, text=True, check=True,
+                        env=dict(os.environ, BWS_ACCESS_TOKEN=env.pop("BWS_ACCESS_TOKEN")))
+for s in json.loads(listed.stdout):
+    if s["key"] in ("HERMES_LANGFUSE_PUBLIC_KEY", "HERMES_LANGFUSE_SECRET_KEY"):
+        env[s["key"]] = s["value"]
 auth = base64.b64encode(
     (env["HERMES_LANGFUSE_PUBLIC_KEY"] + ":" + env["HERMES_LANGFUSE_SECRET_KEY"]).encode()).decode()
 flt = [{"type": "arrayOptions", "column": "traceTags", "operator": "any of", "value": ["park:P-XXXXXXXX"]}]
@@ -1243,8 +1260,8 @@ SDK writes into every span's metadata (`scope.attributes.public_key`); it is an 
 To repeat it, as `hermes`, in one process that never prints a candidate or a match:
 
 1. Build the candidate list: every `.env` value whose name contains `KEY`, `TOKEN`, `SECRET` or `PASSWORD` and that is
-   at least 12 characters long (since 2026-10-22/23 the Teams, Telegram and Langfuse keys are in Bitwarden, so add them to
-   the list by another route), plus the contents of each file under `/etc/durable-park/` that `hermes` can read.
+   at least 12 characters long (since 2026-10-22/23 the Teams, Telegram and Langfuse keys are in Bitwarden: add them to the list by
+   fetching them the same way as in [Read traces](#read-traces)), plus the contents of each file under `/etc/durable-park/` that `hermes` can read.
 2. Fetch the observations with the v2 call under [Read traces](#read-traces).
 3. For each observation, search its whole JSON for each candidate as a literal substring, and for the shapes `sk-lf-`,
    `pk-lf-`, a Telegram bot token, `Bearer`, `who_` and any 13 to 19 digit run that passes the Luhn check.
