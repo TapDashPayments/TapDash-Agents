@@ -150,6 +150,22 @@ flowchart LR
   sweep -->|"alert Adaptive Card"| teams
 ```
 
+Part | What it does | Where it lives
+|---|---|---|
+| durable-park plugin | Stops risky calls, saves them in the ledger, opens the approval, wakes the chat, runs the approved call once | `durable-park/plugin/` |
+| Bridge | Answers withHuman "is this exact call approved?" — checks withHuman itself, read-only, keeps no records | `durable-park/bridge/` |
+| Wake receiver | Takes withHuman's signed "decision made" webhook and wakes the plugin so the agent can finish the job | `durable-park/receiver/` |
+| Sweep | Every 5 minutes: re-wakes missed decisions, cancels stuck parked rows, routes unanswered approvals to a backup approver or denies them, sends alerts | `durable-park/scripts/` |
+| Tool lockdown and deploy | systemd units, deploy scripts, tunnel image build that limit and run the agent | `durable-park/deploy/` |
+| Docs check | Keeps docs, diagrams and the docs map in step with the code (pre-push hook and CI) | `tools/docs_check/` |
+| Hermes agent | The AI that chats with people and tries tools | runs on the VM (not in this repo) |
+| withHuman | Approvals, pipeline rules, escalation paths, the QuickBooks gateway | hosted service (`app.withhuman.ai`) |
+| QuickBooks sandbox | The fake books the agent acts on during testing | QuickBooks Online (sandbox) |
+| Langfuse cloud | Stores traces of chats and tool calls so people can review them | hosted service (`us.cloud.langfuse.com`) |
+| Telegram and Microsoft Teams | Where people chat with the agent | messaging services |
+| devtunnel | Forwards Teams messages into the gateway on the VM | runs as user `hermes` on the VM |
+| wh-tunnel container | Holds the QuickBooks tool server and dials out to withHuman; the agent never holds QuickBooks keys | Docker container on the VM |
+
 What does what:
 
 - **Hermes agent** (Linux user `hermes`): the AI. It talks to people and tries to use tools.
