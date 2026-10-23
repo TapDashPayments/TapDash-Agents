@@ -61,6 +61,7 @@ running on the test VM.
 | fastjsonschema | Checks a call's arguments against the tool's rules (copied into the plugin, pinned) | 2.22.2 | BSD-3-Clause | [github](https://github.com/horejsek/python-fastjsonschema) |
 | SQLite | The ledger: every parked call and its state | system | public domain | [site](https://sqlite.org) |
 | Tailscale (+ Funnel) | Admin access to the VM; Funnel gives withHuman a public HTTPS address for the receiver and bridge | system | client BSD-3-Clause; service is Tailscale's | [site](https://tailscale.com) |
+| Bitwarden Secrets Manager + `bws` CLI | Holds the agent's Teams, Telegram and Langfuse keys; Hermes pulls them at every start ([runbook](durable-park/docs/runbook.md#secrets-bitwarden)). `bws` is installed by Hermes's package manager | `bws` 2.0.0 | Bitwarden SDK License (source-available; read from GitHub's license note, not checked in full) | [github](https://github.com/bitwarden/sdk-sm) · [site](https://bitwarden.com/products/secrets-manager/) |
 | Docker | Runs the tunnel container | system | Apache-2.0 | [site](https://www.docker.com) |
 | systemd | Runs the gateway, receiver, bridge and their restarts | system | LGPL-2.1 | [site](https://systemd.io) |
 | Telegram | Where people chat with the test bot, and where alerts go (they also go to Teams) | - | Telegram's service | [site](https://telegram.org) |

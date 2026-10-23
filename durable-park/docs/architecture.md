@@ -705,7 +705,8 @@ System users behind that table:
 
 ## 7. Secrets and who can read them
 
-All secrets live in `/etc/durable-park/` on the VM. They are typed in by an admin (never pasted into chat, never in
+The agent's own keys (Teams, Telegram, Langfuse) live in Bitwarden Secrets Manager, described below the table. All of
+durable-park's secrets live in `/etc/durable-park/` on the VM. They are typed in by an admin (never pasted into chat, never in
 the repo) and never printed by any script.
 
 | File | Mode | Read by | Used for |
@@ -718,7 +719,9 @@ the repo) and never printed by any script.
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
 | `audit_key` | 0640 root:hermes | bridge (every gateway call; systemd copies it when the bridge starts: `LoadCredential`), plugin (optional; reads the file) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
 
-The Langfuse keys are not in this folder: they are `HERMES_LANGFUSE_PUBLIC_KEY` and `HERMES_LANGFUSE_SECRET_KEY` in `~hermes/.hermes/.env`, typed in by an admin like the rest ([runbook](runbook.md#tracing-langfuse)). The key pair gives full read and write access to the project's traces, and with capture mode `full` the traces hold all conversations, so treat the keys like the other secrets: typed in by an admin with `read -rs` (no echo), never in chat, rotated before production.
+The Langfuse keys are not in this folder. Since 2026-10-22/23 they are in **Bitwarden Secrets Manager** with the other agent keys (`TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID`, `TELEGRAM_BOT_TOKEN`, `HERMES_LANGFUSE_PUBLIC_KEY`, `HERMES_LANGFUSE_SECRET_KEY`). Hermes pulls them at every start with its built-in `secrets bitwarden` support. The one key left in `~hermes/.hermes/.env` for this is `BWS_ACCESS_TOKEN`, which opens the Bitwarden project "TapDash Agents" ([runbook](runbook.md#secrets-bitwarden)). The Langfuse key pair gives full read and write access to the project's traces, and with capture mode `full` the traces hold all conversations, so treat the keys like the other secrets: never in chat, rotated before production.
+
+**Trust boundary:** durable-park's own secrets (the files in the table above and the `command` secret source `/opt/durable-park/libexec/hermes-secrets`, 2 secrets) are deliberately **not** in the agent's Bitwarden project. So the agent's access token cannot read them, and a leak of that token does not reach the approval system. The owner keeps copies of them in his personal password vault.
 
 Which of these files an agent could still read if it ever got a terminal or file tool is in
 [section 0](#0-how-strong-is-it-today). See also backlog items 0 and 7.
