@@ -108,24 +108,71 @@
       }
     },
     {
-      "id": "pa-gateway-other",
-      "name": "Gateway: QuickBooks, not a money move",
+      "id": "pa-gateway-read",
+      "name": "Gateway: QuickBooks read",
       "type": "branch",
       "enabled": true,
       "timeout": "50ms",
       "max_attempts": 1,
       "config": {
         "when": {
-          "id": "7d9338fc-a6cd-4489-a16c-c7aabf94d49f",
+          "id": "97ea0c51-53aa-4a90-b385-8cd50bc2c516",
           "all": [
             {
-              "id": "6ec6974a-87b1-4d88-b9e1-0fec86226b32",
+              "id": "b8b503d7-7407-4a3b-8c4c-48c64fa5685e",
               "field": "/agent/slug",
               "operator": "equals",
               "value": "proto-agents"
             },
             {
-              "id": "710edce8-f6e1-444a-8613-a82f17ddebb1",
+              "id": "f435c5c1-46f2-4c7e-8371-d6fa1c994409",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "quickbooks"
+            },
+            {
+              "id": "a5c02626-773b-460d-bb4d-29d8be1851ed",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(quickbooks__)?(get|search|list|read|query|find)[_-][A-Za-z0-9_-]+$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-gateway-read-outcome",
+            "name": "Gateway: QuickBooks read",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "QuickBooks read (get/search/list/read/query/find); no write."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "qb-gateway-write-bridge",
+      "name": "proto-agents other QuickBooks writes",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "1bd4c2f5-5d3c-46e8-a398-44359dee8261",
+          "all": [
+            {
+              "id": "032379e4-05a7-4ecc-829f-1a0f8146ea10",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "ea3e8d99-8130-4956-9c85-d51961a8abd4",
               "field": "/request/server",
               "operator": "equals",
               "value": "quickbooks"
@@ -134,56 +181,73 @@
         },
         "blocks": [
           {
-            "id": "pa-gateway-other-outcome",
-            "name": "Gateway: QuickBooks, not a money move",
-            "type": "outcome",
+            "id": "qb-gateway-write-bridge-webhook",
+            "name": "durable-park-bridge",
+            "type": "webhook",
             "enabled": true,
-            "timeout": "50ms",
-            "max_attempts": 1,
+            "timeout": "5s",
+            "max_attempts": 3,
             "config": {
-              "outcome": "approve",
-              "reason": "QuickBooks call that is not a money move; durable-park already asked about it as park:quickbooks."
+              "endpoint_key": "durable-park-bridge",
+              "allowed_outcomes": [
+                "human",
+                "approve"
+              ],
+              "include": {
+                "agent_reasoning": false,
+                "context": false,
+                "previous_metadata": false
+              },
+              "reason": "durable-park bridge: approves only a call matching an approved park; anything else goes to Yaakov.",
+              "escalation_path": "notify-yaakov-yehuda"
             }
           }
-        ]
+        ],
+        "reason": ""
       }
     },
     {
-      "id": "pa-park-quickbooks-other",
-      "name": "Park: QuickBooks other",
+      "id": "pa-park-quickbooks-read",
+      "name": "Park: QuickBooks read",
       "type": "branch",
       "enabled": true,
       "timeout": "50ms",
       "max_attempts": 1,
       "config": {
         "when": {
-          "id": "348da42a-f505-4c8e-9f31-c9f7ed2398f9",
+          "id": "03754ee1-7f89-4196-8021-977bcfe3d678",
           "all": [
             {
-              "id": "de0944c7-5184-4272-9cdd-97d6abf1a118",
+              "id": "14cdc7de-8fbb-48ad-9493-b2bfeecbc082",
               "field": "/agent/slug",
               "operator": "equals",
               "value": "proto-agents"
             },
             {
-              "id": "b810e53a-586f-42af-9583-d14007694a72",
+              "id": "d0e9afa5-990b-4b46-9fd8-1e66594d49d5",
               "field": "/request/server",
               "operator": "equals",
               "value": "park:quickbooks"
+            },
+            {
+              "id": "0b0689c2-30c3-45fd-b3f3-661292bc9d77",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^mcp__wh__quickbooks__(get|search|list|read|query|find)[_-][A-Za-z0-9_-]+$"
             }
           ]
         },
         "blocks": [
           {
-            "id": "pa-park-quickbooks-other-outcome",
-            "name": "Park: QuickBooks other",
+            "id": "pa-park-quickbooks-read-outcome",
+            "name": "Park: QuickBooks read",
             "type": "outcome",
             "enabled": true,
             "timeout": "50ms",
             "max_attempts": 1,
             "config": {
               "outcome": "approve",
-              "reason": "QuickBooks read or non-money write; the gateway decides the real call again."
+              "reason": "QuickBooks read; the gateway decides the real call again."
             }
           }
         ]
@@ -304,6 +368,60 @@
             "config": {
               "outcome": "deny",
               "reason": "Local machine tools stay off until the ledger has its own owner (Clean Setup Phase 2)."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "money-server-human",
+      "name": "Money server: always a person",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "6348fb15-f38b-4d00-b87d-81f96cd95923",
+          "any": [
+            {
+              "id": "e2f3dd1f-c7e0-4f1f-85c5-ff2959928884",
+              "field": "/request/server",
+              "operator": "regex",
+              "value": "^(.*[:_.-])?(quickbooks|qbo|intuit|xero|stripe|paypal|venmo|square|plaid|braintree|adyen|wise|mercury|brex|ramp|bill[._-]?com|melio|payoneer|dwolla|moov|maverick|accept[._-]?blue|authorize[._-]?net|authnet|ach|wire|treasury)([:_.-].*)?$"
+            },
+            {
+              "id": "a2a0ea5e-1e40-4d65-8553-b7461bbe88df",
+              "field": "/request/server",
+              "operator": "regex",
+              "value": "^.*(pay|bank|stripe|quickbooks|treasury|billing|invoic|ledger|wallet|money|finance).*$"
+            },
+            {
+              "id": "ecc5ca1a-379b-47ec-bcc0-ce7724c98109",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(.*__)?[A-Za-z0-9_-]*?(quickbooks|qbo|intuit|xero|stripe|paypal|venmo|plaid|braintree|adyen|mercury|brex|melio|payoneer|dwolla|maverick|accept[._-]?blue|authorize[._-]?net|authnet|pay|bank|stripe|quickbooks|treasury|billing|invoic|ledger|wallet|money|finance)[A-Za-z0-9_-]*?__.*$"
+            },
+            {
+              "id": "71ddc42c-8254-47a8-8691-7795cd9521b5",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(.*__)?(.*[_-])?(pay|payment|payments|payout|transfer|wire|refund|charge|withdraw|withdrawal|deposit|remit|disburse|send_money|ach)([_-].*)?$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "money-server-human-outcome",
+            "name": "Money server: always a person",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "human",
+              "reason": "Tool on a payments or accounting (QuickBooks) server, or a money-moving name: money never auto-approves; a person decides.",
+              "escalation_path": "notify-yaakov-yehuda"
             }
           }
         ]

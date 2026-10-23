@@ -357,7 +357,7 @@ is **unverified** on the live tenant.
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline)**
 
 The live entry pipeline is **revision 9** (active since 2026-10-21 07:30 UTC). Its source of truth is the reviewed
-file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (10 blocks), and
+file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (12 blocks), and
 [architecture section 1](architecture.md#1-system-map) has the same list as a table. Do not rebuild it from this
 page: save the file's blocks as a new entry revision in withHuman and activate it (a save activates at once). Blocks
 run in order and the first one that decides ends the pipeline. Every block for `proto-agents` also tests the agent
@@ -367,18 +367,20 @@ slug. Every "ask an approver" uses the escalation path `notify-yaakov-yehuda`.
 |---|---|---|---|
 | 1 | `pa-park-money` | server `park:quickbooks`, tool is one of the 12 money types (create, update or delete of payment, bill_payment, transfer, deposit, journal_entry, refund_receipt, sales_receipt, credit_memo, vendor_credit, purchase, invoice, bill) | Ask an approver |
 | 2 | `block-06ebcdd6` | server `quickbooks`, same 12 money types (the gateway replay; the tool name has no `mcp__wh__<slug>__` prefix) | Webhook block `durable-park-bridge`: approve only a call that matches one approved, consumed park, otherwise ask an approver. Timeout 5 s, 3 attempts, allowed outcomes approve and ask a human only, no reasoning, context or previous metadata sent |
-| 3 | `pa-gateway-other` | server `quickbooks`, not a money move | Approve (already asked as `park:quickbooks`) |
-| 4 | `pa-park-quickbooks-other` | server `park:quickbooks`, not a money move | Approve |
-| 5 | `pa-hermes-read` | server `hermes`, one of 12 read-only tools (for example `web_search`, `memory`) | Approve |
-| 6 | `pa-hermes-local-deny` | server `hermes`, one of 12 local machine tools (for example `terminal`, `write_file`) | Deny, until Clean Setup Phase 2 |
-| 7 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
-| 8 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
-| 9 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
-| 10 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
+| 3 | `pa-gateway-read` | server `quickbooks`, a read tool (`get_`, `search_`, `list_`, `read_`, `query_`, `find_`) | Approve |
+| 4 | `qb-gateway-write-bridge` | server `quickbooks`, any other tool (every non-read write, whatever its name) | Webhook block `durable-park-bridge`, same settings as block 2: approve only the replay of an approved park |
+| 5 | `pa-park-quickbooks-read` | server `park:quickbooks`, a read tool (same verbs) | Approve |
+| 6 | `pa-hermes-read` | server `hermes`, one of 12 read-only tools (for example `web_search`, `memory`) | Approve |
+| 7 | `pa-hermes-local-deny` | server `hermes`, one of 12 local machine tools (for example `terminal`, `write_file`) | Deny, until Clean Setup Phase 2 |
+| 8 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
+| 9 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
+| 10 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
+| 11 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
+| 12 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
 
 The exact tool lists and regexes are in the JSON file; the file wins over this table. A tool that no block names
-falls to block 8, so a person decides. If DocuSign is ever added, its six write tools need their own block (their
-names are in `DEFAULT_FORM_CHECKED_TOOLS` in `park_hook.py`); until then a DocuSign call would reach block 8.
+falls to block 10 (proto-agents) or block 12 (any other agent), so a person decides. If DocuSign is ever added, its six write tools need their own block (their
+names are in `DEFAULT_FORM_CHECKED_TOOLS` in `park_hook.py`); until then a DocuSign call would reach block 10.
 
 If the bridge is down, answers `401` or times out, the webhook block fails and the call goes to a human
 (withHuman: "no accepted answer after the attempts -> human review"), so an outage never auto-approves. The same
