@@ -891,6 +891,7 @@ observer may be listed.
 | `platforms__raft.adapter._on_pre_tool_call` (full name `hermes_plugins.platforms__raft.adapter._on_pre_tool_call`) | Hermes Raft platform plugin, on `proto-agents` | Records telemetry about each call; always returns `None`, on every path including errors. Never returns `modify`, `block` or any other directive. | 2026-10-21 | Listed in `observer_hooks`; gateway restarted; calls asked about normally again |
 | `hermes_plugins.langfuse.on_pre_tool_call` | Nous Research official `langfuse` plugin v2.0.0 @ commit `c2a9596`, on `proto-agents` | Starts a Langfuse tool observation from a copy of the call's arguments (`_capture_content` builds new structures with `_safe_value`). Returns `None` on every path and never changes the arguments. Its `on_post_tool_call` only changes the plugin's own copies. | 2026-10-22 | Listed in `observer_hooks`. The plugin was switched on 2026-10-22 04:37 UTC ([Tracing (Langfuse)](#tracing-langfuse)); after that restart calls were asked about normally and a $1 payment ran once after one approval ([record](acceptance-2026-10-22-langfuse.md)). **Retired at the `tapdash-langfuse` deploy** (the catalog plugin is disabled and restarted out first; this entry is removed from `observer_hooks` in a second, ledger-checked restart); the row stays for history |
 | `hermes_plugins.tapdash_langfuse.on_pre_tool_call` | TapDash patched copy of the Nous `langfuse` v2.0.0 @ commit `c2a9596` (`tracing/tapdash_langfuse`), on `proto-agents` | The same function as the upstream one reviewed on 2026-10-22 (row above): byte-identical, checked by a diff when the copy was built. Starts a Langfuse tool observation from a copy of the call's arguments. Returns `None` on every path and never changes the arguments. The patches only touch `on_post_tool_call` (pattern tags) and the start of the root trace (user id, name), never this hook | 2026-10-22 | To be listed in `observer_hooks` at the deploy (not listed yet: the plugin is not deployed). Calls must still be asked about normally after that restart ([deploy](#switch-to-the-patched-plugin-deploy)) |
+| `hermes_plugins.hermes_deck.hermes_deck_pre_tool_call` | Hermes Deck plugin v1.0.0 ([`Hermes-Deck/hermes-deck`](https://github.com/Hermes-Deck/hermes-deck) @ `2b2b2b7`), on `proto-agents`. Hermes sees one callback that runs the plugin's events part and its bridge part | Shows the Deck app what the agent is doing. It writes a clipped, redacted copy of each call's arguments to a local file (`~/.hermes-deck/events/`). The bridge part returns `None` on every path. The events part returns `None` for every tool except `computer_use`; for `computer_use` it can return `block` or `modify`, but only while Bot screen is on (`DECK_BOT_SCREEN=1`, or `HERMES_CUA_DRIVER_CMD` set). Neither is set here, and the toolset lockdown gives the agent no `computer_use` tool | 2026-10-22 | Listed in `observer_hooks` by Yaakov's decision that this one `computer_use` path is acceptable while Bot screen stays off. So the "never `modify` on any path" rule above is **not met in full**: review it again before turning Bot screen on or opening `computer_use`. The gateway restarted with the plugin loaded and durable-park stayed in `asking` mode with no refusal, so the listed name matches. A real call being asked about normally: **not checked yet** ([Hermes Deck](#hermes-deck-desktop-app)) |
 
 `<hook registry unavailable>` is not a hook name: it means durable-park could not read Hermes's hook or middleware
 registry (e.g. after a Hermes upgrade). It cannot be allowed; check the Hermes version against `compat.py`.
@@ -1334,6 +1335,65 @@ do steps 1 to 3. Never use `hermes plugins install langfuse` to update: it would
 
 After a **Hermes upgrade**, also set `HERMES_LANGFUSE_RELEASE` to the new version (`hermes-v<version>`) and restart (ledger check first: no row `parked`, `approved` or `executing`, [health check](#health-check)), so
 new traces carry the right release.
+
+## Hermes Deck (desktop app)
+
+Hermes Deck is a desktop app (Windows or Mac) that shows what the agent is doing right now and lets you chat with it.
+It has two parts on the VM and one on your computer. It only watches; it has no say in what runs.
+
+**State: INSTALLED on 2026-10-22 at 21:01 UTC. Relay running since 2026-10-23 01:39 UTC (9:39 PM ET, Oct 22).** Version
+1.0.0 of the plugin, relay and app protocol (`Hermes-Deck/hermes-deck` @ `2b2b2b7`). Its hook is reviewed and listed
+([Hooks reviewed so far](#hooks-reviewed-so-far)).
+
+| Part | Where | Notes |
+|---|---|---|
+| Plugin | `~/.hermes/plugins/hermes-deck` (a **copy**, not a link) | Enabled in `plugins.enabled`. After an update, run its installer again |
+| Stream bridge | `~/.hermes/hermes-deck/stream.py` | The app runs it over SSH. It uses only Python's standard library, so `/usr/bin/python3` works |
+| Relay | service `hermes-deck-relay` (a user service of `hermes`), checkout `/home/hermes/hermes-deck/relay` | Listens on `100.99.171.75:9330` (the Tailscale address) only. Loopback does not answer |
+| Relay token | `relay/.env`, mode `0600`, owner `hermes` | 64 random characters. Never print it, never paste it in chat |
+| Events file | `~/.hermes-deck/events/*.ndjson` | Clipped, redacted copies of tool arguments (QuickBooks arguments included) |
+| Config backups | `~/.hermes/config.yaml.bak-pre-hermes-deck-*` and `config.yaml.bak-hermes-deck-*` | The installer rewrote the `plugins:` block of `config.yaml` in one-line form and dropped comments inside it; the backups keep them |
+
+The checkout `/home/hermes/hermes-deck` is a plain clone of the Deck repo. It is not part of this repo.
+
+### Connect the app
+
+1. Get the token in your own terminal, not in chat: `tailscale ssh ubuntu@proto-agents`, then
+   `sudo -u hermes grep '^DECK_RELAY_TOKEN=' /home/hermes/hermes-deck/relay/.env | cut -d= -f2`.
+2. In the app: **Settings, Relay**: `ws://100.99.171.75:9330` and the token, then **Save and connect**.
+3. For direct chat the app needs an SSH login as `hermes` (your Tailscale SSH rule must allow it), the Python path
+   `/usr/bin/python3` and the stream path `/home/hermes/.hermes/hermes-deck/stream.py`.
+
+### Check it works
+
+```
+cd /home/hermes/hermes-deck && /usr/bin/python3 -B scripts/doctor.py --home /home/hermes/.hermes \
+  --hermes-dir /home/hermes/.hermes/hermes-agent --relay-dir relay --relay http://100.99.171.75:9330
+```
+
+It reads only. Every line should say `ok`. The relay line proves it answers, not that a token works. Then send the bot one
+read-only message and check it is asked about normally.
+
+### Risks to know
+
+- Anyone on your tailnet who has the token can read every agent's sessions and history. Do not put the relay on a public
+  address.
+- The events file holds copies of tool arguments. Treat it like the ledger.
+- Letting `hermes` log in over Tailscale SSH gives that login the approval secrets the account can read
+  ([backlog](backlog.md#before-real-books), separate ledger owner). Fine on the test VM; revisit before real books.
+- Do not turn on Bot screen (`DECK_BOT_SCREEN`) or point `HERMES_CUA_DRIVER_CMD` at a driver: that opens the one path
+  where the plugin's hook can change a call.
+- Keep a gateway stop short. While the gateway was down for about 3 minutes during the install, another program took
+  ports 8644 and 3978 ([never change plugins while the gateway runs](#never-change-plugins-while-the-gateway-runs)).
+
+### Update, turn off, remove
+
+- **Update:** pull the Deck clone, run the installer's `--dry-run`, read its plan, stop the gateway (no `parked`,
+  `approved` or `executing` row), run the installer, restart. Re-do the hook review in
+  [Hooks reviewed so far](#hooks-reviewed-so-far) if the hook changed. Keep app, relay and plugin on one version.
+- **Stop the relay:** `systemctl --user disable --now hermes-deck-relay` (as `hermes`). Nothing else changes.
+- **Remove the plugin:** `/usr/bin/python3 -B hermes-plugin/hermes-deck/install.py --profile default --uninstall --dry-run`,
+  then without `--dry-run`, then remove its hook name from `observer_hooks` and restart the gateway.
 
 ## Add a form-checked tool
 
