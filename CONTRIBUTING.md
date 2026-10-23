@@ -71,6 +71,8 @@ like the other deploy files, to the runbook and the two setup guides in "Deploy 
 update the bridge's tables and the "Own user and own port" section in the same commit.
 The withHuman entry pipeline kept as a reviewed file (`durable-park/deploy/withhuman/entry-pipeline.json`) is mapped to
 `architecture.md`: change the file, change the pipeline table there in the same commit.
+The backup-approver example (`durable-park/deploy/approvers.example.json`, TAP2-121) is mapped with the sweep in the
+"Sweep (cron)" rule: change it, update the runbook's "Backup approver and unanswered approvals" section.
 
 **Really no doc change needed** (no change in behaviour or interface: a typo, a comment, a local rename)? Add a
 trailer line to a commit message with the reason:

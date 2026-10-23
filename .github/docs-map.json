@@ -69,7 +69,7 @@
     },
     {
       "name": "Sweep (cron)",
-      "code": ["durable-park/scripts/**"],
+      "code": ["durable-park/scripts/**", "durable-park/deploy/approvers.example.json"],
       "docs": [
         "durable-park/docs/architecture.md",
         "durable-park/docs/runbook.md"
