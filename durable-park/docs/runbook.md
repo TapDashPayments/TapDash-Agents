@@ -128,7 +128,8 @@ or `~/.hermes/.env`: they hold secrets).
 | Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *`; delivery is still Telegram | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). Alerts reach Teams through `TEAMS_ALERT_WEBHOOK_URL` (row above), so a Telegram copy is now optional; stopping the Telegram delivery is an open decision ([backlog](backlog.md#later)). |
 | Teams tunnel (`devtunnel-hermes`) | systemd **user unit of `hermes`**, enabled (moved from `ubuntu` on 2026-10-22). Program `/usr/local/bin/devtunnel` (root-owned). Login cache `/home/hermes/.local/share/DevTunnels` (mode 600), logged in as Yaakov@TapDash.co. Tunnel `proto-agents-bot` forwards to `127.0.0.1:3978` | The Teams bot's public address needs a tunnel to the gateway. Never print or copy the login cache. Manage it with `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user <status\|restart> devtunnel-hermes`. It no longer exists under `ubuntu`. |
 | `hermes-dashboard` unit | `RestartPreventExitStatus=78` in the main unit file | See [Dashboard over HTTPS](#dashboard-over-https). |
-| Langfuse tracing: plugin `tapdash-langfuse` (TapDash's patched copy, a symlink `~/.hermes/plugins/tapdash-langfuse` into the live clone's `tracing/tapdash_langfuse`) enabled; the unpatched catalog `langfuse` is no longer enabled (its folder is still in `~/.hermes/plugins`). `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`) | tracing on since 2026-10-22 04:37 UTC (unpatched); patched plugin enabled by 19:52 UTC the same day ([how it was switched](#switch-to-the-patched-plugin-deploy)) | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
+| Langfuse tracing: plugin `tapdash-langfuse` (TapDash's patched copy, a symlink `~/.hermes/plugins/tapdash-langfuse` into the live clone's `tracing/tapdash_langfuse`) enabled; the unpatched catalog `langfuse` is no longer enabled (its folder is still in `~/.hermes/plugins`). non-secret `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`); the two Langfuse keys come from Bitwarden since 2026-10-22/23 ([Secrets: Bitwarden](#secrets-bitwarden)) | tracing on since 2026-10-22 04:37 UTC (unpatched); patched plugin enabled by 19:52 UTC the same day ([how it was switched](#switch-to-the-patched-plugin-deploy)) | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
+| Bitwarden Secrets Manager (`secrets.bitwarden` in `config.yaml`) | `enabled: true`, project "TapDash Agents", `encrypted_cache.max_stale_seconds: 604800`; applies 6 secrets at each start (changed live 2026-10-22/23) | The agent's Teams, Telegram and Langfuse keys come from Bitwarden, not from `.env`. `.env` keeps only `BWS_ACCESS_TOKEN`, `TEAMS_ALERT_WEBHOOK_URL` and settings that are not secret. See [Secrets: Bitwarden](#secrets-bitwarden). |
 
 If `hermes-gateway` reports `DEGRADED` after a Hermes update, read `~/.hermes/logs/gateway.log` for the platform
 that failed to start before changing anything. To use `api_server` later, an admin sets `API_SERVER_KEY` in the
@@ -930,8 +931,9 @@ plan: 30 days of data access, and a monthly allowance of units (a unit is one tr
 Langfuse's public pricing page, <https://langfuse.com/pricing>, not checked in this work). Retention
 cannot be changed on Hobby ([backlog](backlog.md#before-real-books), items 8 and 9).
 
-**Settings** (names only; never print `.env`). They live in `~hermes/.hermes/.env`. Read once when the gateway
-starts. A change needs a restart (ledger check first, see [Turn it off](#turn-it-off) step 1).
+**Settings** (names only; never print `.env`). All except the two keys live in `~hermes/.hermes/.env`; the two keys
+(`HERMES_LANGFUSE_PUBLIC_KEY`, `HERMES_LANGFUSE_SECRET_KEY`) come from Bitwarden ([Secrets: Bitwarden](#secrets-bitwarden)).
+Read once when the gateway starts. A change needs a restart (ledger check first, see [Turn it off](#turn-it-off) step 1).
 
 | Name | Live value | Secret | Why |
 |---|---|---|---|
@@ -943,8 +945,8 @@ starts. A change needs a restart (ledger check first, see [Turn it off](#turn-it
 | `HERMES_LANGFUSE_RELEASE` | `hermes-v0.22.3` | no | The release label on each trace. **Update it when Hermes is upgraded** (`hermes-v<version>`), then restart, so traces can be told apart by version |
 | `HERMES_LANGFUSE_TAG_PATTERNS` | to be added at the deploy (patched plugin only; the catalog plugin ignores it): `park=\bP-[0-9A-F]{8}\b` | no | Trace tags from patterns, `label=regex` pairs separated by `;`. Every match in the turn's original user message (as the person sent it, without the memory and plugin context Hermes adds to the model's copy), a tool call's arguments or a tool's result adds the trace tag `label:value` (value = group 1 if the regex has a group, else the whole match). With this value a trace that mentions park id `P-1A2B3C4D` gets the tag `park:P-1A2B3C4D`. Limits: at most 10 pattern tags per trace; a tag over 200 characters or not US-ASCII is skipped; only the first 200 000 characters of each text are scanned; arguments and results that are not plain strings are scanned as JSON text, so a JSON escape written right before an id (`\n` then `P-...`) hides it from the `\b` ([README](../../tracing/tapdash_langfuse/README.md)); with `HERMES_LANGFUSE_CAPTURE=metadata` no pattern tags are added (a tag would carry content; `userId` and the root observation's metadata `user_name` are still sent in that mode). **Pattern tags are taken from the raw text and are not passed through secret redaction, even in `sanitized` mode**: use only patterns that match non-secret ids. A pattern runs on up to 200 000 characters of each text, so it must not backtrack catastrophically (the root scan runs while the plugin holds its state lock, so a runaway pattern would stall every hook). A bad entry (no `=`, a label that is not `[a-z0-9_-]{1,40}`, or a regex that does not compile) logs one warning and is ignored; the other entries still work |
 | `HERMES_LANGFUSE_SCORE_PATTERNS` | optional; not set on proto-agents until the deploy step (patched plugin only; the catalog plugin ignores it). The exact value is in the [README](../../tracing/tapdash_langfuse/README.md#score-traces-by-pattern-tapdash-patch) | no | Scores a trace from a pattern in the turn's original user message, `name=regex[=>literal]` entries separated by `;`. Meant for the approval decision (`approval_decision` = `approved`, `denied`, `cancelled` or `expired`) taken from durable-park's wake text. Not scored with `HERMES_LANGFUSE_CAPTURE=metadata`. Like pattern tags, values and comments come from the raw text and are not passed through secret redaction |
-| `HERMES_LANGFUSE_PUBLIC_KEY` | the project's public key (`pk-lf-...`) | typed in | Half of the key pair. An identifier rather than a secret on its own, but handled like the other key |
-| `HERMES_LANGFUSE_SECRET_KEY` | the project's secret key (`sk-lf-...`) | yes, typed in | Reads and writes the project's traces |
+| `HERMES_LANGFUSE_PUBLIC_KEY` | the project's public key (`pk-lf-...`); in Bitwarden, not in `.env` | in Bitwarden | Half of the key pair. An identifier rather than a secret on its own, but handled like the other key |
+| `HERMES_LANGFUSE_SECRET_KEY` | the project's secret key (`sk-lf-...`); in Bitwarden, not in `.env` | yes, in Bitwarden | Reads and writes the project's traces |
 
 Backups of `.env` from this work: `.env.bak-langfuse-20261022T042450Z`, `.env.bak-langfuse2-20261022T045726Z`,
 `.env.bak-langfuse3-20261022T134218Z` (and `config.yaml.bak-langfuse-20261022T042450Z`), all in `~hermes/.hermes/`.
@@ -1096,15 +1098,10 @@ after it was turned off (names as after the deploy; the plugin directory is the 
 [deploy](#switch-to-the-patched-plugin-deploy)).
 
 1. In Langfuse (project `proto-agents`, Settings, API keys), create a key pair. The secret key is shown once.
-2. Type the keys in on the VM as `hermes`. Nothing is echoed, nothing goes in chat or the repo:
-
-   ```sh
-   read -rs -p "Langfuse public key: " LF_PK; echo
-   read -rs -p "Langfuse secret key: " LF_SK; echo
-   [ -z "$(tail -c1 ~/.hermes/.env)" ] || echo >> ~/.hermes/.env      # end the last line first, if it has no newline
-   printf 'HERMES_LANGFUSE_PUBLIC_KEY=%s\nHERMES_LANGFUSE_SECRET_KEY=%s\n' "$LF_PK" "$LF_SK" >> ~/.hermes/.env
-   unset LF_PK LF_SK
-   ```
+2. Put the keys into Bitwarden (since 2026-10-22/23 they are not kept in `.env`): in the Bitwarden web app, project
+   "TapDash Agents", save them as the secrets `HERMES_LANGFUSE_PUBLIC_KEY` and `HERMES_LANGFUSE_SECRET_KEY`. Nothing
+   goes in chat or the repo. Check with `sudo -u hermes -H hermes secrets bitwarden status`
+   ([Secrets: Bitwarden](#secrets-bitwarden)). Before 2026-10-22/23 this step typed them into `.env` with `read -rs`.
 
 3. Check that the non-secret settings in the table above are in `.env` (names only: `grep -c '^HERMES_LANGFUSE_' ~/.hermes/.env`
    counts the lines; `grep -o '^HERMES_LANGFUSE_[A-Z_]*' ~/.hermes/.env` lists the names). Add any that are missing.
@@ -1164,6 +1161,11 @@ In the Langfuse web app: project `proto-agents`, Tracing. To read them from the 
 for the old v1 calls** (`/api/public/traces`, `/api/public/observations`, `/api/public/sessions`). Use the v2
 observations call, or `npx langfuse-cli` (the Langfuse agent skill recommends it). Load the keys into the process
 only: never put them on a command line (they would show in `ps` and in shell history) and never print them.
+
+**Note (2026-10-23):** the two scripts below read the keys from `~/.hermes/.env`. The keys are now in Bitwarden, so
+they are no longer there, and the scripts will not find them. Only the base URL is still in `.env`. Until the scripts
+are updated, type the two keys into the script's environment with `read -rs` (no echo) for that one run. This change
+was not re-tested.
 
 ```sh
 python3 - <<'PY'
@@ -1241,7 +1243,8 @@ SDK writes into every span's metadata (`scope.attributes.public_key`); it is an 
 To repeat it, as `hermes`, in one process that never prints a candidate or a match:
 
 1. Build the candidate list: every `.env` value whose name contains `KEY`, `TOKEN`, `SECRET` or `PASSWORD` and that is
-   at least 12 characters long, plus the contents of each file under `/etc/durable-park/` that `hermes` can read.
+   at least 12 characters long (since 2026-10-22/23 the Teams, Telegram and Langfuse keys are in Bitwarden, so add them to
+   the list by another route), plus the contents of each file under `/etc/durable-park/` that `hermes` can read.
 2. Fetch the observations with the v2 call under [Read traces](#read-traces).
 3. For each observation, search its whole JSON for each candidate as a literal substring, and for the shapes `sk-lf-`,
    `pk-lf-`, a Telegram bot token, `Bearer`, `who_` and any 13 to 19 digit run that passes the Luhn check.
@@ -1272,7 +1275,8 @@ To remove it for good, **in this order**:
    is no longer loaded.
 3. Only now take `hermes_plugins.tapdash_langfuse.on_pre_tool_call` out of `observer_hooks` (and its row in
    [Hooks reviewed so far](#hooks-reviewed-so-far)): check the ledger again, stop `hermes-gateway`, edit, start it again.
-4. Delete the two key lines from `~/.hermes/.env` and revoke the key pair in Langfuse.
+4. Delete the two Langfuse secrets from the Bitwarden project (they are no longer in `.env`) and revoke the key pair in
+   Langfuse.
 
 Why this order: while the plugin is still loaded, its hook is a foreign `pre_tool_call` hook. If it is taken out of
 `observer_hooks` first, durable-park refuses every tool call ([Allow another
@@ -1281,14 +1285,8 @@ hook](#allow-another-hook-observer_hooks)).
 ### Rotate the keys
 
 1. In Langfuse, create a new key pair. Do not delete the old one yet.
-2. On the VM, as `hermes`, replace the two lines, typing the new keys in as in "Turn it on" step 2:
-
-   ```sh
-   (umask 077; grep -v '^HERMES_LANGFUSE_\(PUBLIC\|SECRET\)_KEY=' ~/.hermes/.env > ~/.hermes/.env.new)
-   cat ~/.hermes/.env.new > ~/.hermes/.env && rm ~/.hermes/.env.new
-   # then the read -rs and printf lines from "Turn it on"
-   ```
-
+2. In the Bitwarden web app, edit the secrets `HERMES_LANGFUSE_PUBLIC_KEY` and `HERMES_LANGFUSE_SECRET_KEY` in the project
+   "TapDash Agents" ([Change a key](#change-a-key)). They are no longer in `.env`.
 3. Check the ledger, restart `hermes-gateway`, run "Check it works", then revoke the old key pair in Langfuse.
 
 ### When the plugin changes
@@ -1494,6 +1492,89 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
 
 To close it again, remove the line and repeat from step 3.
 
+## Secrets: Bitwarden
+
+In plain English: the agent's passwords (its keys) used to sit in a file on the VM. Now they sit in a locked online
+safe called Bitwarden. Each time Hermes starts, it opens the safe, takes the keys it needs and uses them. The only
+key left in the file is the one that opens the safe.
+
+**Where the keys live.** Hermes pulls the agent's keys from **Bitwarden Secrets Manager** at every start, with
+Hermes's built-in support (`hermes secrets bitwarden ...`; Hermes docs: `website/docs/user-guide/secrets/bitwarden.md`
+in the Hermes repo). Verified live on 2026-10-22/23.
+
+| Thing | Value |
+|---|---|
+| Service | Bitwarden US cloud, `https://vault.bitwarden.com`, free plan |
+| Project | "TapDash Agents" (id `94af3d93-ad3d-486b-908d-b4ec00050dfd`) |
+| Who opens it | A machine account with an access token. The owner will switch it to read-only ([backlog](backlog.md#secrets-bitwarden-follow-ups)) |
+| `bws` command line tool | 2.0.0, installed by Hermes's package manager at `~hermes/.hermes/tools/bws-2.0.0-linux-x64/bws` |
+| Startup log | `Bitwarden Secrets Manager: applied 6 secrets` and `Command helper: applied 2 secrets` |
+
+**The 6 keys in Bitwarden:** `TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID`, `TELEGRAM_BOT_TOKEN`,
+`HERMES_LANGFUSE_PUBLIC_KEY`, `HERMES_LANGFUSE_SECRET_KEY`. They were removed from `~hermes/.hermes/.env`.
+
+**Still in `~hermes/.hermes/.env` on purpose:**
+
+- `BWS_ACCESS_TOKEN`: the one bootstrap token. It opens the safe, so it cannot be inside the safe.
+- `TEAMS_ALERT_WEBHOOK_URL`: read by the sweep script, not by Hermes's secret loader.
+- Settings that are not secret: allowed users, home channels, `TEAMS_HOST`, the Langfuse base URL and options.
+
+**durable-park's own secrets did not move.** `/etc/durable-park` (`instance_token`, `receiver.json`, `wake_secret`,
+`bridge_secret`, `audit_key`, `tunnel.env`) and the Hermes `command` secret source
+`/opt/durable-park/libexec/hermes-secrets` (it supplies 2 secrets) stay as they were. They are deliberately **not** in
+the agent's Bitwarden project, so the agent's access token cannot read them. The owner keeps copies in his personal
+password vault. See [architecture section 7](architecture.md#7-secrets-and-who-can-read-them).
+
+**Settings** in `~hermes/.hermes/config.yaml`, under `secrets.bitwarden`:
+
+| Setting | Live value | Why |
+|---|---|---|
+| `enabled` | `true` | Turns the loader on |
+| `project_id` | the project above | Only this project's keys are read |
+| `server_url` | `https://vault.bitwarden.com` | US cloud |
+| `override_existing` | `true` (the default) | A key from Bitwarden wins over the same name in `.env` |
+| `encrypted_cache.enabled` | `true` | Keeps an encrypted copy of the last good answer |
+| `encrypted_cache.max_stale_seconds` | `604800` (7 days) | If Bitwarden cannot be reached at start, the last good copy is used for up to 7 days. An authentication failure never uses the cache |
+
+**The `.env` backups** (`~hermes/.hermes/.env.bak*`) were kept. The 6 key values in them were replaced by a note line
+after they were checked to be identical to the ones in Bitwarden.
+
+Run all of these as `hermes` (`sudo -u hermes -H ...`), never print a key, and check the ledger first when a step
+restarts the gateway ([health check](#health-check)).
+
+### Change a key
+
+1. Edit the key in the Bitwarden web app.
+2. Check the ledger: no row `parked`, `approved` or `executing` ([health check](#health-check)).
+3. Restart `hermes-gateway`. Keys load only at start, so nothing changes until then.
+
+### Swap the access token
+
+1. In Bitwarden, create a new access token for the machine account.
+2. Run `sudo -u hermes -H hermes secrets bitwarden token`. It asks for the token in a masked prompt: type or paste it
+   there, never into chat.
+3. Check it ([below](#check-that-bitwarden-works)), then revoke the old token in Bitwarden.
+
+### Check that Bitwarden works
+
+- `sudo -u hermes -H hermes secrets bitwarden status`
+- `sudo -u hermes -H hermes secrets bitwarden sync`: a dry run.
+- After a gateway start, the log says `Bitwarden Secrets Manager: applied 6 secrets` and `Command helper: applied 2 secrets`.
+
+### Turn it off
+
+1. Put the 6 keys back into `~hermes/.hermes/.env` first (typed in with `read -rs`). Without them Telegram and Teams
+   do not start.
+2. `sudo -u hermes -H hermes secrets bitwarden disable`
+3. Check the ledger, then restart `hermes-gateway`.
+
+### Not checked
+
+- The access token was pasted in chat during setup (2026-10-22). Treat it as exposed and swap it
+  ([backlog](backlog.md#secrets-bitwarden-follow-ups), and the "rotate secrets before production" list below, TAP2-109).
+- The "Read traces" and "Find everything about one approval" scripts under [Tracing (Langfuse)](#tracing-langfuse)
+  were written when the Langfuse keys were in `.env`. They were not re-run after the move.
+
 ## Rotate secrets before production
 
 Several secrets were pasted into chat during testing (approved for testing only). Before any real books:
@@ -1510,6 +1591,7 @@ Several secrets were pasted into chat during testing (approved for testing only)
       and [store a new one](#store-or-rotate-the-bridges-keys) with `audit.read`, `request.read`, `request.read.unrouted`,
       then `sudo systemctl restart durable-park-bridge` (it copies the key at start)
 - [ ] Rotate the Langfuse keys (`HERMES_LANGFUSE_PUBLIC_KEY`, `HERMES_LANGFUSE_SECRET_KEY`, if set): [Rotate the keys](#rotate-the-keys)
+- [ ] Swap the Bitwarden access token (it was pasted in chat on 2026-10-22): [Swap the access token](#swap-the-access-token), then switch the machine account to read-only in Bitwarden
 - [ ] Revoke any GitHub token shared in chat; keep only the VM's deploy key for this repo
 - [ ] Then the rest of the [backlog's "Before real books" list](backlog.md#before-real-books)
 

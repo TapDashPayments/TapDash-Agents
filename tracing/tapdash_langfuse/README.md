@@ -26,7 +26,7 @@ the hook (a missing SDK or missing/placeholder keys log one warning). The agent 
 **TapDash:** upstream's text here says that `hermes update` migrates existing Langfuse users to the catalog
 plugin and that they need to do nothing. That is about the catalog plugin and does not apply to this copy. Nothing
 installs, enables or updates `tapdash-langfuse` for you; its code changes only through the repository and the
-runbook, and its keys and `HERMES_LANGFUSE_*` settings live in `~/.hermes/.env` on the VM.
+runbook, and its `HERMES_LANGFUSE_*` settings live in `~/.hermes/.env` on the VM, but its two keys (public and secret) come from Bitwarden Secrets Manager (see the runbook).
 
 ## Install
 
