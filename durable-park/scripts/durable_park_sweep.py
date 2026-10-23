@@ -169,7 +169,8 @@ def _post_teams(webhook_url: str, text: str) -> None:
         card = {"type": "message", "attachments": [{
             "contentType": "application/vnd.microsoft.card.adaptive",
             "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                        "version": "1.4", "body": [{"type": "TextBlock", "text": text, "wrap": True}]}}]}
+                        "version": "1.4", "msteams": {"width": "Full"},
+                        "body": [{"type": "TextBlock", "text": text, "wrap": True}]}}]}
         request = urllib.request.Request(webhook_url, data=json.dumps(card).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=TEAMS_TIMEOUT_SECONDS):
