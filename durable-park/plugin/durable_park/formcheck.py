@@ -207,8 +207,10 @@ class FormChecker:
     def check(self, tool: str, args: dict) -> str | None:
         """``None`` when ``args`` follow the rules, else a short description of the first problem."""
         validate = self.prepare(tool)
-        raw = copy.deepcopy(args if isinstance(args, dict) else {})
+        raw = args if isinstance(args, dict) else {}
         try:
+            # ⚡ Optimization: Pass a single copy.deepcopy(raw) to coerce_fn to protect original
+            # arguments from mutation without performing two sequential deep copies.
             fixed = (self._coerce_fn or hermes_coerce)(tool, copy.deepcopy(raw))
         except Exception:  # noqa: BLE001 - without type fixing, check the arguments as sent
             fixed = raw

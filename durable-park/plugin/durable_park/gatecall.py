@@ -85,8 +85,13 @@ def _cut_strings(value: Any) -> Any:
 
 
 def redact_arguments(args: Mapping) -> tuple[dict, bool]:
-    """A redacted (and, when large, truncated) copy of ``args`` and whether it was truncated. Input untouched."""
-    redacted = _redact(copy.deepcopy(dict(args)))
+    """A redacted (and, when large, truncated) copy of ``args`` and whether it was truncated. Input untouched.
+
+    ⚡ Optimization: Pass ``args`` directly to ``_redact`` without an expensive pre-allocation of
+    ``copy.deepcopy(dict(args))``. ``_redact`` already performs structural copying and constructs new
+    dictionary/list containers for all nested items.
+    """
+    redacted = _redact(args)
     if len(canonical_json(redacted).encode("utf-8")) > MAX_ARGS_BYTES:
         return _cut_strings(redacted), True
     return redacted, False
@@ -276,6 +281,10 @@ def lift_gateway_context(args: Any, schema: dict | None,
     idempotent: the input is never mutated (a deep copy is returned when anything is touched, the same object
     otherwise), and a bug while judging or reporting never raises."""
     if not isinstance(args, dict) or not declares_context(schema):
+        return args
+    # ⚡ Optimization: Avoid expensive copy.deepcopy(args) when no top-level context note or
+    # nested context note dictionary exists. Almost all tool calls have no nested context note.
+    if CONTEXT_FIELD not in args and not any(isinstance(v, dict) and CONTEXT_FIELD in v for v in args.values()):
         return args
     props = schema["properties"]
     out = copy.deepcopy(args)
