@@ -26,6 +26,57 @@ asking you to upgrade"). If that happens: look up the newest tag at
 https://quay.io/repository/withhuman/tunnel?tab=tags, change `TUNNEL_IMAGE` in
 `Dockerfile` and `image:` in `docker-compose.yml`, rebuild.
 
+## Maverick server source
+
+In plain English: the tunnel image also carries TapDash's own Maverick MCP server. Its code lives in a **private**
+GitHub repo, so the VM keeps a read-only copy of it, frozen at one reviewed commit.
+
+| Thing | Value |
+| --- | --- |
+| Repo | `TapDashPayments/maverick-mcp` (private) |
+| Pinned commit | the one line in [`deploy/tunnel/maverick-mcp.sha`](../deploy/tunnel/maverick-mcp.sha) (`bf99b4464380564a479e90bc2a3a7135f39ba8d2`, `main` after PR #2) |
+| Checkout on the VM | `/home/hermes/maverick-mcp` (owner `hermes`, detached at the pinned commit) |
+| Access | deploy key `proto-agents-read` (**read-only**), private key `~hermes/.ssh/maverick_mcp_deploy` |
+
+```mermaid
+flowchart LR
+  sha["maverick-mcp.sha<br/>(pinned commit)"] -->|"names the commit for"| co["/home/hermes/maverick-mcp<br/>(read-only checkout)"]
+  gh["GitHub<br/>TapDashPayments/maverick-mcp"] -->|"git fetch with the read-only deploy key"| co
+  co -->|"build context maverick-src"| img["tunnel image<br/>(docker compose build)"]
+```
+
+How it was set up (2026-10-24), and how to redo it on a fresh VM:
+
+1. **Key.** As `hermes`: `ssh-keygen -t ed25519 -N '' -C hermes@proto-agents-maverick-mcp -f ~/.ssh/maverick_mcp_deploy`.
+   As `ubuntu` (who is logged in to `gh`), add the public half as a **read-only** deploy key:
+   `gh repo deploy-key add ~hermes/.ssh/maverick_mcp_deploy.pub -R TapDashPayments/maverick-mcp -t proto-agents-read`
+   (copy the `.pub` file somewhere `ubuntu` can read first; it is public, the private key never leaves `~hermes/.ssh`).
+   Without `--allow-write` the key can only read.
+2. **SSH alias.** `~hermes/.ssh/config` (mode 0600) gets a host alias that uses only that key, and the same pinned
+   GitHub host key file as the TapDash-Agents deploy key:
+
+   ```text
+   Host github-maverick-mcp
+     HostName github.com
+     User git
+     IdentityFile ~/.ssh/maverick_mcp_deploy
+     IdentitiesOnly yes
+     UserKnownHostsFile ~/.ssh/known_hosts_github
+     StrictHostKeyChecking yes
+   ```
+
+3. **Checkout.** As `hermes`:
+   `git clone git@github-maverick-mcp:TapDashPayments/maverick-mcp.git /home/hermes/maverick-mcp`, then
+   `git -C /home/hermes/maverick-mcp checkout "$(cat <worktree>/durable-park/deploy/tunnel/maverick-mcp.sha)"`.
+   Check: `git -C /home/hermes/maverick-mcp rev-parse HEAD` prints the same 40 characters as the file.
+
+**Move to a new commit** (after a reviewed change is merged to `maverick-mcp` `main`):
+
+1. In a TapDash-Agents worktree, write the new commit into `maverick-mcp.sha` (one line, 40 characters), and change
+   the `-mav-<first 7>` part of the image tag in `docker-compose.yml` (both services) and in the docs.
+2. As `hermes`: `git -C /home/hermes/maverick-mcp fetch origin && git -C /home/hermes/maverick-mcp checkout <new sha>`.
+3. Rebuild the tunnel image, and update the approval rules if a tool was added or changed its approval level.
+
 ## Files
 
 | File | Purpose |
