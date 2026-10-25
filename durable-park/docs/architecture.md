@@ -58,7 +58,7 @@ State on 2026-10-22:
   read-only, so it lets a hijacked agent list requests, never approve one. `deploy/bridge_check.py` verifies all of
   this at every deploy, and the deploy stops if it fails.
 - **Tool lockdown (v1): a configuration guard.** The agent can reach only `clarify`, `parked_action_execute`,
-  `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*` and the three remote servers' tools (`mcp__wh__supabase_crm_dev__*`,
+  `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*`, `mcp__wh__acceptblue__*`, `mcp__wh__authnet__*` and the three remote servers' tools (`mcp__wh__supabase_crm_dev__*`,
   `mcp__wh__monday__*`, `mcp__wh__docusign_demo__*`; Hermes writes the slugs' `-` as `_`) (and, once `skills` is opened in the allow file, `skills_list` and
   `skill_view`; `skill_manage` stays denied by the live pipeline. `check` proves that the reviewed file
   `deploy/withhuman/entry-pipeline.json` denies it; the live revision is the one named below and is re-checked when
@@ -118,6 +118,8 @@ flowchart LR
   approver(["Approver in the withHuman app"])
   qbo[("QuickBooks Online<br/>sandbox company")]
   mav[("Maverick Payments API<br/>(placeholder address until sandbox access)")]
+  ab[("accept.blue API<br/>(sandbox address, placeholder key until access)")]
+  an[("Authorize.net API<br/>(sandbox, placeholder login until access)")]
   remote[("Supabase CRM dev, monday, DocuSign demo<br/>official MCP servers on the internet")]
   lf[("Langfuse Cloud US<br/>trace store, 30 days")]
   deckapp(["Deck app<br/>on your computer"])
@@ -148,7 +150,7 @@ flowchart LR
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
     bridge["bridge<br/>127.0.0.1:8791 (held by systemd) - user dpbridge<br/>keeps no state"]
     sweep["sweep<br/>cron every 5 min"]
-    tunnel["wh-tunnel container<br/>QuickBooks MCP server<br/>+ Maverick MCP server"]
+    tunnel["wh-tunnel container<br/>QuickBooks MCP server<br/>+ Maverick MCP server<br/>+ accept.blue and Authorize.net MCP servers"]
     funnelA{{"Funnel /aap/events"}}
     funnelB{{"Funnel /wh/bridge"}}
   end
@@ -186,6 +188,8 @@ flowchart LR
   gw -->|"forwards over the tunnel<br/>(tunnel dials out)"| tunnel
   tunnel -->|"QuickBooks API"| qbo
   tunnel -.->|"Maverick API (placeholder address: every call fails at once)"| mav
+  tunnel -.->|"accept.blue API (placeholder key: the API refuses every call)"| ab
+  tunnel -.->|"Authorize.net API (placeholder login: the API refuses every call)"| an
   gw -->|"forwards with the sign-in withHuman holds (OAuth)"| remote
   sweep -->|"reads, updates;<br/>deletes finished rows after 30 days"| ledger
   sweep -->|"re-wakes missed decisions"| route
@@ -222,7 +226,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | Setting | Default | What it does |
 |---|---|---|
 | `exempt_tools` | `["parked_action_execute", "clarify", "tool_search", "tool_describe"]` | Tools that are never asked about: anything listed here runs with no approval and no ledger row. The list replaces the default, so keep `parked_action_execute` in it (a warning is logged if it is missing: approved parks could not run). Any other name is logged as an ERROR (`exempt_tools lists <name>: it runs with no approval and no ledger row`); an MCP tool (`mcp__...`), `tool_call` (Tool Search's tool runner: never exempt) or a name a `form_checked_tools` pattern matches is refused as a bad setting (every call refused, see below). Also used by the fail-closed hook when the ledger cannot open. |
-| `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes (slug `docusign` or `docusign_demo`), every Maverick tool `mcp__wh__maverick__maverick_*`) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
+| `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes (slug `docusign` or `docusign_demo`), every Maverick tool `mcp__wh__maverick__maverick_*`, every accept.blue tool `mcp__wh__acceptblue__ablue_*`, every Authorize.net tool `mcp__wh__authnet__authnet_*`) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. A hook with two names (Hermes Deck: `hermes_plugins.hermes_deck.hermes_deck_pre_tool_call` with its bridge, `hermes_plugins.hermes_deck.events.on_pre_tool_call` without) is accepted under both when either is listed (`OBSERVER_HOOK_ALIASES`, TAP2-129). |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
@@ -306,7 +310,8 @@ The tested Hermes version is v0.22.3 (`SUPPORTED_HERMES_VERSION` in `compat.py`;
 `compat.py` were read on v0.22.2 and have not been re-read.
 
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
-configured in the withHuman app; live revision 15, active since 2026-10-25 02:54 UTC. Revision 12 added the Maverick rules (blocks 8 to 14); revision 13 (made in the app on 2026-10-25) added the three remote servers' gateway rules with a direct ask for writes; revision 14 adds their park read rules (blocks 16 to 18) and sends their other gateway calls to the bridge (blocks 19 to 21); revision 15 makes blocks 19 to 21 match on the server name only (it drops a tool-name fallback; a reviewer's finding on pull request 54). Rollback: revision 14, then 13, then 12.
+configured in the withHuman app; live revision 15, active since 2026-10-25 02:54 UTC. Revision 12 added the Maverick rules (rows 8 to 14); revision 13 (made in the app on 2026-10-25) added the three remote servers' gateway rules with a direct ask for writes; revision 14 added their park read rules and sent their other gateway calls to the bridge; revision 15 made the three `gw-` blocks match on the server name only (it drops a tool-name fallback; a reviewer's finding on pull request 54). Rollback: revision 14, then 13, then 12.
+**The file has 31 blocks, the live revision 15 has 25.** The file adds six blocks for the accept.blue and Authorize.net servers (rows 15 to 20 below); they are a candidate revision 16 and **not live until an admin saves the file as a new revision and activates it**. The row numbers below are the file's. In the live revision the six new rows are missing, so its rows 15 to 25 are rows 21 to 31 here (for example, live block 16 `pa-park-supabase-read` is row 22). Until revision 16 is live, row 21 (`money-server-human`, which names both servers) decides every accept.blue or Authorize.net call, at park time and at the gateway, and always asks a person: nothing runs without a person, but even a lookup is asked twice. So registering the servers before revision 16 is safe, only noisy.
 `proto-agents` also requires that agent; blocks run in order and the first to decide ends the pipeline.
 
 | Order | Block | When | Then |
@@ -325,20 +330,26 @@ configured in the withHuman app; live revision 15, active since 2026-10-25 02:54
 | 12 | `pa-gateway-maverick-note` | server `maverick`, the same note rule | Approve |
 | 13 | `pa-gateway-maverick-ticket` | server `maverick`, the same ticket rule | Approve |
 | 14 | `mav-gateway-write-bridge` | server `maverick`, any other tool | Webhook block `durable-park-bridge`, same settings as block 2: approve only the replay of an approved park |
-| 15 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
-| 16 | `pa-park-supabase-read` | server `park:supabase_crm_dev`, tool one of the 6 read tools (`list_tables`, `list_migrations`, `list_extensions`, `get_advisors`, `query_logs`, `search_docs`, as `mcp__wh__supabase_crm_dev__<tool>`). `execute_sql` is not in it | Approve |
-| 17 | `pa-park-monday-read` | server `park:monday`, one of the 33 monday read tools (the same list the agent is granted in withHuman) | Approve |
-| 18 | `pa-park-docusign-read` | server `park:docusign_demo`, one of the 22 DocuSign read tools | Approve |
-| 19 | `gw-supabase` | server `supabase-crm-dev` (gateway). Inside: the same 6 read tools approve; anything else (for example `execute_sql`) goes to webhook block `durable-park-bridge` | Approve reads; bridge for the rest |
-| 20 | `gw-monday` | server `monday`. Inside: the 33 reads approve; anything else goes to the bridge | Approve reads; bridge for the rest |
-| 21 | `gw-docusign` | server `docusign-demo`. Inside: the 22 reads approve; anything else goes to the bridge | Approve reads; bridge for the rest |
-| 22 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
-| 23 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
-| 24 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
-| 25 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
+| 15 | `pa-park-acceptblue-auto` | server `park:acceptblue`, tool is one of the 7 accept.blue tools the server itself marks `auto` (`mcp__wh__acceptblue__ablue_` + `describe_lookup`, `read`, `search_lookups`, `create_customer`, `create_customer_from_transaction`, `update_customer`, `create_invoice`; anchored, so a lookalike such as `ablue_read_all` does not match). None of them moves money: `create_invoice` makes a draft, nothing is charged | Approve |
+| 16 | `pa-gateway-acceptblue-auto` | server `acceptblue` (the gateway replay; tool name with or without `acceptblue__`), the same 7 tools | Approve |
+| 17 | `acceptblue-gateway-write-bridge` | server `acceptblue`, any other tool (the 21 the server marks `you`: charges, refunds, voids, captures, card storage, anything that tells someone outside) | Webhook block `durable-park-bridge` (its own copy, `acceptblue-gateway-write-bridge-webhook`), same settings as block 2: approve only the replay of an approved park |
+| 18 | `pa-park-authnet-auto` | server `park:authnet`, tool is one of the 5 Authorize.net tools the server marks `auto` (`mcp__wh__authnet__authnet_` + `describe_lookup`, `read`, `search_lookups`, `save_customer_profile`, `save_shipping_address`; anchored). None moves money or stores a card | Approve |
+| 19 | `pa-gateway-authnet-auto` | server `authnet` (the gateway replay; tool name with or without `authnet__`), the same 5 tools | Approve |
+| 20 | `authnet-gateway-write-bridge` | server `authnet`, any other tool (the 19 the server marks `you`) | Webhook block `durable-park-bridge` (its own copy, `authnet-gateway-write-bridge-webhook`), same settings as block 2: approve only the replay of an approved park |
+| 21 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
+| 22 | `pa-park-supabase-read` | server `park:supabase_crm_dev`, tool one of the 6 read tools (`list_tables`, `list_migrations`, `list_extensions`, `get_advisors`, `query_logs`, `search_docs`, as `mcp__wh__supabase_crm_dev__<tool>`). `execute_sql` is not in it | Approve |
+| 23 | `pa-park-monday-read` | server `park:monday`, one of the 33 monday read tools (the same list the agent is granted in withHuman) | Approve |
+| 24 | `pa-park-docusign-read` | server `park:docusign_demo`, one of the 22 DocuSign read tools | Approve |
+| 25 | `gw-supabase` | server `supabase-crm-dev` (gateway). Inside: the same 6 read tools approve; anything else (for example `execute_sql`) goes to webhook block `durable-park-bridge` | Approve reads; bridge for the rest |
+| 26 | `gw-monday` | server `monday`. Inside: the 33 reads approve; anything else goes to the bridge | Approve reads; bridge for the rest |
+| 27 | `gw-docusign` | server `docusign-demo`. Inside: the 22 reads approve; anything else goes to the bridge | Approve reads; bridge for the rest |
+| 28 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
+| 29 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
+| 30 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
+| 31 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
 
 Rev 8 and the earlier approve-all behaviour end when the revision above is activated; activate it before this park
-hook goes live. A tool name missing from rules 6 and 7 falls through to rule 23 (proto-agents) or rule 25, so a person decides. A remote-server tool that is not a read (for example monday `create_item` or Supabase `execute_sql`) reaches rule 23 at park time (a person) and its server's bridge at the gateway. Every Maverick tool not in rules 8 to 13 (refunds, charges, signatures, deletes, anything that tells someone outside) reaches rule 15 at park time (a person) and rule 14 at the gateway (the bridge). QuickBooks writes that are not money types (TAP2-115) now ask a person at park time and go through the bridge at the gateway.
+hook goes live. A tool name missing from rules 6 and 7 falls through to rule 29 (proto-agents) or rule 31, so a person decides. A remote-server tool that is not a read (for example monday `create_item` or Supabase `execute_sql`) reaches rule 29 at park time (a person) and its server's bridge at the gateway. Every Maverick tool not in rules 8 to 13 (refunds, charges, signatures, deletes, anything that tells someone outside) reaches rule 21 at park time (a person) and rule 14 at the gateway (the bridge). The same holds for every accept.blue tool not in rules 15 and 16 (rule 17 at the gateway) and every Authorize.net tool not in rules 18 and 19 (rule 20 at the gateway). Those two servers have no tool that is approved only when a flag is off, so there are no rules like 9 and 10 for them: a tool is either in the server's `auto` list or it is for a person. The `auto` lists are the servers' own (`python -m acceptblue_mcp --list-approvals`, `python -m authorizenet_mcp --list-approvals` at the pinned commits) and `tests/payments_servers.py` holds a copy that the pipeline tests compare with the rules, so a pin that moves without the rules is caught. QuickBooks writes that are not money types (TAP2-115) now ask a person at park time and go through the bridge at the gateway.
 
 **Who approves:** the people on the approvers' escalation path in withHuman (today `notify-yaakov-yehuda`, one
 approver). Adding or changing approvers is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
@@ -515,7 +526,7 @@ stateDiagram-v2
 
 Every tool call goes through the park hook (`park_hook.make_pre_tool_call`) in this order. Every path except
 "tool runs" blocks the call. A form-checked tool (`DEFAULT_FORM_CHECKED_TOOLS`: the QuickBooks money moves, the
-DocuSign writes and every Maverick tool) is first checked against the rules Hermes registered for it (the same rules the model was shown),
+DocuSign writes and every Maverick, accept.blue and Authorize.net tool) is first checked against the rules Hermes registered for it (the same rules the model was shown),
 so no approver is asked about a call QuickBooks would reject. Details and safety choices:
 [form-check.md](form-check.md). Which calls need a person is a withHuman pipeline rule, not a list in the plugin.
 
@@ -702,7 +713,7 @@ groups or at the permissions of `/etc/durable-park` itself, and a change to the 
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
 | bridge | `dpbridge` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` (the socket is held by systemd, not by the bridge process) | system units `durable-park-bridge.socket` (holds the port) and `durable-park-bridge` (`Restart=always`) |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
-| tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` (live since 2026-10-25; it replaced `-mav-e4a2b10` (live from 02:38 UTC), which is kept for rollback, as is the QuickBooks-only `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5`), QuickBooks and Maverick servers ([gateway setup](gateway-setup.md#the-maverick-server-in-the-image)) | outbound only | Docker, container `wh-tunnel` |
+| tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` (live since 2026-10-25; it replaced `-mav-e4a2b10` (live from 02:38 UTC), which is kept for rollback, as is the QuickBooks-only `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5`), QuickBooks and Maverick servers ([gateway setup](gateway-setup.md#the-maverick-server-in-the-image)). The reviewed `docker-compose.yml` already names the next image, `...-mav-d6f43f9-ab-9bb8d72-an-6084f36`, which also holds the accept.blue and Authorize.net servers: **not built or live yet** ([gateway setup](gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)) | outbound only | Docker, container `wh-tunnel` |
 | Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
 
 System users behind that table:
@@ -747,6 +758,8 @@ the repo) and never printed by any script.
 | `bridge_secret` | 0600 root:root | bridge (systemd reads it as root and hands the bridge a private copy: `LoadCredential`) | verifies withHuman's pipeline webhook signature. The bot cannot read it |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
 | `maverick.env` | 0600 root | `wh-tunnel` container (passed to the `maverick` server only) | Maverick API token and the two Maverick API addresses; placeholders (`pending`, `https://maverick.invalid`) until sandbox access. Written by `enter-maverick-secrets.sh`; the tunnel will not start without it |
+| `acceptblue.env` | 0600 root | `wh-tunnel` container (passed to the `acceptblue` server only) | accept.blue source key, the PIN and the API address; placeholders (`pending`, `pending`, and the sandbox address `https://api.sandbox.accept.blue/api/v2`: the server refuses any host that is not accept.blue) until access. Written by `enter-acceptblue-secrets.sh`; the tunnel will not start without it |
+| `authnet.env` | 0600 root | `wh-tunnel` container (passed to the `authnet` server only) | Authorize.net sandbox login id and transaction key; placeholders (`pending`) until access. Written by `enter-authnet-secrets.sh`; the tunnel will not start without it |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
 | `audit_key` | 0640 root:hermes | bridge (every gateway call; systemd copies it when the bridge starts: `LoadCredential`), plugin (optional; reads the file) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
 
