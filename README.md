@@ -32,6 +32,46 @@ safety items needs finishing: [what is left](durable-park/docs/backlog.md#before
 | **Admin** | Runs the system: health checks, deploys, alerts, secrets, root steps on the VM, withHuman settings | Root on the VM (`tailscale ssh`), admin in withHuman, write access to this repo |
 | **Developer** (person or AI agent) | Changes code and its docs | This repo; AI agents also follow [`AGENTS.md`](AGENTS.md) |
 
+
+## Project map
+
+**In plain English:** These are the big pieces and how they talk to each other. A person must say yes before anything risky runs.
+
+```mermaid
+flowchart TD
+  U[User in chat<br/>Telegram or Teams] --> H[Hermes Agent<br/>Runs the chat bot]
+  H --> P[durable-park plugin<br/>Stops risky calls and asks for approval]
+  P --> L[(Ledger SQLite<br/>Saves calls so they run once)]
+  P --> AAP[AAP / withHuman<br/>Opens approval request]
+  AAP --> AP[Approver in withHuman app<br/>Says yes or no]
+  AP --> WH[withHuman webhook<br/>Sends decision]
+  WH --> R[Receiver<br/>Wakes the plugin]
+  R --> P
+  P --> B[Bridge<br/>Checks the approved call is exactly right]
+  B --> GW[withHuman gateway<br/>Routes to tools]
+  GW --> T[Tunnel container<br/>Runs QuickBooks and Maverick tools]
+  T --> QBO[QuickBooks Online<br/>Fake books in sandbox]
+  T --> MAV[Maverick Payments<br/>Placeholder settings for now]
+  H --> LF[Langfuse Cloud<br/>Records traces for review]
+```
+
+| Part | What it does | Where it lives |
+|---|---|---|
+| **User in chat (Telegram/Teams)** | Talks to the bot and sees answers. | Outside this repo (services) |
+| **Hermes Agent** | Runs the bots and calls tools. | Installed on VM (v0.22.3) |
+| **durable-park plugin** | Stops risky calls, checks them, saves to ledger, opens approval, wakes on decision, runs once. | [`durable-park/plugin/`](durable-park/plugin/) |
+| **Ledger (SQLite)** | Remembers parked calls so they can't run twice or be lost. | On VM (used by plugin) |
+| **AAP / withHuman** | Approval protocol and app that asks a person to say yes or no. | Hosted ([app.withhuman.ai](https://app.withhuman.ai)) |
+| **Approver (person)** | The only one who can say yes to risky actions. | Person using withHuman app |
+| **Receiver** | Gets the decision webhook from withHuman and wakes the plugin. | [`durable-park/receiver/`](durable-park/receiver/) |
+| **Bridge** | Double-checks the call matches exactly what was approved; answers once. | [`durable-park/bridge/`](durable-park/bridge/) |
+| **withHuman gateway** | Routes approved tool calls to the right servers. | Hosted |
+| **Tunnel container** | Runs QuickBooks and Maverick tools inside the gateway. | [`durable-park/deploy/tunnel/`](durable-park/deploy/tunnel/) |
+| **QuickBooks Online (sandbox)** | Fake books used for testing. | Intuit sandbox |
+| **Maverick Payments** | Payments tools (placeholder settings until sandbox access). | Maverick MCP server |
+| **Langfuse Cloud** | Records traces of chats and tool calls for review (30 days). | Hosted ([us.cloud.langfuse.com](https://us.cloud.langfuse.com)) |
+
+
 **Admins start here:** [runbook](durable-park/docs/runbook.md) (health check, deploy, alerts, troubleshooting,
 secrets, rollback) and [architecture](durable-park/docs/architecture.md) (what runs where).
 
