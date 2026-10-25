@@ -85,6 +85,31 @@ How it was set up (2026-10-25), and how to redo it on a fresh VM (as `ubuntu`, w
    `__pycache__`), or when the image tag does not end in `-mav-<first 7>`. Then check `--list-approvals`, and update
    the approval rules if a tool was added or changed its approval level.
 
+## Remote gateway servers (Supabase CRM dev, monday, DocuSign demo)
+
+In plain English: three services run their own official MCP servers on the internet. withHuman connects to them with
+a sign-in (OAuth) that Yaakov did once in the withHuman app, so no key for them is on the VM. The agent reaches them
+through the same `wh` gateway as QuickBooks, and every call goes through the same approval rules.
+
+| Slug | URL | Scope (sign-in) | Granted to `proto-agents` | Agent's names |
+| --- | --- | --- | --- | --- |
+| `supabase-crm-dev` | `https://mcp.supabase.com/mcp?project_ref=jtwkxbagxuxjzlurgnim&read_only=true&features=database,docs,debugging` (only the `tapdash-crm-dev` project, read-only) | `crm_dev_readonly` | all 7 tools (`execute_sql` always asks a person) | `mcp__wh__supabase_crm_dev__*` |
+| `monday` | `https://mcp.monday.com/mcp` | `tapdash_agents` (tapdashagents@gmail.com on tapdash.monday.com) | the 33 read tools only | `mcp__wh__monday__*` |
+| `docusign-demo` | `https://mcp-d.docusign.com/mcp` (DocuSign developer/demo) | `demo_user` (integration key `7b89fd67-...`, redirect `https://app.withhuman.ai/auth/gateway/oauth/callback`) | the 22 read tools only | `mcp__wh__docusign_demo__*` |
+
+```mermaid
+flowchart LR
+  agent["Hermes agent<br/>(proto-agents)"] -->|"tool call, parked and asked first"| wh["withHuman gateway<br/>(approval rules, revision 14)"]
+  wh -->|"read: approved; anything else: bridge or a person"| sb["Supabase MCP<br/>(tapdash-crm-dev, read-only)"]
+  wh -->|"same rules"| mo["monday MCP<br/>(tapdash.monday.com)"]
+  wh -->|"same rules"| ds["DocuSign MCP<br/>(demo account)"]
+```
+
+Hermes turns the `-` in a slug into `_` (`supabase-crm-dev` becomes `mcp__wh__supabase_crm_dev__...`); the park server is
+then `park:supabase_crm_dev`, and the bridge pairs a gateway call with its park the same way
+(`bridge/verify.py: hermes_tool_name`). To give the agent a write tool later: grant it in withHuman
+(`set_agent_tool_access`); it then asks a person at park time and goes through the bridge at the gateway, with no rule change.
+
 ## Files
 
 | File | Purpose |
@@ -471,8 +496,8 @@ is **unverified** on the live tenant.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline)**
 
-The live entry pipeline is **revision 12** (active since 2026-10-25 01:37 UTC; it adds the seven Maverick blocks). Its source of truth is the reviewed
-file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (19 blocks), and
+The live entry pipeline is **revision 14** (active since 2026-10-25 02:06 UTC; revision 12 added the Maverick blocks, 13 and 14 the three remote servers). Its source of truth is the reviewed
+file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (25 blocks), and
 [architecture section 1](architecture.md#1-system-map) has the same list as a table. Do not rebuild it from this
 page: save the file's blocks as a new entry revision in withHuman and activate it (a save activates at once). Blocks
 run in order and the first one that decides ends the pipeline. Every block for `proto-agents` also tests the agent
@@ -514,7 +539,7 @@ holds when withHuman's own API is slow or down while the bridge asks it: the bri
 ### Known risks / unverified
 
 - Settled live: argument rewrites by the gateway (`withhuman_scope` added, `2.0` sent as `2`) are absorbed by
-  `ledger.normalize_args`; park requests are matched by block 1 of revision 12 (the money regex on the Hermes tool name).
+  `ledger.normalize_args`; park requests are matched by block 1 of revision 14 (the money regex on the Hermes tool name).
 - The bridge relies on withHuman's request list (`GET /api/v1/requests`: `q` is a substring of the tool name, newest
   first, `limit` up to 200) and on the consumption record (`consumption.consumed_at`); both were read in withHuman's
   docs and source and verified live on 2026-10-22 ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).

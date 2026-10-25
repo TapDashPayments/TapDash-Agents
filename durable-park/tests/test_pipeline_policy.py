@@ -33,6 +33,12 @@ EXPECTED_ORDER = [
     "pa-gateway-maverick-ticket",
     "mav-gateway-write-bridge",
     "money-server-human",
+    "pa-park-supabase-read",
+    "pa-park-monday-read",
+    "pa-park-docusign-read",
+    "gw-supabase",
+    "gw-monday",
+    "gw-docusign",
     "pa-mcp-human",
     "pa-default-human",
     "hermes",
@@ -200,6 +206,21 @@ def _evaluate(node, request):
     raise AssertionError(f"unsupported operator {op}")
 
 
+def _inside(blocks, request):
+    """The outcome inside a branch the request entered: nested branches are walked in order; a branch that runs out
+    of blocks ends with a person (withHuman: decided inside it or it goes to a human)."""
+    for inner in blocks:
+        if inner["type"] == "branch":
+            try:
+                if not _evaluate(inner["config"]["when"], request):
+                    continue
+            except _EvalError:
+                return "human"
+            return _inside(inner["config"]["blocks"], request)
+        return inner["config"]["outcome"] if inner["type"] == "outcome" else inner["type"]
+    return "human"
+
+
 def _decide(blocks, agent, server, tool, arguments=None):
     request = {"/agent/slug": agent, "/request/server": server, "/request/tool": tool}
     request.update({f"/request/arguments/{k}": v for k, v in (arguments or {}).items()})
@@ -211,8 +232,7 @@ def _decide(blocks, agent, server, tool, arguments=None):
         except _EvalError:
             return block["id"], "human"
         if matched:
-            inner = block["config"]["blocks"][0]
-            return block["id"], inner["config"]["outcome"] if inner["type"] == "outcome" else inner["type"]
+            return block["id"], _inside(block["config"]["blocks"], request)
     raise AssertionError("no block decided")
 
 
@@ -504,3 +524,60 @@ def test_maverick_bridge_block_matches_the_quickbooks_bridge(blocks):
     mav = next(b for b in blocks if b["id"] == "mav-gateway-write-bridge")["config"]["blocks"][0]
     assert mav["id"] == "mav-gateway-write-bridge-webhook"
     assert {k: v for k, v in mav.items() if k != "id"} == {k: v for k, v in qb.items() if k != "id"}
+
+
+# --- remote gateway servers (Supabase CRM dev, monday, DocuSign demo) ---------------------------------------------
+REMOTE = {
+    # slug: (park server, a read tool, a tool that writes / sends / runs code)
+    "supabase-crm-dev": ("park:supabase_crm_dev", "list_tables", "execute_sql"),
+    "monday": ("park:monday", "get_board_items_page", "create_item"),
+    "docusign-demo": ("park:docusign_demo", "getEnvelope", "createEnvelope"),
+}
+SHORT = {"supabase-crm-dev": "supabase", "monday": "monday", "docusign-demo": "docusign"}
+
+
+def _hermes(slug, tool):
+    return f"mcp__wh__{re.sub('[^A-Za-z0-9_]', '_', slug)}__{re.sub('[^A-Za-z0-9_]', '_', tool)}"
+
+
+@pytest.mark.parametrize("slug", sorted(REMOTE))
+def test_remote_server_reads_and_writes(blocks, slug):
+    park, read, write = REMOTE[slug]
+    s = SHORT[slug]
+    assert _decide(blocks, "proto-agents", park, _hermes(slug, read)) == (f"pa-park-{s}-read", "approve")
+    assert _decide(blocks, "proto-agents", park, _hermes(slug, write)) == ("pa-default-human", "human")
+    assert _decide(blocks, "proto-agents", slug, read) == (f"gw-{s}", "approve")
+    assert _decide(blocks, "proto-agents", slug, f"{slug}__{read}") == (f"gw-{s}", "approve")
+    # every other gateway call goes to the bridge: approved only as the replay of an approved park
+    assert _decide(blocks, "proto-agents", slug, write) == (f"gw-{s}", "webhook")
+    assert _decide(blocks, "proto-agents", slug, read + "_all") == (f"gw-{s}", "webhook")
+    # another agent: a person
+    assert _decide(blocks, "tapdash-ops", slug, read) == ("ask-unruled-call", "human")
+    assert _decide(blocks, "tapdash-ops", park, _hermes(slug, read)) == ("ask-unruled-call", "human")
+
+
+@pytest.mark.parametrize("slug", sorted(REMOTE))
+def test_remote_park_and_gateway_read_lists_agree(blocks, slug):
+    s = SHORT[slug]
+    park = next(b for b in blocks if b["id"] == f"pa-park-{s}-read")
+    gw = next(b for b in blocks if b["id"] == f"gw-{s}")
+    park_names = next(l["value"] for l in block_leaves(park) if l["field"] == "/request/tool")
+    gw_read = gw["config"]["blocks"][0]
+    gw_names = gw_read["config"]["when"]["value"]
+    plain = [n for n in gw_names if "__" not in n]
+    assert sorted(gw_names) == sorted(plain + [f"{slug}__{n}" for n in plain])
+    assert sorted(park_names) == sorted(_hermes(slug, n) for n in plain)
+    assert all(len(n) <= 64 for n in park_names)  # Hermes would hash longer names and the bridge could not pair them
+
+
+def test_remote_bridges_match_the_quickbooks_bridge(blocks):
+    qb = next(b for b in blocks if b["id"] == "qb-gateway-write-bridge")["config"]["blocks"][0]
+    for s in SHORT.values():
+        hook = next(b for b in blocks if b["id"] == f"gw-{s}")["config"]["blocks"][1]
+        assert hook["id"] == f"gw-{s}-bridge-webhook"
+        assert {k: v for k, v in hook.items() if k != "id"} == {k: v for k, v in qb.items() if k != "id"}
+
+
+def test_execute_sql_is_never_approved_by_a_rule(blocks):
+    assert _decide(blocks, "proto-agents", "park:supabase_crm_dev", _hermes("supabase-crm-dev", "execute_sql"))[1] == "human"
+    assert _decide(blocks, "proto-agents", "supabase-crm-dev", "execute_sql")[1] == "webhook"
