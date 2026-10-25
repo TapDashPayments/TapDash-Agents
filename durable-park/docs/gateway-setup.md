@@ -18,7 +18,7 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel digest | `sha256:dad0c8b52d653b4969161a8ec589cf37048da6eec5747e098969e6a281f0c3e0` (this is also what `:latest` pointed to when pinned; published 2026-10-16) |
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
-| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` |
+| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44` (2026-10-24: QuickBooks + Maverick; built with `build.sh`, not running yet). The running `wh-tunnel` still uses `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` until the Maverick switch-on ([plan, Task 7](../../docs/plans/2026-10-23-maverick-tunnel-integration.md)) |
 | Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
@@ -26,14 +26,101 @@ asking you to upgrade"). If that happens: look up the newest tag at
 https://quay.io/repository/withhuman/tunnel?tab=tags, change `TUNNEL_IMAGE` in
 `Dockerfile` and `image:` in `docker-compose.yml`, rebuild.
 
+## Maverick server source
+
+In plain English: the tunnel image also carries TapDash's own Maverick MCP server. Its code lives in a **private**
+GitHub repo, so the VM keeps a read-only copy of it, frozen at one reviewed commit. The copy belongs to **root**:
+the agent's user (`hermes`) can read it (the agent reads the Maverick skills from it) but cannot change it, because
+`build.sh` runs as root and builds the payments server from it.
+
+| Thing | Value |
+| --- | --- |
+| Repo | `TapDashPayments/maverick-mcp` (private) |
+| Pinned commit | the one line in [`deploy/tunnel/maverick-mcp.sha`](../deploy/tunnel/maverick-mcp.sha) (`bf99b4464380564a479e90bc2a3a7135f39ba8d2`, `main` after PR #2) |
+| Checkout on the VM | `/opt/maverick-mcp-src` (owner `root`, mode 0755, files 0644, detached at the pinned commit) |
+| Access | deploy key `proto-agents-root-read` (**read-only**), private key `/root/.ssh/maverick_mcp_deploy` |
+| Skills the agent reads | `/opt/maverick-mcp-src/skills` (`skills.external_dirs`, set by `hermes_mcp.sh`) |
+
+```mermaid
+flowchart LR
+  sha["maverick-mcp.sha<br/>(pinned commit)"] -->|"names the commit for"| co["/opt/maverick-mcp-src<br/>(root's read-only checkout)"]
+  gh["GitHub<br/>TapDashPayments/maverick-mcp"] -->|"git fetch as root with the read-only deploy key"| co
+  co -->|"build context maverick-src (build.sh checks owner, commit, clean tree)"| img["tunnel image<br/>(docker compose build)"]
+  co -->|"skills folder, read only"| hermes["Hermes agent<br/>(skills_list, skill_view)"]
+```
+
+Why root: `build.sh` runs git and `docker compose build` as root. If the checkout belonged to `hermes`, a changed
+`.git/config` (for example `core.fsmonitor`) could make root run a command, and replace refs or grafts could make
+git show the pinned commit while other files are built (independent review of PR 53, finding I1). So `build.sh`
+refuses a checkout that is not root's, that has any file owned by someone else or writable by group or others, or
+that has `.git/info/grafts` or `refs/replace/`; it runs git with `--no-replace-objects` and no `safe.directory`.
+
+How it was set up (2026-10-25), and how to redo it on a fresh VM (as `ubuntu`, with sudo):
+
+1. **Key.** `sudo ssh-keygen -t ed25519 -N '' -C root@proto-agents-maverick-mcp-src -f /root/.ssh/maverick_mcp_deploy`.
+   Copy the public half somewhere `ubuntu` can read (`sudo cp /root/.ssh/maverick_mcp_deploy.pub /tmp/k.pub`) and
+   add it as a **read-only** deploy key (no `--allow-write`):
+   `gh repo deploy-key add /tmp/k.pub -R TapDashPayments/maverick-mcp -t proto-agents-root-read`.
+   GitHub's host key: `/root/.ssh/known_hosts_github` (the same pinned line as `~hermes/.ssh/known_hosts_github`).
+2. **Checkout.**
+
+   ```sh
+   sudo env GIT_SSH_COMMAND="ssh -i /root/.ssh/maverick_mcp_deploy -o IdentitiesOnly=yes \
+     -o UserKnownHostsFile=/root/.ssh/known_hosts_github -o StrictHostKeyChecking=yes" \
+     git clone -q git@github.com:TapDashPayments/maverick-mcp.git /opt/maverick-mcp-src
+   sudo git -C /opt/maverick-mcp-src checkout -q "$(cat <worktree>/durable-park/deploy/tunnel/maverick-mcp.sha)"
+   sudo chown -R root:root /opt/maverick-mcp-src && sudo chmod -R u=rwX,go=rX /opt/maverick-mcp-src
+   ```
+
+   Check: `sudo git -C /opt/maverick-mcp-src rev-parse HEAD` prints the same 40 characters as the file.
+
+**Move to a new commit** (after a reviewed change is merged to `maverick-mcp` `main`):
+
+1. In a TapDash-Agents worktree, write the new commit into `maverick-mcp.sha` (one line, 40 characters), and change
+   the `-mav-<first 7>` part of the image tag in `docker-compose.yml` (both services) and in the docs.
+2. As root, with the `GIT_SSH_COMMAND` above: `git -C /opt/maverick-mcp-src fetch -q origin && git -C
+   /opt/maverick-mcp-src checkout -q <new sha>`, then the same `chown` and `chmod`.
+3. Rebuild with `sudo bash build.sh` (below). It refuses when the checkout is not root's or has a writable or foreign
+   file, has grafts or replace refs, is at another commit, has any local change (also ignored files such as
+   `__pycache__`), or when the image tag does not end in `-mav-<first 7>`. Then check `--list-approvals`, and update
+   the approval rules if a tool was added or changed its approval level.
+
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman` |
-| `deploy/tunnel/tunnel.yaml` | one server `quickbooks`: `command: ["qbo-mcp-server"]` + env |
-| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), named volume `durable-park-qbo-data` at `/data`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, `env_file: /etc/durable-park/tunnel.env`; profile service `check` |
+| `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman`. Stage `maverick`: builds the Maverick server into the venv `/opt/maverick-mcp` (see [The Maverick server in the image](#the-maverick-server-in-the-image)), launcher `/usr/local/bin/maverick-mcp-server`, creates `/data/maverick-inbox` (`withhuman`, 0700) |
+| `deploy/tunnel/build.sh` | the only way to build: checks the Maverick checkout (root's, nothing writable by others, no grafts or replace refs, pinned commit, no local changes) and the image tag, then runs `docker compose build`. Never starts or stops the tunnel |
+| `deploy/tunnel/maverick-mcp.sha` | the pinned `maverick-mcp` commit (one line) |
+| `deploy/tunnel/tunnel.yaml` | two servers: `quickbooks` (`command: ["qbo-mcp-server"]` + env) and `maverick` (`command: ["maverick-mcp-server"]` + env) |
+| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build context `maverick-src` = `${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, two env files `/etc/durable-park/tunnel.env` and `/etc/durable-park/maverick.env` (paths overridable with `TUNNEL_ENV_FILE`, `MAVERICK_ENV_FILE`); profile service `check` (same two env files) |
 | `deploy/tunnel/enter-secrets.sh` | interactive script that writes `/etc/durable-park/tunnel.env` |
+| `deploy/tunnel/enter-maverick-secrets.sh` | interactive script that writes `/etc/durable-park/maverick.env` (3 values) |
+
+## The Maverick server in the image
+
+The `maverick` stage of the `Dockerfile` (verified 2026-10-24, image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44`):
+
+1. It uses the pinned tunnel image as the builder too, so the venv's Python is the image's own (`/usr/bin/python3`,
+   Python 3.14.8 in tunnel 0.0.369).
+2. It copies `requirements.lock`, `requirements-dev.lock`, `pyproject.toml` and `src/` from the build context
+   `maverick-src` (the checkout). Nothing is fetched from git inside the build.
+3. A throw-away build venv installs `requirements-dev.lock` with `--require-hashes --only-binary=:all:` (that gives the
+   pinned `setuptools`) and builds the package wheel with `--no-deps --no-build-isolation --check-build-dependencies`,
+   the same way the server's own CI installs it.
+4. The runtime venv `/opt/maverick-mcp` gets only `requirements.lock` (`--require-hashes --only-binary=:all:`: every
+   file's hash is checked, nothing is compiled), then the wheel with `--no-deps --no-index`. The build fails if
+   `python -m maverick_mcp --list-approvals` does not run.
+5. The runtime stage copies `/opt/maverick-mcp` (owner root, read-only for `withhuman`) and writes the launcher
+   `/usr/local/bin/maverick-mcp-server` (`exec /opt/maverick-mcp/bin/python -m maverick_mcp "$@"`).
+
+Check a built image (no secrets needed, does not touch the running tunnel):
+
+```bash
+sudo docker run --rm --entrypoint maverick-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44 --list-approvals
+```
+
+Verified 2026-10-24: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you` (a person approves).
 
 ## Environment variables
 
@@ -66,12 +153,38 @@ run), also wipe the volume: `sudo docker compose down && sudo docker volume rm d
 Refresh tokens expire after roughly 100 days of no use (Intuit; unverified for
 sandbox).
 
+### Maverick settings: `/etc/durable-park/maverick.env`
+
+A second file (0600 root:root, never committed), written only by `sudo bash deploy/tunnel/enter-maverick-secrets.sh`.
+Both compose services load it next to `tunnel.env`, and `tunnel.yaml` passes the values to the `maverick` server only
+(the QuickBooks server never sees them, and the Maverick server never sees the QuickBooks keys or the tunnel token):
+
+| Variable | Meaning |
+| --- | --- |
+| `MAVERICK_TOKEN` | Maverick API token (`pending` until sandbox access arrives) |
+| `MAVERICK_GATEWAY_URL` | Maverick gateway API base address; must start with `https://` (`https://maverick.invalid` until then) |
+| `MAVERICK_DASHBOARD_URL` | Maverick dashboard API base address; must start with `https://` (`https://maverick.invalid` until then) |
+
+Fixed in `tunnel.yaml` (not a secret): `MAVERICK_INBOX_DIR=/data/maverick-inbox` (the named volume
+`durable-park-maverick-inbox`, where the server keeps files it downloads).
+
+The script asks for each value with `read -rs` (nothing is shown), refuses an empty value, a value with whitespace,
+quotes, `$`, `#`, a backslash, a backtick or a control character (the same rule as `enter-secrets.sh`), and a URL
+that does not start with `https://`; it asks before overwriting, writes through a temporary file and `mv -f`, and
+prints `saved 3 values`.
+
+**No file, no tunnel.** If `maverick.env` is missing, `docker compose up` and `run` stop at once with
+`env file /etc/durable-park/maverick.env not found`. If the file is there but a value is missing, the tunnel refuses to
+start: `withhuman-tunnel: the configuration refers to variables that are not set: MAVERICK_...`. Either way the
+tunnel does not quietly run QuickBooks alone. Both were seen on 2026-10-24 with dummy files (no real secrets, a
+separate compose project, the running tunnel untouched).
+
 ## Build, check, run (Task 2 Step 3, after the human step below)
 
 All commands from `/home/hermes/durable-park/deploy/tunnel`, with `sudo`:
 
 ```bash
-sudo docker compose build                  # build the image (works without any secrets)
+sudo bash build.sh                         # check the Maverick checkout, then build the image (no secrets needed)
 sudo docker compose run --rm check         # starts the server once, lists tools; no tunnel token needed
 sudo docker compose up -d wh-tunnel        # long-running tunnel
 sudo docker logs -f wh-tunnel              # watch it connect
@@ -87,11 +200,13 @@ credentials.
 
 Verified result (dummy credentials, 2026-10-19): `quickbooks: ok, 142 tools`
 (the server's README claims 145; `tools/list` over MCP returns 142).
+With the Maverick server (image `...-mav-bf99b44`, dummy QuickBooks values and the Maverick placeholders,
+2026-10-24): `maverick: ok, 42 tools` and `quickbooks: ok, 142 tools`.
 
 ## Never run these (they print the secrets)
 
-`wh-tunnel` gets all five values from `/etc/durable-park/tunnel.env`, and these
-commands print them in plain text. Do not run them, and do not paste their output
+`wh-tunnel` gets all five values from `/etc/durable-park/tunnel.env` and three more from
+`/etc/durable-park/maverick.env`, and these commands print them in plain text. Do not run them, and do not paste their output
 anywhere:
 
 - `docker compose config` (prints the resolved `env_file` values)
@@ -99,7 +214,7 @@ anywhere:
   (the container's `Env` lists every value)
 - `docker exec wh-tunnel env` / `printenv` / `cat /proc/1/environ`
 - `docker compose run ... env`, `docker run --env-file ... env`
-- `sudo cat /etc/durable-park/tunnel.env`
+- `sudo cat /etc/durable-park/tunnel.env` or `sudo cat /etc/durable-park/maverick.env`
 - `docker logs wh-tunnel` is probably safe, but nobody has checked its output for
   secrets: skim it yourself before sharing it.
 
@@ -356,8 +471,8 @@ is **unverified** on the live tenant.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline)**
 
-The live entry pipeline is **revision 9** (active since 2026-10-21 07:30 UTC). Its source of truth is the reviewed
-file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (12 blocks), and
+The live entry pipeline is **revision 12** (active since 2026-10-25 01:37 UTC; it adds the seven Maverick blocks). Its source of truth is the reviewed
+file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (19 blocks), and
 [architecture section 1](architecture.md#1-system-map) has the same list as a table. Do not rebuild it from this
 page: save the file's blocks as a new entry revision in withHuman and activate it (a save activates at once). Blocks
 run in order and the first one that decides ends the pipeline. Every block for `proto-agents` also tests the agent
@@ -399,7 +514,7 @@ holds when withHuman's own API is slow or down while the bridge asks it: the bri
 ### Known risks / unverified
 
 - Settled live: argument rewrites by the gateway (`withhuman_scope` added, `2.0` sent as `2`) are absorbed by
-  `ledger.normalize_args`; park requests are matched by block 1 of revision 9 (the money regex on the Hermes tool name).
+  `ledger.normalize_args`; park requests are matched by block 1 of revision 12 (the money regex on the Hermes tool name).
 - The bridge relies on withHuman's request list (`GET /api/v1/requests`: `q` is a substring of the tool name, newest
   first, `limit` up to 200) and on the consumption record (`consumption.consumed_at`); both were read in withHuman's
   docs and source and verified live on 2026-10-22 ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).

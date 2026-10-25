@@ -374,6 +374,370 @@
       }
     },
     {
+      "id": "pa-park-maverick-auto",
+      "name": "Park: Maverick lookups and drafts",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "3fb98b04-0c02-4a7e-a801-788ac4488afa",
+          "all": [
+            {
+              "id": "017a3333-4bfa-4de7-aa5a-d1f8d32d01de",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "921bd514-f1aa-4107-a3bf-ffdb7e49bff8",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:maverick"
+            },
+            {
+              "id": "0b5ab773-b01d-46e8-9910-636455c220a0",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^mcp__wh__maverick__maverick_(search_lookups|describe_lookup|read|create_boarding_application|update_boarding_application|save_boarding_principal|update_boarding_fees|update_boarding_equipment|save_vault_customer|save_ach_customer|upload_dispute_evidence|create_dispute_draft|update_ticket)$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-maverick-auto-outcome",
+            "name": "Park: Maverick lookups and drafts",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Maverick lookup or internal draft change (the server's auto list): no money moves and nobody outside is told."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-park-maverick-note",
+      "name": "Park: Maverick note without notifying staff",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "24f04371-9cb4-4ba8-999f-532defe87892",
+          "all": [
+            {
+              "id": "143c16a4-7c3f-48b6-9dc8-f25b07e88686",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "23e73b07-7b36-4bbc-add2-9f8c967fd553",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:maverick"
+            },
+            {
+              "id": "82580139-2b34-453e-b8d3-d9fcf4e52a56",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^mcp__wh__maverick__maverick_add_boarding_note$"
+            },
+            {
+              "id": "79f1c16e-7ecb-4d68-9e0b-c25009430b76",
+              "field": "/request/arguments/notify_staff",
+              "operator": "is_false"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-maverick-note-outcome",
+            "name": "Park: Maverick note without notifying staff",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Maverick boarding note with notify_staff false: nobody is notified."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-park-maverick-ticket",
+      "name": "Park: Maverick ticket without notifying the merchant",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "a5ac9bc0-e61a-42da-ac64-59ebc4c729dd",
+          "all": [
+            {
+              "id": "699a3bce-68bc-47ee-ab54-ad2a59533dba",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "52ae716c-edf1-4c72-9b9d-b0659d8089e4",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:maverick"
+            },
+            {
+              "id": "ed68e6b6-cb05-477c-9f54-9374639a9c27",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^mcp__wh__maverick__maverick_(create_ticket|reply_to_ticket)$"
+            },
+            {
+              "id": "f4f73055-51a0-4383-8abf-666679836c0c",
+              "field": "/request/arguments/notify_merchant",
+              "operator": "is_false"
+            },
+            {
+              "id": "c53a8a25-4ecc-4fbd-b12a-9c4603d0fa44",
+              "field": "/request/arguments/attention_merchant",
+              "operator": "is_false"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-maverick-ticket-outcome",
+            "name": "Park: Maverick ticket without notifying the merchant",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Maverick ticket or reply with notify_merchant and attention_merchant both false: the merchant is not told."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-gateway-maverick-auto",
+      "name": "Gateway: Maverick lookups and drafts",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "64bf2d56-a4f9-4edb-bbb7-52d786605d22",
+          "all": [
+            {
+              "id": "67489c56-7681-4679-b9df-766a2e426f57",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "00ec5a00-db5f-4b85-9d90-16fee189920a",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "maverick"
+            },
+            {
+              "id": "4a0c0895-289e-4a23-b830-163309048a1f",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(maverick__)?maverick_(search_lookups|describe_lookup|read|create_boarding_application|update_boarding_application|save_boarding_principal|update_boarding_fees|update_boarding_equipment|save_vault_customer|save_ach_customer|upload_dispute_evidence|create_dispute_draft|update_ticket)$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-gateway-maverick-auto-outcome",
+            "name": "Gateway: Maverick lookups and drafts",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Maverick lookup or internal draft change (the server's auto list): no money moves and nobody outside is told."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-gateway-maverick-note",
+      "name": "Gateway: Maverick note without notifying staff",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "2b3bf9f8-0fc1-4754-9e3a-300355bba1e6",
+          "all": [
+            {
+              "id": "d58c9ee9-e58d-4bf0-a258-a821a5c45c47",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "b6e83c9b-18b0-479b-9c42-ba0a1ffe5c26",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "maverick"
+            },
+            {
+              "id": "eb0f16ea-92a0-4131-b741-af645ea21c7c",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(maverick__)?maverick_add_boarding_note$"
+            },
+            {
+              "id": "4858b1a6-c94a-485c-9623-6dfb698cbc69",
+              "field": "/request/arguments/notify_staff",
+              "operator": "is_false"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-gateway-maverick-note-outcome",
+            "name": "Gateway: Maverick note without notifying staff",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Maverick boarding note with notify_staff false: nobody is notified."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-gateway-maverick-ticket",
+      "name": "Gateway: Maverick ticket without notifying the merchant",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "c065d340-de8a-41db-8199-26b227ba14b0",
+          "all": [
+            {
+              "id": "9c1140b6-134b-4f79-8534-0ccd2e27a267",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "f6ac814f-5d0a-4e7d-a1a5-65abd8b87f61",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "maverick"
+            },
+            {
+              "id": "4829a643-4a9c-489f-8aea-a4ea0ef3f05b",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(maverick__)?maverick_(create_ticket|reply_to_ticket)$"
+            },
+            {
+              "id": "835a61ca-b8da-4fca-907c-f78575683e7d",
+              "field": "/request/arguments/notify_merchant",
+              "operator": "is_false"
+            },
+            {
+              "id": "a787ae81-abc6-4332-9d45-ef44c98e238e",
+              "field": "/request/arguments/attention_merchant",
+              "operator": "is_false"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-gateway-maverick-ticket-outcome",
+            "name": "Gateway: Maverick ticket without notifying the merchant",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Maverick ticket or reply with notify_merchant and attention_merchant both false: the merchant is not told."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "mav-gateway-write-bridge",
+      "name": "proto-agents other Maverick calls",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "710890c8-466a-4a4f-8313-cc0c742f3635",
+          "all": [
+            {
+              "id": "7091b412-00a5-4bc5-aa79-e3bd8e119ab3",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "632cb22e-95cb-46ad-b7f8-af5823176054",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "maverick"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "mav-gateway-write-bridge-webhook",
+            "name": "durable-park-bridge",
+            "type": "webhook",
+            "enabled": true,
+            "timeout": "5s",
+            "max_attempts": 3,
+            "config": {
+              "endpoint_key": "durable-park-bridge",
+              "allowed_outcomes": [
+                "human",
+                "approve"
+              ],
+              "include": {
+                "agent_reasoning": false,
+                "context": false,
+                "previous_metadata": false
+              },
+              "reason": "durable-park bridge: approves only a call matching an approved park; anything else goes to Yaakov.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ],
+        "reason": ""
+      }
+    },
+    {
       "id": "money-server-human",
       "name": "Money server: always a person",
       "type": "branch",

@@ -49,7 +49,7 @@ Rules:
   Claude can run them. Keep the rule that the admin confirms risky actions first (anything destructive, hard to undo, or
   that touches secrets, sudoers, sshd, Tailscale or a running gateway). The agent (`hermes`) has no sudo and no terminal tool.
 - **One agent, one Hermes install, v1 tool lockdown.** The `hermes` install is the only agent on the VM. The agent can
-  reach only `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*`, plus the three Tool Search bridge tools
+  reach only `clarify`, `parked_action_execute`, `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*`, plus the three Tool Search bridge tools
   (`tool_search`, `tool_describe`, `tool_call`) while Tool Search is on. **This is not a full security boundary
   today.** How strong it is, what an agent could still do and where Clean Setup Phase 1 and Phase 2 stand:
   [architecture section 0](architecture.md#0-how-strong-is-it-today) (the one copy of that text). What is left before
@@ -320,7 +320,7 @@ then run `sqlite3 <ledger> 'VACUUM;'` as `hermes`.
 
 `durable-park ALERT: the form checker is not working - <reason>. Risky actions will be refused until it is fixed.`
 
-Form-checked calls (QuickBooks money moves, DocuSign writes) are blocked (fail closed) until it is fixed; other
+Form-checked calls (QuickBooks money moves, DocuSign writes, Maverick tools) are blocked (fail closed) until it is fixed; other
 tool calls are still asked about as usual. Read `formcheck_status.json` and the reason:
 
 | Reason | Likely cause | Fix |
@@ -1430,15 +1430,16 @@ that has to agree:
    gateway servers the agent needs (spec section 7, Q5) ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
    sends its `park:docusign` request to a person, and add it to pipeline **block 2** (`block-06ebcdd6`), so the bridge decides its
    replays (it asks withHuman for the matching park, by the Hermes name `mcp__wh__<slug>__<tool>`) ([block 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
-2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
-   other `mcp__wh__` tool registers. Allow the new server there.
-3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify`,
+2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` and `maverick__*` tools in (`TOOL_INCLUDE`),
+   and fails if any other `mcp__wh__` tool registers (`ALLOWED_PREFIX_RE`). Allow the new server in both.
+3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*`
+   (`ALLOWED_TOOL_PREFIXES`; plus `clarify`,
    `parked_action_execute` and, once Tool Search is on, the three bridge tools `tool_search`, `tool_describe`, `tool_call`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
    list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
 4. **Form-checked list**: the plugin form-checks tools matching the form-checked patterns (setting
    `plugins.entries.durable-park.settings.form_checked_tools`, see [Plugin settings](#plugin-settings); default
-   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in
-   the default. Leaving a tool off this list does **not** let it through: it is still asked about.
+   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools and every Maverick
+   tool are already in the default (Maverick last: index 0 stays the QuickBooks pattern the pipeline test pins). Leaving a tool off this list does **not** let it through: it is still asked about.
 5. **Docs**: the pipeline table and system map in [architecture.md](architecture.md), this runbook, the setup guide.
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
 
@@ -1569,8 +1570,16 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
    PY
    ```
 2. As admin, add the toolset's name on its own line (for example `web`), save.
-   `terminal`, `file`, `code_execution`, `delegation`, `cronjob`, `skills` and `computer_use` are refused until
+   `terminal`, `file`, `code_execution`, `delegation`, `cronjob` and `computer_use` are refused until
    Clean Setup Phase 2; a typo is refused too (exit 2, message on stderr, nothing changed).
+   `skills` may be opened (the agent reads the Maverick how-to notes with `skills_list` and `skill_view`), but only
+   while the entry pipeline denies `skill_manage`, which writes skill files: `check` reads
+   `deploy/withhuman/entry-pipeline.json` and fails (`skills: LEAK ...`) if any block before the deny
+   (`pa-hermes-local-deny`) could approve or ask about a `skill_manage` call. Keep `skill_manage` in that block.
+   `check` reads the reviewed file, not withHuman. So before opening `skills`, also confirm in withHuman
+   (`get_pipeline entry`, or the app) that the **active** revision is the one named in
+   [architecture.md](architecture.md) and that `pa-hermes-local-deny` there still lists `skill_manage` ahead of
+   every block that approves.
    Not Phase-2-gated but still risky: `desktop_ui`, `catalog`, `browser-cdp`, `a2a`, `connections`; open them
    through the file only after their pipeline rule exists ([spec section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
    An allow file the `hermes` user cannot read (for example a pre-existing one with mode 600 root:root) makes
@@ -1673,6 +1682,47 @@ restarts the gateway ([health check](#health-check)).
 - The "Read traces" and "Find everything about one approval" scripts under [Tracing (Langfuse)](#tracing-langfuse)
   were written when the Langfuse keys were in `.env`. They were not re-run after the move.
 
+## Maverick
+
+In plain English: Maverick is the payments system TapDash boards merchants on. Its MCP server runs inside the same
+tunnel container as QuickBooks, so the agent reaches it only through withHuman, like QuickBooks. Setup details:
+[gateway setup](gateway-setup.md#maverick-server-source).
+
+### Maverick settings (placeholders until sandbox access)
+
+Until Maverick gives us sandbox access, the tunnel still needs `/etc/durable-park/maverick.env`, because the tunnel
+refuses to start without it. Yaakov runs, in a terminal on the VM (not screen-shared):
+
+```sh
+sudo bash /home/hermes/tapdash-agents/durable-park/deploy/tunnel/enter-maverick-secrets.sh
+```
+
+and types the placeholders: `pending` for the token and `https://maverick.invalid` for both URLs. It prints
+`saved 3 values`. The `.invalid` name never resolves, so every Maverick call fails at once (the address cannot be
+looked up) with a clear error from the server, never silently. A lookup says nothing changed. A change tool says
+it is not known whether Maverick made the change (the server cannot know the address is a placeholder), so an
+approved Maverick change replayed under the placeholders ends as an `unknown` ledger row that a person clears
+(see [architecture](architecture.md)); that is expected, not a bug, and with this address nothing left the VM. When the real values arrive, run the script again (it asks before
+overwriting) and recreate the tunnel (no ledger row `parked`, `approved` or `executing`, then
+from `deploy/tunnel`: `sudo docker compose up -d wh-tunnel`).
+
+Never `cat` the file or run `docker compose config`, `docker inspect` or `docker exec ... env`: they print it.
+
+### Maverick switch-on (in this order)
+
+1. Merge the reviewed change and fast-forward the live clone ([Deploy a change](#deploy-a-change)).
+2. Root's checkout at the pinned commit ([gateway setup](gateway-setup.md#maverick-server-source)); `sudo bash
+   deploy/tunnel/build.sh` builds the image.
+3. The placeholder settings above (`maverick.env`).
+4. No ledger row `parked`, `approved` or `executing` ([health check](#health-check)); then from `deploy/tunnel`:
+   `sudo docker compose run --rm check` (lists 42 `maverick_` tools) and `sudo docker compose up -d wh-tunnel`.
+5. In withHuman: register gateway server `maverick` through tunnel `proto-agents`, tunnel entry `maverick`, one scope
+   `default` (auth none); grant it to agent `proto-agents`. The approval rules are entry revision 12.
+6. Open `skills` in `/etc/durable-park/allowed_toolsets` ([Open a toolset](#open-a-toolset)).
+7. `sudo bash deploy/hermes_mcp.sh`: it restarts the gateway, checks the tool scope and policy, and only then
+   checks that `mcp__wh__maverick__maverick_read` registered (so step 5 must come first).
+8. Test in Teams: a lookup runs without asking; a refund asks a person (deny it).
+
 ## Rotate secrets before production
 
 Several secrets were pasted into chat during testing (approved for testing only). Before any real books:
@@ -1682,6 +1732,8 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - [ ] Rotate the Intuit app client secret and refresh token; re-run OAuth; wipe the `durable-park-qbo-data`
       volume: [gateway-setup.md](gateway-setup.md#environment-variables)
 - [ ] Issue a new withHuman tunnel token
+- [ ] Replace the Maverick placeholders (or any Maverick token that was ever shared) with real values:
+      [Maverick settings](#maverick-settings-placeholders-until-sandbox-access)
 - [ ] Rotate the `durable-park-bridge` webhook endpoint secret and re-store `bridge_secret` (`root:root 0600`), then
       `sudo systemctl restart durable-park-bridge` ([how](#store-or-rotate-the-bridges-keys))
 - [ ] Regenerate `wake_secret`

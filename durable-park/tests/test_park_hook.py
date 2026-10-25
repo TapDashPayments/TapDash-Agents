@@ -2376,3 +2376,17 @@ def test_expand_observer_hooks_only_adds_the_pair():
     assert expand_observer_hooks([]) == frozenset()
     assert expand_observer_hooks(["x.y"]) == frozenset({"x.y"})
     assert expand_observer_hooks([DECK_HOOK_NAMES[1], "x.y"]) == frozenset({*DECK_HOOK_NAMES, "x.y"})
+
+
+def test_maverick_tools_are_form_checked():
+    def checked(name):
+        return any(r.fullmatch(name) for r in RISKY)
+
+    assert checked("mcp__wh__maverick__maverick_refund_transaction")
+    assert checked("mcp__wh__maverick__maverick_read")
+    assert not checked("mcp__wh__maverick__x")
+    assert not checked("mcp__wh__maverick__maverick_Read")
+    assert not checked("mcp__wh__maverickX__maverick_read")
+    # index 0 stays the QuickBooks money regex (the pipeline's money rule is pinned to it), Maverick is last
+    assert DEFAULT_FORM_CHECKED_TOOLS[0].startswith(r"mcp__wh__quickbooks__")
+    assert DEFAULT_FORM_CHECKED_TOOLS[-1] == r"mcp__wh__maverick__maverick_[a-z0-9_]+"

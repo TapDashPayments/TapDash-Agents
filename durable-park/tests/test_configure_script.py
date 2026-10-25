@@ -273,7 +273,12 @@ def test_hermes_mcp_script_values_and_guards():
     text = MCP_SCRIPT.read_text()
     for needle in ("GATEWAY_URL=https://app.withhuman.ai/gateway/mcp", "set_cfg \"mcp_servers.$SERVER.trust\" full",
                    "'Bearer ${DURABLE_PARK_WH_TOKEN}'", "TOKEN_FILE=/etc/durable-park/instance_token",
-                   "does not exist: provision the instance first", "TOOL_INCLUDE='[\"quickbooks__*\"]'"):
+                   "does not exist: provision the instance first",
+                   "TOOL_INCLUDE='[\"quickbooks__*\", \"maverick__*\"]'",
+                   "EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read",
+                   "has \"$registered\" -F -- \"$EXPECTED_TOOL_MAVERICK\"",
+                   "MAVERICK_SKILLS_DIR=/opt/maverick-mcp-src/skills",
+                   'set_cfg skills.external_dirs "[\\"$MAVERICK_SKILLS_DIR\\"]"'):
         assert needle in text, needle
     code = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
     for line in code:

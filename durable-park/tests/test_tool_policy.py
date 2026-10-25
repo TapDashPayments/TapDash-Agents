@@ -42,6 +42,8 @@ def test_no_toolset_is_both_allowed_and_forbidden():
     ("browser_navigate", False), ("memory", False), ("tool_call", False), ("tool_search", False),
     ("mcp__other__x", False), ("mcp__wh_evil__x", False), ("mcp__wh__withhuman__get_agent", False),
     ("mcp__wh__docusign__createEnvelope", False), ("mcp__wh__quickbooksX__create_invoice", False),
+    ("mcp__wh__maverick__maverick_read", True), ("mcp__wh__maverick__maverick_refund_transaction", True),
+    ("mcp__wh__maverickX__a", False), ("mcp__wh__maverick_x__a", False), ("mcp__wh__mav__maverick_read", False),
 ])
 def test_is_allowed(name, allowed):
     assert policy.is_allowed(name) is allowed
@@ -86,9 +88,24 @@ def test_hermes_mcp_checks_before_and_after_and_scopes_wh_tools():
     restart = text.index("as_hermes systemctl --user restart hermes-gateway")
     checks = _checks(text)
     assert len(checks) == 2 and text.index("tool_policy apply") < checks[0] < restart < checks[1]
-    assert "ALLOWED_PREFIX=mcp__wh__quickbooks__" in text
-    scope = text.index('other_tools=$(grep -v -- "^${ALLOWED_PREFIX}"')
+    assert "ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick)__'" in text
+    scope = text.index('other_tools=$(grep -vE -- "${ALLOWED_PREFIX_RE}"')
     assert restart < scope and "die" in text[scope:scope + 400]
+    assert "ALLOWED_PREFIX=" not in text  # the old QuickBooks-only prefix is gone
+
+
+def test_hermes_mcp_scope_regex_flags_every_other_wh_tool():
+    import re
+    import subprocess
+
+    text = (DEPLOY / "hermes_mcp.sh").read_text()
+    regex = re.search(r"^ALLOWED_PREFIX_RE='([^']+)'", text, re.M).group(1)
+    names = ["mcp__wh__quickbooks__get_company_info", "mcp__wh__maverick__maverick_read",
+             "mcp__wh__maverickX__a", "mcp__wh__withhuman__get_agent", "mcp__wh__quickbooks_maverick__x",
+             "mcp__wh__docusign__createEnvelope"]
+    other = subprocess.run(["grep", "-vE", "--", regex], input="\n".join(names) + "\n", capture_output=True,
+                           text=True).stdout.split()
+    assert other == names[2:]
 
 
 def test_platform_keys_come_from_every_hermes_source():
@@ -131,8 +148,8 @@ def test_read_allowed(tmp_path):
 
 
 def test_phase2_toolsets_are_forbidden_names():
-    assert policy.PHASE2_TOOLSETS == {"terminal", "file", "code_execution", "delegation", "cronjob", "skills",
-                                      "computer_use"}
+    # skills left Phase 2 (Maverick plan Task 5): reading skills is allowed while the pipeline denies skill_manage
+    assert policy.PHASE2_TOOLSETS == {"terminal", "file", "code_execution", "delegation", "cronjob", "computer_use"}
     assert policy.PHASE2_TOOLSETS <= set(policy.FORBIDDEN_TOOLSETS)
 
 
@@ -535,3 +552,83 @@ def test_apply_leaves_an_admin_s_tool_search_on_alone(monkeypatch, current, writ
     assert policy.apply([]) == 0
     tool_search_writes = [w for w in writes if w[0] == "tools.tool_search.enabled"]
     assert tool_search_writes == ([] if written is None else [("tools.tool_search.enabled", written)])
+
+
+# --- Task 5 (Maverick tunnel plan): skill reading under the lockdown ---------------------------------------------
+
+
+def test_skills_toolset_can_be_opened(tmp_path):
+    f = tmp_path / "allowed"
+    f.write_text("skills\n")
+    assert policy.read_allowed(str(f)) == ["skills"]
+
+
+def test_the_other_phase2_toolsets_stay_refused(tmp_path):
+    f = tmp_path / "allowed"
+    for name in ("terminal", "file", "code_execution", "delegation", "cronjob", "computer_use"):
+        f.write_text(f"{name}\n")
+        with pytest.raises(ValueError, match=f"{name} stays off until Clean Setup Phase 2"):
+            policy.read_allowed(str(f))
+
+
+def test_skill_manage_is_always_denied():
+    # the real pipeline file: skill_manage reaches the deny block before anything could approve it
+    assert policy.PIPELINE_FILE.endswith("withhuman/entry-pipeline.json")
+    assert policy.skill_manage_problem(policy.PIPELINE_FILE) is None
+    blocks = json.loads(Path(policy.PIPELINE_FILE).read_text())["blocks"]
+    deny = next(b for b in blocks if b["id"] == "pa-hermes-local-deny")
+    tools = [c for c in deny["config"]["when"]["all"] if c["field"] == "/request/tool"][0]["value"]
+    assert "skill_manage" in tools
+    assert deny["config"]["blocks"][0]["config"]["outcome"] == "deny"
+
+
+def _pipeline(tmp_path, blocks):
+    p = tmp_path / "entry-pipeline.json"
+    p.write_text(json.dumps({"default_escalation_path": "x", "blocks": blocks}))
+    return str(p)
+
+
+def _branch(bid, conditions, outcome, kind="all"):
+    return {"id": bid, "type": "branch", "config": {"when": {"id": "c", kind: conditions}, "blocks": [
+        {"id": bid + "-o", "type": "outcome", "config": {"outcome": outcome}}]}}
+
+
+def _cond(field, operator, value):
+    return {"id": "x", "field": field, "operator": operator, "value": value}
+
+
+def test_skill_manage_problem_flags_a_missing_or_late_deny(tmp_path):
+    deny = _branch("deny", [_cond("/request/server", "equals", "hermes"),
+                            _cond("/request/tool", "in", ["terminal", "skill_manage"])], "deny")
+    approve_all_hermes = _branch("approve", [_cond("/request/server", "equals", "hermes")], "approve")
+    approve_reads = _branch("reads", [_cond("/request/server", "equals", "hermes"),
+                                      _cond("/request/tool", "in", ["skill_view", "skills_list"])], "approve")
+    assert policy.skill_manage_problem(_pipeline(tmp_path, [approve_reads, deny])) is None
+    assert "approve" in policy.skill_manage_problem(_pipeline(tmp_path, [approve_all_hermes, deny]))
+    assert "no block" in policy.skill_manage_problem(_pipeline(tmp_path, [approve_reads]))
+    human = _branch("h", [_cond("/request/tool", "regex", "^skill_.*$")], "human")
+    assert "human" in policy.skill_manage_problem(_pipeline(tmp_path, [human, deny]))
+    # a condition the checker does not understand counts as "may match" (fail closed)
+    odd = _branch("odd", [_cond("/request/tool", "starts_with", "zzz")], "approve")
+    assert "approve" in policy.skill_manage_problem(_pipeline(tmp_path, [odd, deny]))
+    assert "cannot read" in policy.skill_manage_problem(str(tmp_path / "missing.json"))
+
+
+def test_check_refuses_skills_without_the_deny(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: None)
+    monkeypatch.setattr(policy, "_plugin_toolsets", lambda: [])
+    monkeypatch.setattr(policy, "_platforms", lambda: ["cli"])
+    monkeypatch.setattr(policy, "allowed_tool_names", lambda allowed: {"skills_list", "skill_view"})
+    monkeypatch.setattr(policy, "effective_tools",
+                        lambda platform, enabled="config", assemble=True: ["parked_action_execute", "skill_view"])
+    monkeypatch.setattr(policy, "media_check", lambda: [])
+    approve_all_hermes = _branch("approve", [_cond("/request/server", "equals", "hermes")], "approve")
+    monkeypatch.setattr(policy, "PIPELINE_FILE", _pipeline(tmp_path, [approve_all_hermes]))
+    problems = []
+    assert policy.check(["skills"], problems) == 1
+    assert any("skill_manage" in p for p in problems)
+    # the same check passes with the real pipeline file, and without `skills` the pipeline is not consulted
+    monkeypatch.setattr(policy, "PIPELINE_FILE", str(DEPLOY / "withhuman" / "entry-pipeline.json"))
+    assert policy.check(["skills"], []) == 0
+    monkeypatch.setattr(policy, "PIPELINE_FILE", str(tmp_path / "missing.json"))
+    assert policy.check([], []) == 0

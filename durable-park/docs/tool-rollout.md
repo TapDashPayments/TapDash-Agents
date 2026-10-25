@@ -6,7 +6,7 @@ This document tracks the rollout of Hermes toolsets through `durable-park` and `
 
 Where things stand: the v1 tool lockdown is still applied ([architecture section 0](architecture.md#0-how-strong-is-it-today)),
 so the agent reaches none of the tool groups below today. This page is about which groups have a pipeline rule
-(`deploy/withhuman/entry-pipeline.json`, revision 9) and which do not.
+(`deploy/withhuman/entry-pipeline.json`, revision 12) and which do not.
 
 ## Profile Scoping in AAP Context
 

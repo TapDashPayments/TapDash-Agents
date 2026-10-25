@@ -54,6 +54,9 @@ DEFAULT_FORM_CHECKED_TOOLS: tuple[str, ...] = (
     r"|credit_memo|vendor_credit|purchase|invoice|bill)",
     r"mcp__wh__docusign__(createEnvelope|updateEnvelope|triggerWorkflow|cancelWorkflowInstance"
     r"|pauseNewWorkflowInstances|resumeWorkflow)",
+    # Every Maverick tool (they all carry the maverick_ prefix). Keep it last: index 0 is pinned to the pipeline's
+    # QuickBooks money rule (tests/test_pipeline_policy.py).
+    r"mcp__wh__maverick__maverick_[a-z0-9_]+",
 )
 
 PARK_MESSAGE = (

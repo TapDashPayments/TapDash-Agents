@@ -25,6 +25,13 @@ EXPECTED_ORDER = [
     "pa-park-quickbooks-read",
     "pa-hermes-read",
     "pa-hermes-local-deny",
+    "pa-park-maverick-auto",
+    "pa-park-maverick-note",
+    "pa-park-maverick-ticket",
+    "pa-gateway-maverick-auto",
+    "pa-gateway-maverick-note",
+    "pa-gateway-maverick-ticket",
+    "mav-gateway-write-bridge",
     "money-server-human",
     "pa-mcp-human",
     "pa-default-human",
@@ -160,13 +167,24 @@ def _all_condition_nodes(blocks):
             yield from _walk_conditions(when)
 
 
+class _EvalError(Exception):
+    """withHuman stops a block with an evaluation error (seen with preview_pipeline 2026-10-25: is_false on null, 0 or
+    the text "false"); the block then ends as a person (reason_code block_error)."""
+
+
 def _evaluate(node, request):
     if "all" in node:
         return all(_evaluate(c, request) for c in node["all"])
     if "any" in node:
         return any(_evaluate(c, request) for c in node["any"])
     value = request.get(node["field"])
-    op, expected = node["operator"], node["value"]
+    op, expected = node["operator"], node.get("value")
+    if op == "is_false":  # withHuman: JSON false matches; missing does not match; null/0/"false" is an error
+        if node["field"] not in request:
+            return False
+        if isinstance(value, bool):
+            return value is False
+        raise _EvalError(node["field"])
     if op == "equals":
         return value == expected
     if value is None:
@@ -182,12 +200,17 @@ def _evaluate(node, request):
     raise AssertionError(f"unsupported operator {op}")
 
 
-def _decide(blocks, agent, server, tool):
+def _decide(blocks, agent, server, tool, arguments=None):
     request = {"/agent/slug": agent, "/request/server": server, "/request/tool": tool}
+    request.update({f"/request/arguments/{k}": v for k, v in (arguments or {}).items()})
     for block in blocks:
         if block["type"] == "outcome":
             return block["id"], block["config"]["outcome"]
-        if _evaluate(block["config"]["when"], request):
+        try:
+            matched = _evaluate(block["config"]["when"], request)
+        except _EvalError:
+            return block["id"], "human"
+        if matched:
             inner = block["config"]["blocks"][0]
             return block["id"], inner["config"]["outcome"] if inner["type"] == "outcome" else inner["type"]
     raise AssertionError("no block decided")
@@ -360,7 +383,7 @@ def test_a_tool_with_no_rule_asks_for_any_agent(blocks, agent, server, tool):
     assert _decide(blocks, agent, server, tool) == ("ask-unruled-call", "human")
 
 
-MONEY_SERVERS = ["quickbooks", "park:quickbooks", "stripe", "park:stripe", "mcp:stripe", "paypal", "square",
+MONEY_SERVERS = ["quickbooks", "park:quickbooks", "park:maverick", "stripe", "park:stripe", "mcp:stripe", "paypal", "square",
                  "plaid", "maverick", "accept-blue", "accept_blue", "authorize-net", "authnet", "mcp:payments",
                  "payments", "tapdash-pay", "mercury", "brex", "xero", "bill.com", "mcp:bank-feed"]
 
@@ -406,3 +429,78 @@ def test_regexes_avoid_inline_flags_and_lookaround(blocks):
     for node in _all_condition_nodes(blocks):
         if node.get("operator") == "regex":
             assert "(?" not in node["value"], node["value"]
+
+
+# --- Maverick (tunnel plan Task 6) -----------------------------------------------------------------------------
+MV = "mcp__wh__maverick__"
+MAVERICK_AUTO = ["maverick_search_lookups", "maverick_describe_lookup", "maverick_read",
+                 "maverick_create_boarding_application", "maverick_update_boarding_application",
+                 "maverick_save_boarding_principal", "maverick_update_boarding_fees",
+                 "maverick_update_boarding_equipment", "maverick_save_vault_customer", "maverick_save_ach_customer",
+                 "maverick_upload_dispute_evidence", "maverick_create_dispute_draft", "maverick_update_ticket"]
+OFF = {"notify_merchant": False, "attention_merchant": False}
+
+MAVERICK_DECISIONS = [
+    ("proto-agents", "park:maverick", MV + "maverick_read", None, "pa-park-maverick-auto", "approve"),
+    ("proto-agents", "park:maverick", MV + "maverick_refund_transaction", None, "money-server-human", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_create_ticket", OFF, "pa-park-maverick-ticket", "approve"),
+    ("proto-agents", "park:maverick", MV + "maverick_reply_to_ticket", OFF, "pa-park-maverick-ticket", "approve"),
+    ("proto-agents", "park:maverick", MV + "maverick_create_ticket", {**OFF, "notify_merchant": True},
+     "money-server-human", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_create_ticket", {**OFF, "attention_merchant": True},
+     "money-server-human", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_create_ticket", None, "money-server-human", "human"),
+    # odd values are an evaluation error in withHuman: the block itself ends as a person (not a fall-through)
+    ("proto-agents", "park:maverick", MV + "maverick_create_ticket", {"notify_merchant": "false",
+                                                                      "attention_merchant": "false"},
+     "pa-park-maverick-ticket", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_create_ticket", {"notify_merchant": None,
+                                                                      "attention_merchant": False},
+     "pa-park-maverick-ticket", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_add_boarding_note", {"notify_staff": 0},
+     "pa-park-maverick-note", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_add_boarding_note", {"notify_staff": False},
+     "pa-park-maverick-note", "approve"),
+    ("proto-agents", "park:maverick", MV + "maverick_add_boarding_note", {"notify_staff": True},
+     "money-server-human", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_add_boarding_note", None, "money-server-human", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_read_all", None, "money-server-human", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_readx", None, "money-server-human", "human"),
+    ("proto-agents", "park:maverick", "mcp__wh__maverickx__maverick_read", None, "money-server-human", "human"),
+    ("proto-agents", "maverick", "maverick_read", None, "pa-gateway-maverick-auto", "approve"),
+    ("proto-agents", "maverick", "maverick__maverick_read", None, "pa-gateway-maverick-auto", "approve"),
+    ("proto-agents", "maverick", "maverick_create_ticket", OFF, "pa-gateway-maverick-ticket", "approve"),
+    ("proto-agents", "maverick", "maverick_add_boarding_note", {"notify_staff": False},
+     "pa-gateway-maverick-note", "approve"),
+    ("proto-agents", "maverick", "maverick_refund_transaction", None, "mav-gateway-write-bridge", "webhook"),
+    ("proto-agents", "maverick", "maverick_create_ticket", None, "mav-gateway-write-bridge", "webhook"),
+    ("proto-agents", "maverick", "maverick_read_all", None, "mav-gateway-write-bridge", "webhook"),
+    ("tapdash-ops", "maverick", "maverick_read", None, "money-server-human", "human"),
+    ("tapdash-ops", "park:maverick", MV + "maverick_read", None, "money-server-human", "human"),
+]
+
+
+@pytest.mark.parametrize("agent,server,tool,arguments,block_id,outcome", MAVERICK_DECISIONS)
+def test_maverick_decisions(blocks, agent, server, tool, arguments, block_id, outcome):
+    assert _decide(copy.deepcopy(blocks), agent, server, tool, arguments) == (block_id, outcome)
+
+
+@pytest.mark.parametrize("name", MAVERICK_AUTO)
+def test_every_maverick_auto_tool_is_approved_on_both_paths(blocks, name):
+    assert _decide(blocks, "proto-agents", "park:maverick", MV + name) == ("pa-park-maverick-auto", "approve")
+    assert _decide(blocks, "proto-agents", "maverick", name) == ("pa-gateway-maverick-auto", "approve")
+
+
+def test_maverick_auto_list_matches_the_server_list(blocks):
+    """The regex names exactly the 13 auto tools (python -m maverick_mcp --list-approvals at the pinned commit)."""
+    block = next(b for b in blocks if b["id"] == "pa-park-maverick-auto")
+    pattern = next(l["value"] for l in block_leaves(block) if l["field"] == "/request/tool")
+    inner = pattern.split("(", 1)[1].rsplit(")", 1)[0].split("|")
+    assert sorted("maverick_" + n for n in inner) == sorted(MAVERICK_AUTO)
+
+
+def test_maverick_bridge_block_matches_the_quickbooks_bridge(blocks):
+    qb = next(b for b in blocks if b["id"] == "qb-gateway-write-bridge")["config"]["blocks"][0]
+    mav = next(b for b in blocks if b["id"] == "mav-gateway-write-bridge")["config"]["blocks"][0]
+    assert mav["id"] == "mav-gateway-write-bridge-webhook"
+    assert {k: v for k, v in mav.items() if k != "id"} == {k: v for k, v in qb.items() if k != "id"}

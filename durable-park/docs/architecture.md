@@ -57,8 +57,11 @@ State on 2026-10-22:
   is `root:root 0600`. `audit_key` stays readable by `hermes` (the plugin names the decider with it); it is
   read-only, so it lets a hijacked agent list requests, never approve one. `deploy/bridge_check.py` verifies all of
   this at every deploy, and the deploy stops if it fails.
-- **Tool lockdown (v1): a configuration guard.** The agent can reach only `clarify`, `parked_action_execute` and
-  `mcp__wh__quickbooks__*`, plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`)
+- **Tool lockdown (v1): a configuration guard.** The agent can reach only `clarify`, `parked_action_execute`,
+  `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*` (and, once `skills` is opened in the allow file, `skills_list` and
+  `skill_view`; `skill_manage` stays denied by the live pipeline. `check` proves that the reviewed file
+  `deploy/withhuman/entry-pipeline.json` denies it; the live revision is the one named below and is re-checked when
+  `skills` is opened, see the [runbook](runbook.md#open-a-toolset)), plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`)
   while Tool Search is on (it has been on since 2026-10-21 19:59 UTC). `deploy/hermes_tool_policy.py` applies it on
   every platform key (re-applied on proto-agents 2026-10-21 03:16 UTC as a stopgap; `hermes_tool_policy.py check`
   prints the key count and ends `ok`). The agent has no file, terminal or code tools, and Hermes's own approvals are
@@ -113,6 +116,7 @@ flowchart LR
   chat(["User in Telegram or Teams"])
   approver(["Approver in the withHuman app"])
   qbo[("QuickBooks Online<br/>sandbox company")]
+  mav[("Maverick Payments API<br/>(not connected yet)")]
   lf[("Langfuse Cloud US<br/>trace store, 30 days")]
   deckapp(["Deck app<br/>on your computer"])
 
@@ -142,7 +146,7 @@ flowchart LR
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
     bridge["bridge<br/>127.0.0.1:8791 (held by systemd) - user dpbridge<br/>keeps no state"]
     sweep["sweep<br/>cron every 5 min"]
-    tunnel["wh-tunnel container<br/>QuickBooks MCP server"]
+    tunnel["wh-tunnel container<br/>QuickBooks MCP server<br/>+ Maverick MCP server (built in, not switched on yet)"]
     funnelA{{"Funnel /aap/events"}}
     funnelB{{"Funnel /wh/bridge"}}
   end
@@ -179,6 +183,7 @@ flowchart LR
   bridge -->|"approve or human"| pipe
   gw -->|"forwards over the tunnel<br/>(tunnel dials out)"| tunnel
   tunnel -->|"QuickBooks API"| qbo
+  tunnel -.->|"Maverick API, once switched on"| mav
   sweep -->|"reads, updates;<br/>deletes finished rows after 30 days"| ledger
   sweep -->|"re-wakes missed decisions"| route
   selfck -->|"writes"| fstatus
@@ -214,7 +219,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | Setting | Default | What it does |
 |---|---|---|
 | `exempt_tools` | `["parked_action_execute", "clarify", "tool_search", "tool_describe"]` | Tools that are never asked about: anything listed here runs with no approval and no ledger row. The list replaces the default, so keep `parked_action_execute` in it (a warning is logged if it is missing: approved parks could not run). Any other name is logged as an ERROR (`exempt_tools lists <name>: it runs with no approval and no ledger row`); an MCP tool (`mcp__...`), `tool_call` (Tool Search's tool runner: never exempt) or a name a `form_checked_tools` pattern matches is refused as a bad setting (every call refused, see below). Also used by the fail-closed hook when the ledger cannot open. |
-| `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
+| `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes, every Maverick tool `mcp__wh__maverick__maverick_*`) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. A hook with two names (Hermes Deck: `hermes_plugins.hermes_deck.hermes_deck_pre_tool_call` with its bridge, `hermes_plugins.hermes_deck.events.on_pre_tool_call` without) is accepted under both when either is listed (`OBSERVER_HOOK_ALIASES`, TAP2-129). |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
@@ -298,7 +303,7 @@ The tested Hermes version is v0.22.3 (`SUPPORTED_HERMES_VERSION` in `compat.py`;
 `compat.py` were read on v0.22.2 and have not been re-read.
 
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
-configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 UTC; rev 8 is the rollback for the old code only, and rev 10 was a temporary test deny, now deactivated). Every rule for agent
+configured in the withHuman app; live revision 12, active since 2026-10-25 01:37 UTC (adds the Maverick rules, blocks 8 to 14); revision 11 is the rollback (the same rules without Maverick).
 `proto-agents` also requires that agent; blocks run in order and the first to decide ends the pipeline.
 
 | Order | Block | When | Then |
@@ -310,14 +315,21 @@ configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 
 | 5 | `pa-park-quickbooks-read` | server `park:quickbooks`, a read tool (same verbs) | Approve |
 | 6 | `pa-hermes-read` | server `hermes`, one of 12 read-only tools (for example `web_search`, `memory`) | Approve |
 | 7 | `pa-hermes-local-deny` | server `hermes`, one of 12 local machine tools (for example `terminal`, `write_file`) | Deny, until Clean Setup Phase 2 |
-| 8 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
-| 9 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
-| 10 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
-| 11 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
-| 12 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
+| 8 | `pa-park-maverick-auto` | server `park:maverick`, tool is one of the 13 Maverick lookups and drafts (`mcp__wh__maverick__maverick_` + `search_lookups`, `describe_lookup`, `read`, `create_boarding_application`, `update_boarding_application`, `save_boarding_principal`, `update_boarding_fees`, `update_boarding_equipment`, `save_vault_customer`, `save_ach_customer`, `upload_dispute_evidence`, `create_dispute_draft`, `update_ticket`; anchored, so `maverick_read_all` does not match) | Approve |
+| 9 | `pa-park-maverick-note` | server `park:maverick`, tool `maverick_add_boarding_note`, argument `notify_staff` is JSON `false`. Missing: the rule does not match and the call walks on to a person. `null`, `0` or the text `"false"`: withHuman stops with an evaluation error, which ends as a person too (checked with `preview_pipeline` on 2026-10-25) | Approve |
+| 10 | `pa-park-maverick-ticket` | server `park:maverick`, tool `maverick_create_ticket` or `maverick_reply_to_ticket`, arguments `notify_merchant` and `attention_merchant` both JSON `false` (any other value: a person, as in row 9) | Approve |
+| 11 | `pa-gateway-maverick-auto` | server `maverick` (the gateway replay; tool name with or without `maverick__`), the same 13 tools | Approve |
+| 12 | `pa-gateway-maverick-note` | server `maverick`, the same note rule | Approve |
+| 13 | `pa-gateway-maverick-ticket` | server `maverick`, the same ticket rule | Approve |
+| 14 | `mav-gateway-write-bridge` | server `maverick`, any other tool | Webhook block `durable-park-bridge`, same settings as block 2: approve only the replay of an approved park |
+| 15 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
+| 16 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
+| 17 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
+| 18 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
+| 19 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
 
 Rev 8 and the earlier approve-all behaviour end when the revision above is activated; activate it before this park
-hook goes live. A tool name missing from rules 6 and 7 falls through to rule 10 (proto-agents) or rule 12, so a person decides. QuickBooks writes that are not money types (TAP2-115) now ask a person at park time and go through the bridge at the gateway.
+hook goes live. A tool name missing from rules 6 and 7 falls through to rule 17 (proto-agents) or rule 19, so a person decides. Every Maverick tool not in rules 8 to 13 (refunds, charges, signatures, deletes, anything that tells someone outside) reaches rule 15 at park time (a person) and rule 14 at the gateway (the bridge). QuickBooks writes that are not money types (TAP2-115) now ask a person at park time and go through the bridge at the gateway.
 
 **Who approves:** the people on the approvers' escalation path in withHuman (today `notify-yaakov-yehuda`, one
 approver). Adding or changing approvers is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
@@ -493,8 +505,8 @@ stateDiagram-v2
 ## 4. Tool call: form check, then one question to withHuman
 
 Every tool call goes through the park hook (`park_hook.make_pre_tool_call`) in this order. Every path except
-"tool runs" blocks the call. A form-checked tool (`DEFAULT_FORM_CHECKED_TOOLS`: the QuickBooks money moves and the
-DocuSign writes) is first checked against the rules Hermes registered for it (the same rules the model was shown),
+"tool runs" blocks the call. A form-checked tool (`DEFAULT_FORM_CHECKED_TOOLS`: the QuickBooks money moves, the
+DocuSign writes and every Maverick tool) is first checked against the rules Hermes registered for it (the same rules the model was shown),
 so no approver is asked about a call QuickBooks would reject. Details and safety choices:
 [form-check.md](form-check.md). Which calls need a person is a withHuman pipeline rule, not a list in the plugin.
 
@@ -681,7 +693,7 @@ groups or at the permissions of `/etc/durable-park` itself, and a change to the 
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
 | bridge | `dpbridge` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` (the socket is held by systemd, not by the bridge process) | system units `durable-park-bridge.socket` (holds the port) and `durable-park-bridge` (`Restart=always`) |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
-| tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` | outbound only | Docker, container `wh-tunnel` |
+| tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (live). Built and waiting for the Maverick switch-on: `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44`, which adds the Maverick server ([gateway setup](gateway-setup.md#the-maverick-server-in-the-image)) | outbound only | Docker, container `wh-tunnel` |
 | Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
 
 System users behind that table:
@@ -725,6 +737,7 @@ the repo) and never printed by any script.
 | `wake_secret` | 0640 root:dpwake | receiver, sweep, Hermes (via the secrets helper) | signs the local wake to Hermes |
 | `bridge_secret` | 0600 root:root | bridge (systemd reads it as root and hands the bridge a private copy: `LoadCredential`) | verifies withHuman's pipeline webhook signature. The bot cannot read it |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
+| `maverick.env` | 0600 root | `wh-tunnel` container (passed to the `maverick` server only) | Maverick API token and the two Maverick API addresses; placeholders (`pending`, `https://maverick.invalid`) until sandbox access. Written by `enter-maverick-secrets.sh`; the tunnel will not start without it |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
 | `audit_key` | 0640 root:hermes | bridge (every gateway call; systemd copies it when the bridge starts: `LoadCredential`), plugin (optional; reads the file) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
 
