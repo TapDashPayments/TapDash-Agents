@@ -4,7 +4,7 @@
 # authnet.env): they print every secret in plain text.
 # Run from this directory (as root / via sudo):
 #   bash build.sh                           # checks the three pinned checkouts, then `docker compose build`
-#   docker compose up -d wh-tunnel          # needs /etc/durable-park/tunnel.env (5 values), maverick.env (3),
+#   docker compose up -d --no-build wh-tunnel   # (--no-build: only the image build.sh built and checked) needs /etc/durable-park/tunnel.env (5 values), maverick.env (3),
 #                                           # acceptblue.env (3) and authnet.env (2)
 #   docker compose run --rm check           # list tools; does not connect to withHuman
 name: durable-park-tunnel

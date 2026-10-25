@@ -1707,7 +1707,7 @@ it is not known whether Maverick made the change (the server cannot know the add
 approved Maverick change replayed under the placeholders ends as an `unknown` ledger row that a person clears
 (see [architecture](architecture.md)); that is expected, not a bug, and with this address nothing left the VM. When the real values arrive, run the script again (it asks before
 overwriting) and recreate the tunnel (no ledger row `parked`, `approved` or `executing`, then
-from `deploy/tunnel`: `sudo docker compose up -d wh-tunnel`).
+from `deploy/tunnel`: `sudo docker compose up -d --no-build wh-tunnel`).
 
 Never `cat` the file or run `docker compose config`, `docker inspect` or `docker exec ... env`: they print it.
 
@@ -1718,7 +1718,7 @@ Never `cat` the file or run `docker compose config`, `docker inspect` or `docker
    deploy/tunnel/build.sh` builds the image.
 3. The placeholder settings above (`maverick.env`).
 4. No ledger row `parked`, `approved` or `executing` ([health check](#health-check)); then from `deploy/tunnel`:
-   `sudo docker compose run --rm check` (lists 42 `maverick_` tools) and `sudo docker compose up -d wh-tunnel`.
+   `sudo docker compose run --rm check` (lists 42 `maverick_` tools) and `sudo docker compose up -d --no-build wh-tunnel`.
 5. In withHuman: register gateway server `maverick` through tunnel `proto-agents`, tunnel entry `maverick`, one scope
    `default` (auth none); grant it to agent `proto-agents`. The approval rules are entry revision 15.
 6. Open `skills` in `/etc/durable-park/allowed_toolsets` ([Open a toolset](#open-a-toolset)).
@@ -1751,42 +1751,58 @@ sudo bash /home/hermes/tapdash-agents/durable-park/deploy/tunnel/enter-acceptblu
 sudo bash /home/hermes/tapdash-agents/durable-park/deploy/tunnel/enter-authnet-secrets.sh
 ```
 
-and types the placeholders: for accept.blue `pending` for the source key, `pending` for the PIN and
+(before the live clone has these scripts, run them from the reviewed worktree, see the switch-on order) and types the placeholders: for accept.blue `pending` for the source key, `pending` for the PIN and
 `https://api.sandbox.accept.blue/api/v2` for the address (it must be an accept.blue address: the server refuses any
 other, so a made-up `.invalid` address does not work here); for Authorize.net `pending` for the login id and `pending` for the
 transaction key. The scripts print `saved 3 values` and `saved 2 values`. With these, the sandbox simply refuses every
 call, a person is still asked first, and nothing leaves the VM except those refused calls to the two sandboxes. When the real
 sandbox values arrive, run the script again (it asks before overwriting) and recreate the tunnel (no ledger row `parked`,
-`approved` or `executing`, then from `deploy/tunnel`: `sudo docker compose up -d wh-tunnel`). Authorize.net stays on its
+`approved` or `executing`, then from `deploy/tunnel`: `sudo docker compose up -d --no-build wh-tunnel`). Authorize.net stays on its
 sandbox: `AUTHNET_ENV=sandbox` is fixed in `tunnel.yaml`, and going live is a separate reviewed change.
 
 Never `cat` these files or run `docker compose config`, `docker inspect` or `docker exec ... env`: they print the values.
 
 ### accept.blue and Authorize.net switch-on (in this order)
 
-1. Merge the reviewed change and fast-forward the live clone ([Deploy a change](#deploy-a-change)). The park hook now
-   form-checks the new servers' tools, so restart the gateway as that section says (no ledger row `parked`,
-   `approved` or `executing`).
-2. For each server, a read-only deploy key and root's checkout at the pinned commit
-   ([gateway setup](gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)).
-3. The placeholder settings above.
-4. `sudo bash deploy/tunnel/build.sh` builds the image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36` (it refuses a checkout that is not root's, another
-   commit or not clean). Then `--list-approvals` on both launchers: 28 and 24 tools, 7 + 21 and 5 + 19
+**Why the order matters.** The running tunnel container reads `tunnel.yaml` from the live clone. The moment the live
+clone is fast-forwarded to the reviewed change, `tunnel.yaml` asks for two servers (`acceptblue-mcp-server`,
+`authnet-mcp-server`) that the old image does not have. If the old container restarted in that gap, it could not start,
+and QuickBooks and Maverick would be offline until the new image runs. So do everything that does not touch the live clone
+first (steps 1 and 2), then do steps 3 to 6 back to back, without stopping in between.
+
+1. **Before the live clone changes.** For each server, a read-only deploy key and root's checkout at the pinned commit
+   ([gateway setup](gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)). Read the pinned commits from the
+   reviewed branch (`git -C /home/hermes/tapdash-agents-wt/ab-an show origin/feat/acceptblue-authnet-tunnel:durable-park/deploy/tunnel/acceptblue-mcp.sha`,
+   and `authorizenet-mcp.sha`), not from the live clone, which does not have them yet.
+2. **Settings, still before the live clone changes.** Yaakov runs the two scripts from the reviewed worktree
+   (`sudo bash /home/hermes/tapdash-agents-wt/ab-an/durable-park/deploy/tunnel/enter-acceptblue-secrets.sh`, then the same
+   with `enter-authnet-secrets.sh`; the live clone does not have them yet; they only write `/etc/durable-park/acceptblue.env` and `authnet.env`, which the running tunnel
+   does not read until it is recreated). Placeholders: see Settings above.
+3. **Back to back from here** (no ledger row `parked`, `approved` or `executing`, [health check](#health-check)).
+   Merge the reviewed change and fast-forward the live clone ([Deploy a change](#deploy-a-change)). Do not restart the
+   gateway now: `hermes_mcp.sh` (step 8) does that.
+4. From `deploy/tunnel`: `sudo bash build.sh` builds the image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36` (it refuses a checkout that is not root's,
+   another commit or not clean). **Then it proves the approvals**: it runs `--list-approvals` for the Maverick, accept.blue and
+   Authorize.net launchers in the new image and compares each with the committed `*-approvals.json` file (28 and 24 tools,
+   7 + 21 and 5 + 19 for the two new ones). Any difference stops it with an error and a diff: do not run that image
    ([gateway setup](gateway-setup.md#the-acceptblue-and-authorizenet-servers-in-the-image)).
-5. No ledger row `parked`, `approved` or `executing` ([health check](#health-check)); then from `deploy/tunnel`:
-   `sudo docker compose run --rm check` (it should list `acceptblue: ok, 28 tools` and `authnet: ok, 24 tools` next to the
-   others) and `sudo docker compose up -d wh-tunnel`. Watch the tunnel come back **online**.
-6. In withHuman: register gateway servers `acceptblue` and `authnet` through the tunnel (tunnel server names `acceptblue`
+5. `sudo docker compose run --rm check` (it should list `acceptblue: ok, 28 tools` and `authnet: ok, 24 tools` next to the
+   others).
+6. `sudo docker compose up -d --no-build wh-tunnel` (`--no-build`: compose must never build a missing image on its own, that
+   would skip the checks in `build.sh`). Watch the tunnel come back **online**. If a step from 4 to 6 fails, fix it and go on, or
+   roll back (below); do not leave the live clone ahead of the image.
+7. In withHuman: register gateway servers `acceptblue` and `authnet` through the tunnel (tunnel server names `acceptblue`
    and `authnet`) and grant both to agent `proto-agents` ([HUMAN STEP B2](gateway-setup.md#human-step-b2-register-the-acceptblue-and-authorizenet-servers)).
-7. Save `deploy/withhuman/entry-pipeline.json` as a new entry revision (the file has 31 blocks, the live revision 15 has 25;
-   this is revision 16) and activate it. Then check with `preview_pipeline`: a `park:acceptblue` call to
+   Then save `deploy/withhuman/entry-pipeline.json` as a new entry revision (the file has 31 blocks, the live revision 15
+   has 25; this is revision 16) and activate it. Check with `preview_pipeline`: a `park:acceptblue` call to
    `mcp__wh__acceptblue__ablue_read` and a `park:authnet` call to `mcp__wh__authnet__authnet_read` approve, and a
    `park:acceptblue` call to `mcp__wh__acceptblue__ablue_refund_transaction` and a `park:authnet` call to
    `mcp__wh__authnet__authnet_refund_transaction` ask a person. Do this **before** step 8, so the agent never sees the
    servers without their rules.
 8. `sudo bash deploy/hermes_mcp.sh`: it checks the three skills folders, restarts the gateway, checks the tool scope and policy,
-   and only then checks that `mcp__wh__acceptblue__ablue_read` and `mcp__wh__authnet__authnet_read` registered (so step 6
-   must come first: until both servers are registered and granted the script fails on purpose and stops the gateway).
+   and only then checks that `mcp__wh__acceptblue__ablue_read` and `mcp__wh__authnet__authnet_read` registered. If one is not
+   registered (step 7 not done), the script exits 1 with a message and the gateway **stays up**, without the two servers: the
+   scope and policy checks have already passed by then, so that is safe. Do step 7 and run the script again.
 9. Test in Teams: a lookup runs without asking; a refund asks a person (deny it).
 
 Not wired on purpose: Authorize.net's webhook receiver (no `AUTHNET_WEBHOOK_LISTEN`, no signature key, no open port).
@@ -1797,7 +1813,7 @@ Not wired on purpose: Authorize.net's webhook receiver (no `AUTHNET_WEBHOOK_LIST
   (the money-server rule names both), which is safe and noisy.
 - **The tunnel image misbehaves**: from `deploy/tunnel`, check out the previous `docker-compose.yml`, `tunnel.yaml` and `Dockerfile`
   (so the tag is `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` again), no ledger row `parked`, `approved` or `executing`,
-  then `sudo docker compose up -d wh-tunnel`. That image is still on the VM. Then run `deploy/hermes_mcp.sh` from the matching
+  then `sudo docker compose up -d --no-build wh-tunnel`. That image is still on the VM. Then run `deploy/hermes_mcp.sh` from the matching
   checkout, or the agent keeps a list that names tools that are gone.
 
 ## Rotate secrets before production

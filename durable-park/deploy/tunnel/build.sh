@@ -12,7 +12,13 @@
 #   - the checkout has any local change: an edit, a new file, or an ignored file (those would reach the image too),
 # or when an image tag in docker-compose.yml does not end in -mav-<first 7 of the Maverick commit>-ab-<first 7 of
 # the accept.blue commit>-an-<first 7 of the Authorize.net commit>.
-# It only builds: it never starts, stops or replaces the running wh-tunnel container.
+# After the build it proves what each server inside the new image says about its tools: it runs
+#   docker run --rm --pull=never --entrypoint <launcher> <image> --list-approvals
+# as root for maverick-mcp-server, acceptblue-mcp-server and authnet-mcp-server and compares the output byte for
+# byte with maverick-approvals.json, acceptblue-approvals.json and authnet-approvals.json in this folder. Any
+# difference (or a launcher that does not run) stops it with a non-zero exit: do not run that image. The withHuman
+# pipeline's auto rules are written from these files (tests check that), so the image is proved to agree with them.
+# It only builds and checks: it never starts, stops or replaces the running wh-tunnel container.
 set -euo pipefail
 
 die() { echo "build.sh: $*" >&2; exit 1; }
@@ -61,3 +67,26 @@ done <<< "$images"
 
 cd "$HERE"
 MAVERICK_MCP_SRC=$MAVERICK_DIR ACCEPTBLUE_MCP_SRC=$ACCEPTBLUE_DIR AUTHORIZENET_MCP_SRC=$AUTHNET_DIR docker compose build
+
+# The build worked. Now prove what the image says about each tool (auto = no person, you = a person approves).
+image=$(sed -n 's/^[[:space:]]*image:[[:space:]]*//p' docker-compose.yml | sort -u)
+[[ -n $image && $image != *$'\n'* ]] || die "docker-compose.yml must name one image tag, the same for both services"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+
+# $1 name, $2 launcher in the image, $3 file with the expected output
+check_approvals() {
+  local got=$scratch/$1.json want=$HERE/$3
+  [[ -f $want ]] || die "$3 is missing: it holds what $2 --list-approvals must print"
+  docker run --rm --pull=never --entrypoint "$2" "$image" --list-approvals > "$got" \
+    || die "$2 --list-approvals failed in $image; do not run this image"
+  if ! cmp -s "$got" "$want"; then
+    diff -u "$want" "$got" >&2 || true
+    die "$2 --list-approvals in $image differs from $3 (above: - is the committed file, + is the image); do not run this image. If the pinned server really changed its approvals, review it and update the pipeline rules, tests/payments_servers.py and $3 together"
+  fi
+  echo "$1 approvals: ok ($3 equals what $2 --list-approvals prints in the image)"
+}
+
+check_approvals maverick maverick-mcp-server maverick-approvals.json
+check_approvals acceptblue acceptblue-mcp-server acceptblue-approvals.json
+check_approvals authnet authnet-mcp-server authnet-approvals.json

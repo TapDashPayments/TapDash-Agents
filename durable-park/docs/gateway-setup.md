@@ -83,8 +83,10 @@ How it was set up (2026-10-25), and how to redo it on a fresh VM (as `ubuntu`, w
    /opt/maverick-mcp-src checkout -q <new sha>`, then the same `chown` and `chmod`.
 3. Rebuild with `sudo bash build.sh` (below). It refuses when the checkout is not root's or has a writable or foreign
    file, has grafts or replace refs, is at another commit, has any local change (also ignored files such as
-   `__pycache__`), or when the image tag does not end in `-mav-<first 7>`. Then check `--list-approvals`, and update
-   the approval rules if a tool was added or changed its approval level.
+   `__pycache__`), or when the image tag does not end in `-mav-<first 7>`. After the build it compares each server's
+   `--list-approvals` in the new image with the committed `*-approvals.json` file and fails on any difference
+   ([Proof against the built image](#proof-against-the-built-image)); if a tool was added or changed its approval level, update
+   the approvals file, the approval rules and the tests together.
 
 ## Payment server sources (accept.blue and Authorize.net)
 
@@ -198,8 +200,9 @@ activate pipeline revisions; removing that permission once setup is done is Yaak
 | File | Purpose |
 | --- | --- |
 | `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman`. Stages `maverick`, `acceptblue` and `authnet`: each builds its server into its own venv (`/opt/maverick-mcp`, `/opt/acceptblue-mcp`, `/opt/authnet-mcp`; see [The Maverick server in the image](#the-maverick-server-in-the-image) and [The accept.blue and Authorize.net servers in the image](#the-acceptblue-and-authorizenet-servers-in-the-image)), launchers `/usr/local/bin/{maverick,acceptblue,authnet}-mcp-server`, creates `/data/maverick-inbox` (`withhuman`, 0700; the two new servers write no files) |
-| `deploy/tunnel/build.sh` | the only way to build: checks the three TapDash checkouts (Maverick, accept.blue, Authorize.net: each root's, nothing writable by others, no grafts or replace refs, pinned commit, no local changes, also no ignored files) and the image tag (`-mav-<7>-ab-<7>-an-<7>`), then runs `docker compose build`. Never starts or stops the tunnel |
+| `deploy/tunnel/build.sh` | the only way to build: checks the three TapDash checkouts (Maverick, accept.blue, Authorize.net: each root's, nothing writable by others, no grafts or replace refs, pinned commit, no local changes, also no ignored files) and the image tag (`-mav-<7>-ab-<7>-an-<7>`), then runs `docker compose build` and proves each server's `--list-approvals` in the new image against the committed `*-approvals.json` files. Never starts or stops the tunnel |
 | `deploy/tunnel/maverick-mcp.sha`, `acceptblue-mcp.sha`, `authorizenet-mcp.sha` | the pinned commit of each TapDash server (one line each, 40 characters) |
+| `deploy/tunnel/maverick-approvals.json`, `acceptblue-approvals.json`, `authnet-approvals.json` | what each server's `--list-approvals` must print at its pinned commit; `build.sh` compares them with the built image ([Proof against the built image](#proof-against-the-built-image)) |
 | `deploy/tunnel/tunnel.yaml` | four servers: `quickbooks` (`command: ["qbo-mcp-server"]` + env), `maverick` (`command: ["maverick-mcp-server"]` + env), `acceptblue` (`command: ["acceptblue-mcp-server"]`, env `ACCEPTBLUE_SOURCE_KEY`, `ACCEPTBLUE_PIN`, `ACCEPTBLUE_BASE_URL`) and `authnet` (`command: ["authnet-mcp-server"]`, env `AUTHNET_ENV: sandbox` fixed, `AUTHNET_LOGIN_ID`, `AUTHNET_TRANSACTION_KEY`). It sets no `AUTHNET_WEBHOOK_LISTEN`, so Authorize.net's optional webhook receiver does not run |
 | `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build contexts `maverick-src` = `${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}`, `acceptblue-src` = `${ACCEPTBLUE_MCP_SRC:-/opt/acceptblue-mcp-src}` and `authnet-src` = `${AUTHORIZENET_MCP_SRC:-/opt/authorizenet-mcp-src}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, four env files `/etc/durable-park/tunnel.env`, `maverick.env`, `acceptblue.env` and `authnet.env` (paths overridable with `TUNNEL_ENV_FILE`, `MAVERICK_ENV_FILE`, `ACCEPTBLUE_ENV_FILE`, `AUTHNET_ENV_FILE`); profile service `check` (same four env files) |
 | `deploy/tunnel/enter-secrets.sh` | interactive script that writes `/etc/durable-park/tunnel.env` |
@@ -261,15 +264,41 @@ What was checked outside Docker (2026-10-25, at the pinned commits): both wheels
 native wheel in the two lock files exists for this image's platform (the runtime lock of each server is the same
 as Maverick's, which builds; the build stops with a clear error if one is missing).
 
-Check a built image (no secrets needed, does not touch the running tunnel):
+`build.sh` already runs `--list-approvals` for you after the build (next section). To look by hand (no secrets needed, does
+not touch the running tunnel):
 
 ```bash
-sudo docker run --rm --entrypoint acceptblue-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36 --list-approvals
-sudo docker run --rm --entrypoint authnet-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36 --list-approvals
+sudo docker run --rm --pull=never --entrypoint acceptblue-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36 --list-approvals
+sudo docker run --rm --pull=never --entrypoint authnet-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36 --list-approvals
 ```
 
-Expect 28 accept.blue tools (7 `auto`, 21 `you`) and 24 Authorize.net tools (5 `auto`, 19 `you`). If the numbers
-or names differ, stop: the pipeline rules are written for exactly these lists (`tests/payments_servers.py`).
+Expect 28 accept.blue tools (7 `auto`, 21 `you`) and 24 Authorize.net tools (5 `auto`, 19 `you`).
+
+### Proof against the built image
+
+In plain words: each server says, tool by tool, whether a person must approve it (`you`) or not (`auto`, or `auto_unless_notify` for
+Maverick tools that are fine only while their notify flags are off). The withHuman rules are written from those lists. A
+hand-copied list could drift from the real server, so `build.sh` checks the real thing:
+
+```mermaid
+flowchart LR
+  files["maverick-approvals.json<br/>acceptblue-approvals.json<br/>authnet-approvals.json<br/>(committed, exactly the server output)"] -->|"expected output"| cmp{"build.sh compares<br/>byte for byte"}
+  image["new tunnel image<br/>(just built)"] -->|"docker run --entrypoint launcher --list-approvals, as root"| cmp
+  cmp -->|"same: prints approvals ok"| go["image may be started"]
+  cmp -->|"different: diff, exit 1"| stop["do not run this image"]
+  files -->|"unit tests: equal the test copies and the pipeline rules"| rules["entry-pipeline.json<br/>auto rules"]
+```
+
+After `docker compose build`, `build.sh` runs `docker run --rm --pull=never --entrypoint <launcher> <image> --list-approvals`
+for `maverick-mcp-server`, `acceptblue-mcp-server` and `authnet-mcp-server`, and compares the output with
+[`maverick-approvals.json`](../deploy/tunnel/maverick-approvals.json),
+[`acceptblue-approvals.json`](../deploy/tunnel/acceptblue-approvals.json) and
+[`authnet-approvals.json`](../deploy/tunnel/authnet-approvals.json). A difference, a missing file or a launcher that does not run
+stops it with a non-zero exit and the words "do not run this image" (the image is built, but nothing starts it). The unit tests
+(`tests/test_pipeline_policy.py`) check that these files equal `tests/payments_servers.py` and that the pipeline's auto rules name
+exactly the `auto` tools in them. **When a pin moves:** run `python -m <package> --list-approvals` at the new commit, save the
+output exactly as printed into the file, and update the rules and `tests/payments_servers.py` in the same change. The files were
+made from the pinned commits on 2026-10-25 (Maverick `d6f43f9`: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you`).
 
 ## Environment variables
 
@@ -363,9 +392,9 @@ at once, and a missing value stops the tunnel from starting.
 All commands from `/home/hermes/durable-park/deploy/tunnel`, with `sudo`:
 
 ```bash
-sudo bash build.sh                         # check the three TapDash checkouts, then build the image (no secrets needed)
+sudo bash build.sh                         # check the three TapDash checkouts, build the image, prove its tool approvals (no secrets needed)
 sudo docker compose run --rm check         # starts the server once, lists tools; no tunnel token needed
-sudo docker compose up -d wh-tunnel        # long-running tunnel
+sudo docker compose up -d --no-build wh-tunnel   # long-running tunnel; --no-build: never build a missing image here (it would skip build.sh's checks)
 sudo docker logs -f wh-tunnel              # watch it connect
 sudo docker compose ps
 ```
@@ -521,8 +550,9 @@ Do it once per server, the same way as step B, with these names (the slug is per
 
 Granting a tool does not make it run: money tools still ask a person (see the pipeline below). Save the pipeline file as a
 new entry revision **after** both servers are registered, so the rules and the servers arrive together.
-Until then, `hermes_mcp.sh` fails on purpose (it expects `mcp__wh__acceptblue__ablue_read` and
-`mcp__wh__authnet__authnet_read` to be registered) and leaves the agent without the two servers.
+Until then, `hermes_mcp.sh` exits 1 on purpose at its last check (it expects `mcp__wh__acceptblue__ablue_read` and
+`mcp__wh__authnet__authnet_read` to be registered); the gateway stays up, without the two servers, and the scope and
+policy checks have already passed, so that is safe. Register and grant the servers, then run the script again.
 
 
 ## Verified live

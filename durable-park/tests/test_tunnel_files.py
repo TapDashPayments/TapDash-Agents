@@ -227,6 +227,30 @@ def _write_pins(tun, shas):
     (tun / "docker-compose.yml").write_text(f"    image: durable-park/wh-tunnel:{_tag(shas)}\n")
 
 
+# launcher in the image -> the committed file that must equal its --list-approvals output
+LAUNCHERS = {"maverick": "maverick-mcp-server", "acceptblue": "acceptblue-mcp-server", "authnet": "authnet-mcp-server"}
+APPROVAL_FILES = {key: f"{key}-approvals.json" for key in LAUNCHERS}
+# `docker compose build` prints a line; `docker run --entrypoint <launcher> ... --list-approvals` prints the file the
+# fake image "says" for that launcher (and is logged); FAKE_DOCKER_FAIL=run makes `docker run` fail.
+FAKE_DOCKER = """#!/bin/sh
+if [ "$1" = run ]; then
+  echo "$*" >> "$FAKE_DOCKER_LOG"
+  [ "${FAKE_DOCKER_FAIL:-}" = run ] && exit 1
+  while [ $# -gt 0 ]; do
+    [ "$1" = --entrypoint ] && launcher=$2
+    shift
+  done
+  case $launcher in
+    maverick-mcp-server) cat "$FAKE_IMAGE_SAYS/maverick-approvals.json" ;;
+    acceptblue-mcp-server) cat "$FAKE_IMAGE_SAYS/acceptblue-approvals.json" ;;
+    authnet-mcp-server) cat "$FAKE_IMAGE_SAYS/authnet-approvals.json" ;;
+  esac
+  exit 0
+fi
+echo "FAKE DOCKER $*"
+"""
+
+
 def _fake_checkouts(tmp_path):
     """A one-commit git repo per server (tmp_path/src-<key>), a copy of build.sh pinned to them and a fake `docker`.
 
@@ -249,10 +273,17 @@ def _fake_checkouts(tmp_path):
     _write_pins(tun, shas)
     bindir = tmp_path / "bin"
     bindir.mkdir()
+    # What the built image prints is a copy of the committed files; the committed files are copies in `tun`.
+    said = tmp_path / "image-says"
+    said.mkdir()
+    for _key, name in APPROVAL_FILES.items():
+        shutil.copy(TUNNEL / name, tun / name)
+        shutil.copy(TUNNEL / name, said / name)
     docker = bindir / "docker"
-    docker.write_text('#!/bin/sh\necho "FAKE DOCKER $*"\n')
+    docker.write_text(FAKE_DOCKER)
     docker.chmod(0o755)
-    out = dict(env, PATH=f"{bindir}:/usr/bin:/bin", TUNNEL_SRC_OWNER=getpass.getuser())
+    out = dict(env, PATH=f"{bindir}:/usr/bin:/bin", TUNNEL_SRC_OWNER=getpass.getuser(),
+               FAKE_IMAGE_SAYS=str(said), FAKE_DOCKER_LOG=str(tmp_path / "docker.log"))
     for key, (_f, _p, var, *_r) in PINNED.items():
         out[var] = str(srcs[key])
     return srcs, tun, out, shas
@@ -269,6 +300,75 @@ def test_build_script_builds_when_every_checkout_is_the_pinned_clean_commit(tmp_
     assert "FAKE DOCKER compose build" in result.stdout
     for key, (sha_file, *_rest) in PINNED.items():  # it says which commit each server is built from
         assert f"{sha_file[:-4]} source:" in result.stdout and f"at {shas[key]} (clean)" in result.stdout
+
+
+def test_build_script_compares_every_launchers_approvals_with_the_committed_file(tmp_path):
+    _, tun, env, shas = _fake_checkouts(tmp_path)
+    result = _run_build(tun, env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "docker.log").read_text().splitlines()
+    assert len(calls) == 3
+    for key, launcher in LAUNCHERS.items():
+        call = next(c for c in calls if f"--entrypoint {launcher} " in c)
+        assert call == f"run --rm --pull=never --entrypoint {launcher} durable-park/wh-tunnel:{_tag(shas)} --list-approvals"
+        assert f"{key} approvals: ok" in result.stdout
+
+
+def test_build_script_runs_the_approvals_checks_after_the_build_and_names_every_file():
+    text = BUILD.read_text()
+    assert text.index("docker compose build\n") < text.index("check_approvals maverick")
+    assert "docker run --rm --pull=never --entrypoint" in text and "--list-approvals" in text
+    for launcher in LAUNCHERS.values():
+        assert launcher in text
+    for name in APPROVAL_FILES.values():
+        assert name in text
+
+
+@pytest.mark.parametrize("key", sorted(LAUNCHERS))
+def test_build_script_fails_loudly_when_the_image_says_something_else(tmp_path, key):
+    import json
+
+    _, tun, env, _shas = _fake_checkouts(tmp_path)
+    said = Path(env["FAKE_IMAGE_SAYS"]) / APPROVAL_FILES[key]
+    data = json.loads(said.read_text())
+    name = sorted(data)[0]
+    data[name] = "auto" if data[name] == "you" else "you"  # one tool changes its level in the image
+    said.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    result = _run_build(tun, env)
+    assert result.returncode == 1
+    assert LAUNCHERS[key] in result.stderr and APPROVAL_FILES[key] in result.stderr
+    assert "do not run this image" in result.stderr
+    assert name in result.stderr  # the difference is shown
+
+
+def test_build_script_fails_when_the_committed_file_is_edited(tmp_path):
+    _, tun, env, _shas = _fake_checkouts(tmp_path)
+    expected = tun / APPROVAL_FILES["acceptblue"]
+    expected.write_text(expected.read_text().replace('"ablue_read": "auto"', '"ablue_read": "you"'))
+    result = _run_build(tun, env)
+    assert result.returncode == 1
+    assert "acceptblue-mcp-server" in result.stderr and "ablue_read" in result.stderr
+
+
+def test_build_script_fails_when_the_image_says_nothing(tmp_path):
+    _, tun, env, _shas = _fake_checkouts(tmp_path)
+    (Path(env["FAKE_IMAGE_SAYS"]) / APPROVAL_FILES["authnet"]).write_text("")
+    result = _run_build(tun, env)
+    assert result.returncode == 1 and "authnet-mcp-server" in result.stderr
+
+
+def test_build_script_fails_when_the_launcher_does_not_run(tmp_path):
+    _, tun, env, _shas = _fake_checkouts(tmp_path)
+    result = _run_build(tun, dict(env, FAKE_DOCKER_FAIL="run"))
+    assert result.returncode == 1 and "--list-approvals" in result.stderr
+
+
+@pytest.mark.parametrize("key", sorted(LAUNCHERS))
+def test_build_script_fails_when_a_committed_file_is_missing(tmp_path, key):
+    _, tun, env, _shas = _fake_checkouts(tmp_path)
+    (tun / APPROVAL_FILES[key]).unlink()
+    result = _run_build(tun, env)
+    assert result.returncode == 1 and APPROVAL_FILES[key] in result.stderr
 
 
 @pytest.mark.parametrize("key", sorted(PINNED))
@@ -644,3 +744,17 @@ def test_enter_authnet_secrets_refuses_characters_the_env_file_cannot_hold(tmp_p
     assert rc == 0, out
     assert out.count("not allowed in the env file") == 2
     assert file.read_text() == "AUTHNET_LOGIN_ID=ok-id\nAUTHNET_TRANSACTION_KEY=ok-key\n"
+
+
+def test_every_documented_tunnel_start_uses_no_build():
+    """`docker compose up` builds a missing image on its own and would skip build.sh's checks."""
+    repo = TUNNEL.parents[2]
+    files = [TUNNEL / "docker-compose.yml", repo / "durable-park" / "docs" / "runbook.md",
+             repo / "durable-park" / "docs" / "gateway-setup.md"]
+    seen = 0
+    for path in files:
+        for line in path.read_text().splitlines():
+            if "compose up -d" in line:
+                seen += 1
+                assert "up -d --no-build wh-tunnel" in line, f"{path.name}: {line.strip()}"
+    assert seen >= 5

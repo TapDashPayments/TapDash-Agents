@@ -728,3 +728,57 @@ def test_hermes_names_of_all_payment_tools_fit_in_64_characters():
             assert expected_park(slug, tool) == (name, f"park:{slug}")
             longest = max(longest, len(name))
     assert longest == 63
+
+
+# --- the committed --list-approvals files (deploy/tunnel/*-approvals.json) ---------------------------------------
+# build.sh compares each server's real output, inside the freshly built image, with these files. These tests tie the
+# same files to the hand-copied lists in payments_servers.py and to the pipeline rules, so a rule cannot drift away
+# from what the image will be proved to say.
+TUNNEL_DIR = PIPELINE.parent.parent / "tunnel"
+APPROVAL_FILE_NAMES = {"maverick": "maverick-approvals.json", "acceptblue": "acceptblue-approvals.json",
+                       "authnet": "authnet-approvals.json"}
+
+
+def _approvals_file(key):
+    return TUNNEL_DIR / APPROVAL_FILE_NAMES[key]
+
+
+@pytest.mark.parametrize("key", sorted(APPROVAL_FILE_NAMES))
+def test_approvals_files_are_exactly_what_the_servers_print(key):
+    """`python -m <package> --list-approvals` prints sorted JSON, two-space indent, a final newline."""
+    text = _approvals_file(key).read_text()
+    data = json.loads(text)
+    assert text == json.dumps(data, indent=2, sort_keys=True) + "\n"
+    assert set(data.values()) <= {"auto", "auto_unless_notify", "you"}
+    assert all(name.startswith({"maverick": "maverick_", "acceptblue": "ablue_", "authnet": "authnet_"}[key])
+               for name in data)
+
+
+def test_payment_approvals_files_equal_the_test_copies():
+    assert json.loads(_approvals_file("acceptblue").read_text()) == ACCEPTBLUE_APPROVALS
+    assert json.loads(_approvals_file("authnet").read_text()) == AUTHNET_APPROVALS
+
+
+def test_maverick_approvals_file_agrees_with_the_rules():
+    data = json.loads(_approvals_file("maverick").read_text())
+    assert len(data) == 42
+    assert sorted(n for n, level in data.items() if level == "auto") == sorted(MAVERICK_AUTO)
+    assert sorted(n for n, level in data.items() if level == "auto_unless_notify") == [
+        "maverick_add_boarding_note", "maverick_create_ticket", "maverick_reply_to_ticket"]
+    assert sum(level == "you" for level in data.values()) == 26
+
+
+@pytest.mark.parametrize("key", sorted(APPROVAL_FILE_NAMES))
+def test_every_tool_in_an_approvals_file_is_decided_as_the_file_says(blocks, key):
+    """auto: approved on both paths. you: a person at park time, the bridge at the gateway. A tool the server
+    approves only while its notify flags are off: a person when the flags are missing."""
+    slug = key
+    for tool, level in json.loads(_approvals_file(key).read_text()).items():
+        park = _decide(blocks, "proto-agents", f"park:{slug}", f"mcp__wh__{slug}__{tool}")
+        gateway = _decide(blocks, "proto-agents", slug, tool)
+        if level == "auto":
+            assert park[1] == "approve" and gateway[1] == "approve", tool
+        else:
+            assert park == ("money-server-human", "human"), tool
+            assert gateway[1] == "webhook", tool
+
