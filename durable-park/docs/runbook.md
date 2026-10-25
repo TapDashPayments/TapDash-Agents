@@ -1576,6 +1576,10 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
    while the entry pipeline denies `skill_manage`, which writes skill files: `check` reads
    `deploy/withhuman/entry-pipeline.json` and fails (`skills: LEAK ...`) if any block before the deny
    (`pa-hermes-local-deny`) could approve or ask about a `skill_manage` call. Keep `skill_manage` in that block.
+   `check` reads the reviewed file, not withHuman. So before opening `skills`, also confirm in withHuman
+   (`get_pipeline entry`, or the app) that the **active** revision is the one named in
+   [architecture.md](architecture.md) and that `pa-hermes-local-deny` there still lists `skill_manage` ahead of
+   every block that approves.
    Not Phase-2-gated but still risky: `desktop_ui`, `catalog`, `browser-cdp`, `a2a`, `connections`; open them
    through the file only after their pipeline rule exists ([spec section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
    An allow file the `hermes` user cannot read (for example a pre-existing one with mode 600 root:root) makes
@@ -1694,14 +1698,30 @@ sudo bash /home/hermes/tapdash-agents/durable-park/deploy/tunnel/enter-maverick-
 ```
 
 and types the placeholders: `pending` for the token and `https://maverick.invalid` for both URLs. It prints
-`saved 3 values`. The `.invalid` name never resolves, so every Maverick call fails with a clear error from the
-server ("Maverick did not answer in 30 s."), never silently. A lookup says nothing changed; a write tool says
-it cannot tell whether Maverick acted (the server cannot know that the address is a placeholder), but with this
-address nothing can have left the VM. When the real values arrive, run the script again (it asks before
+`saved 3 values`. The `.invalid` name never resolves, so every Maverick call fails at once (the address cannot be
+looked up) with a clear error from the server, never silently. A lookup says nothing changed. A change tool says
+it is not known whether Maverick made the change (the server cannot know the address is a placeholder), so an
+approved Maverick change replayed under the placeholders ends as an `unknown` ledger row that a person clears
+(see [architecture](architecture.md)); that is expected, not a bug, and with this address nothing left the VM. When the real values arrive, run the script again (it asks before
 overwriting) and recreate the tunnel (no ledger row `parked`, `approved` or `executing`, then
 from `deploy/tunnel`: `sudo docker compose up -d wh-tunnel`).
 
 Never `cat` the file or run `docker compose config`, `docker inspect` or `docker exec ... env`: they print it.
+
+### Maverick switch-on (in this order)
+
+1. Merge the reviewed change and fast-forward the live clone ([Deploy a change](#deploy-a-change)).
+2. Root's checkout at the pinned commit ([gateway setup](gateway-setup.md#maverick-server-source)); `sudo bash
+   deploy/tunnel/build.sh` builds the image.
+3. The placeholder settings above (`maverick.env`).
+4. No ledger row `parked`, `approved` or `executing` ([health check](#health-check)); then from `deploy/tunnel`:
+   `sudo docker compose run --rm check` (lists 42 `maverick_` tools) and `sudo docker compose up -d wh-tunnel`.
+5. In withHuman: register gateway server `maverick` through tunnel `proto-agents`, tunnel entry `maverick`, one scope
+   `default` (auth none); grant it to agent `proto-agents`. The approval rules are entry revision 12.
+6. Open `skills` in `/etc/durable-park/allowed_toolsets` ([Open a toolset](#open-a-toolset)).
+7. `sudo bash deploy/hermes_mcp.sh`: it restarts the gateway, checks the tool scope and policy, and only then
+   checks that `mcp__wh__maverick__maverick_read` registered (so step 5 must come first).
+8. Test in Teams: a lookup runs without asking; a refund asks a person (deny it).
 
 ## Rotate secrets before production
 

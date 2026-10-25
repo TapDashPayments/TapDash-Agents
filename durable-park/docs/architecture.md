@@ -59,7 +59,9 @@ State on 2026-10-22:
   this at every deploy, and the deploy stops if it fails.
 - **Tool lockdown (v1): a configuration guard.** The agent can reach only `clarify`, `parked_action_execute`,
   `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*` (and, once `skills` is opened in the allow file, `skills_list` and
-  `skill_view`; `skill_manage` stays denied by the pipeline and `check` proves it), plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`)
+  `skill_view`; `skill_manage` stays denied by the live pipeline. `check` proves that the reviewed file
+  `deploy/withhuman/entry-pipeline.json` denies it; the live revision is the one named below and is re-checked when
+  `skills` is opened, see the [runbook](runbook.md#open-a-toolset)), plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`)
   while Tool Search is on (it has been on since 2026-10-21 19:59 UTC). `deploy/hermes_tool_policy.py` applies it on
   every platform key (re-applied on proto-agents 2026-10-21 03:16 UTC as a stopgap; `hermes_tool_policy.py check`
   prints the key count and ends `ok`). The agent has no file, terminal or code tools, and Hermes's own approvals are
@@ -314,8 +316,8 @@ configured in the withHuman app; live revision 12, active since 2026-10-25 01:37
 | 6 | `pa-hermes-read` | server `hermes`, one of 12 read-only tools (for example `web_search`, `memory`) | Approve |
 | 7 | `pa-hermes-local-deny` | server `hermes`, one of 12 local machine tools (for example `terminal`, `write_file`) | Deny, until Clean Setup Phase 2 |
 | 8 | `pa-park-maverick-auto` | server `park:maverick`, tool is one of the 13 Maverick lookups and drafts (`mcp__wh__maverick__maverick_` + `search_lookups`, `describe_lookup`, `read`, `create_boarding_application`, `update_boarding_application`, `save_boarding_principal`, `update_boarding_fees`, `update_boarding_equipment`, `save_vault_customer`, `save_ach_customer`, `upload_dispute_evidence`, `create_dispute_draft`, `update_ticket`; anchored, so `maverick_read_all` does not match) | Approve |
-| 9 | `pa-park-maverick-note` | server `park:maverick`, tool `maverick_add_boarding_note`, argument `notify_staff` is JSON `false` (missing, `null` or the text `"false"` does not match) | Approve |
-| 10 | `pa-park-maverick-ticket` | server `park:maverick`, tool `maverick_create_ticket` or `maverick_reply_to_ticket`, arguments `notify_merchant` and `attention_merchant` both JSON `false` | Approve |
+| 9 | `pa-park-maverick-note` | server `park:maverick`, tool `maverick_add_boarding_note`, argument `notify_staff` is JSON `false`. Missing: the rule does not match and the call walks on to a person. `null`, `0` or the text `"false"`: withHuman stops with an evaluation error, which ends as a person too (checked with `preview_pipeline` on 2026-10-25) | Approve |
+| 10 | `pa-park-maverick-ticket` | server `park:maverick`, tool `maverick_create_ticket` or `maverick_reply_to_ticket`, arguments `notify_merchant` and `attention_merchant` both JSON `false` (any other value: a person, as in row 9) | Approve |
 | 11 | `pa-gateway-maverick-auto` | server `maverick` (the gateway replay; tool name with or without `maverick__`), the same 13 tools | Approve |
 | 12 | `pa-gateway-maverick-note` | server `maverick`, the same note rule | Approve |
 | 13 | `pa-gateway-maverick-ticket` | server `maverick`, the same ticket rule | Approve |

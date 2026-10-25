@@ -167,6 +167,11 @@ def _all_condition_nodes(blocks):
             yield from _walk_conditions(when)
 
 
+class _EvalError(Exception):
+    """withHuman stops a block with an evaluation error (seen with preview_pipeline 2026-10-25: is_false on null, 0 or
+    the text "false"); the block then ends as a person (reason_code block_error)."""
+
+
 def _evaluate(node, request):
     if "all" in node:
         return all(_evaluate(c, request) for c in node["all"])
@@ -174,8 +179,12 @@ def _evaluate(node, request):
         return any(_evaluate(c, request) for c in node["any"])
     value = request.get(node["field"])
     op, expected = node["operator"], node.get("value")
-    if op == "is_false":  # withHuman: only JSON false matches; a missing field does not
-        return value is False
+    if op == "is_false":  # withHuman: JSON false matches; missing does not match; null/0/"false" is an error
+        if node["field"] not in request:
+            return False
+        if isinstance(value, bool):
+            return value is False
+        raise _EvalError(node["field"])
     if op == "equals":
         return value == expected
     if value is None:
@@ -197,7 +206,11 @@ def _decide(blocks, agent, server, tool, arguments=None):
     for block in blocks:
         if block["type"] == "outcome":
             return block["id"], block["config"]["outcome"]
-        if _evaluate(block["config"]["when"], request):
+        try:
+            matched = _evaluate(block["config"]["when"], request)
+        except _EvalError:
+            return block["id"], "human"
+        if matched:
             inner = block["config"]["blocks"][0]
             return block["id"], inner["config"]["outcome"] if inner["type"] == "outcome" else inner["type"]
     raise AssertionError("no block decided")
@@ -437,9 +450,15 @@ MAVERICK_DECISIONS = [
     ("proto-agents", "park:maverick", MV + "maverick_create_ticket", {**OFF, "attention_merchant": True},
      "money-server-human", "human"),
     ("proto-agents", "park:maverick", MV + "maverick_create_ticket", None, "money-server-human", "human"),
+    # odd values are an evaluation error in withHuman: the block itself ends as a person (not a fall-through)
     ("proto-agents", "park:maverick", MV + "maverick_create_ticket", {"notify_merchant": "false",
                                                                       "attention_merchant": "false"},
-     "money-server-human", "human"),
+     "pa-park-maverick-ticket", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_create_ticket", {"notify_merchant": None,
+                                                                      "attention_merchant": False},
+     "pa-park-maverick-ticket", "human"),
+    ("proto-agents", "park:maverick", MV + "maverick_add_boarding_note", {"notify_staff": 0},
+     "pa-park-maverick-note", "human"),
     ("proto-agents", "park:maverick", MV + "maverick_add_boarding_note", {"notify_staff": False},
      "pa-park-maverick-note", "approve"),
     ("proto-agents", "park:maverick", MV + "maverick_add_boarding_note", {"notify_staff": True},

@@ -62,7 +62,7 @@ def test_both_services_use_the_same_tag_with_maverick_sha():
 def test_compose_has_maverick_build_context():
     block = _service_block("wh-tunnel")
     assert "additional_contexts:" in block
-    assert "maverick-src: ${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}" in block
+    assert "maverick-src: ${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}" in block
 
 
 def test_compose_mounts_the_maverick_inbox_volume_in_the_tunnel_only():
@@ -116,6 +116,12 @@ def test_build_script_checks_sha_and_clean_tree():
     assert "docker compose build" in text
     assert text.index("rev-parse HEAD") < text.index("docker compose build")
     assert text.index("status --porcelain") < text.index("docker compose build")
+    # PR 53 review I1: root's checkout, no safe.directory, no replace objects or grafts
+    assert "-c safe.directory" not in text
+    assert "SRC=${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}" in text
+    assert "GIT_NO_REPLACE_OBJECTS=1 git --no-replace-objects" in text
+    assert ".git/info/grafts" in text and "refs/replace/" in text
+    assert "OWNER=${MAVERICK_MCP_SRC_OWNER:-root}" in text
 
 
 _GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
@@ -150,7 +156,9 @@ def _fake_checkout(tmp_path):
     docker = bindir / "docker"
     docker.write_text('#!/bin/sh\necho "FAKE DOCKER $*"\n')
     docker.chmod(0o755)
-    return src, tun, dict(env, PATH=f"{bindir}:/usr/bin:/bin", MAVERICK_MCP_SRC=str(src))
+    import getpass
+    return src, tun, dict(env, PATH=f"{bindir}:/usr/bin:/bin", MAVERICK_MCP_SRC=str(src),
+                          MAVERICK_MCP_SRC_OWNER=getpass.getuser())
 
 
 def _run_build(tun, env):
@@ -196,6 +204,36 @@ def test_build_script_stops_when_the_image_tag_does_not_name_the_pinned_commit(t
     assert result.returncode != 0
     assert "FAKE DOCKER" not in result.stdout
     assert "image tag" in result.stderr
+
+
+def test_build_script_stops_when_the_checkout_is_not_the_owners(tmp_path):
+    _, tun, env = _fake_checkout(tmp_path)
+    result = _run_build(tun, dict(env, MAVERICK_MCP_SRC_OWNER="root"))
+    assert result.returncode != 0 and "FAKE DOCKER" not in result.stdout
+    assert "must be owned by root" in result.stderr
+
+
+@pytest.mark.parametrize("where", ["top", "file", "git"])
+def test_build_script_stops_when_something_is_group_or_world_writable(tmp_path, where):
+    src, tun, env = _fake_checkout(tmp_path)
+    target = {"top": src, "file": src / "a.txt", "git": src / ".git" / "config"}[where]
+    target.chmod(target.stat().st_mode | 0o020)
+    result = _run_build(tun, env)
+    assert result.returncode != 0 and "FAKE DOCKER" not in result.stdout
+    assert "writable by group or others" in result.stderr
+
+
+def test_build_script_stops_on_grafts_or_replace_refs(tmp_path):
+    src, tun, env = _fake_checkout(tmp_path)
+    (src / ".git" / "info").mkdir(exist_ok=True)
+    (src / ".git" / "info" / "grafts").write_text("")
+    result = _run_build(tun, env)
+    assert result.returncode != 0 and "grafts" in result.stderr and "FAKE DOCKER" not in result.stdout
+    (src / ".git" / "info" / "grafts").unlink()
+    head = _git(src, "rev-parse", "HEAD", env=env)
+    _git(src, "update-ref", f"refs/replace/{head}", head, env=env)
+    result = _run_build(tun, env)
+    assert result.returncode != 0 and "replace refs" in result.stderr and "FAKE DOCKER" not in result.stdout
 
 
 def test_build_script_stops_when_the_sha_file_is_not_one_full_commit(tmp_path):

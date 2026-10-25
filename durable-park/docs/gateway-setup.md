@@ -29,66 +29,71 @@ https://quay.io/repository/withhuman/tunnel?tab=tags, change `TUNNEL_IMAGE` in
 ## Maverick server source
 
 In plain English: the tunnel image also carries TapDash's own Maverick MCP server. Its code lives in a **private**
-GitHub repo, so the VM keeps a read-only copy of it, frozen at one reviewed commit.
+GitHub repo, so the VM keeps a read-only copy of it, frozen at one reviewed commit. The copy belongs to **root**:
+the agent's user (`hermes`) can read it (the agent reads the Maverick skills from it) but cannot change it, because
+`build.sh` runs as root and builds the payments server from it.
 
 | Thing | Value |
 | --- | --- |
 | Repo | `TapDashPayments/maverick-mcp` (private) |
 | Pinned commit | the one line in [`deploy/tunnel/maverick-mcp.sha`](../deploy/tunnel/maverick-mcp.sha) (`bf99b4464380564a479e90bc2a3a7135f39ba8d2`, `main` after PR #2) |
-| Checkout on the VM | `/home/hermes/maverick-mcp` (owner `hermes`, detached at the pinned commit) |
-| Access | deploy key `proto-agents-read` (**read-only**), private key `~hermes/.ssh/maverick_mcp_deploy` |
+| Checkout on the VM | `/opt/maverick-mcp-src` (owner `root`, mode 0755, files 0644, detached at the pinned commit) |
+| Access | deploy key `proto-agents-root-read` (**read-only**), private key `/root/.ssh/maverick_mcp_deploy` |
+| Skills the agent reads | `/opt/maverick-mcp-src/skills` (`skills.external_dirs`, set by `hermes_mcp.sh`) |
 
 ```mermaid
 flowchart LR
-  sha["maverick-mcp.sha<br/>(pinned commit)"] -->|"names the commit for"| co["/home/hermes/maverick-mcp<br/>(read-only checkout)"]
-  gh["GitHub<br/>TapDashPayments/maverick-mcp"] -->|"git fetch with the read-only deploy key"| co
-  co -->|"build context maverick-src"| img["tunnel image<br/>(docker compose build)"]
+  sha["maverick-mcp.sha<br/>(pinned commit)"] -->|"names the commit for"| co["/opt/maverick-mcp-src<br/>(root's read-only checkout)"]
+  gh["GitHub<br/>TapDashPayments/maverick-mcp"] -->|"git fetch as root with the read-only deploy key"| co
+  co -->|"build context maverick-src (build.sh checks owner, commit, clean tree)"| img["tunnel image<br/>(docker compose build)"]
+  co -->|"skills folder, read only"| hermes["Hermes agent<br/>(skills_list, skill_view)"]
 ```
 
-How it was set up (2026-10-24), and how to redo it on a fresh VM:
+Why root: `build.sh` runs git and `docker compose build` as root. If the checkout belonged to `hermes`, a changed
+`.git/config` (for example `core.fsmonitor`) could make root run a command, and replace refs or grafts could make
+git show the pinned commit while other files are built (independent review of PR 53, finding I1). So `build.sh`
+refuses a checkout that is not root's, that has any file owned by someone else or writable by group or others, or
+that has `.git/info/grafts` or `refs/replace/`; it runs git with `--no-replace-objects` and no `safe.directory`.
 
-1. **Key.** As `hermes`: `ssh-keygen -t ed25519 -N '' -C hermes@proto-agents-maverick-mcp -f ~/.ssh/maverick_mcp_deploy`.
-   As `ubuntu` (who is logged in to `gh`), add the public half as a **read-only** deploy key:
-   `gh repo deploy-key add ~hermes/.ssh/maverick_mcp_deploy.pub -R TapDashPayments/maverick-mcp -t proto-agents-read`
-   (copy the `.pub` file somewhere `ubuntu` can read first; it is public, the private key never leaves `~hermes/.ssh`).
-   Without `--allow-write` the key can only read.
-2. **SSH alias.** `~hermes/.ssh/config` (mode 0600) gets a host alias that uses only that key, and the same pinned
-   GitHub host key file as the TapDash-Agents deploy key:
+How it was set up (2026-10-25), and how to redo it on a fresh VM (as `ubuntu`, with sudo):
 
-   ```text
-   Host github-maverick-mcp
-     HostName github.com
-     User git
-     IdentityFile ~/.ssh/maverick_mcp_deploy
-     IdentitiesOnly yes
-     UserKnownHostsFile ~/.ssh/known_hosts_github
-     StrictHostKeyChecking yes
+1. **Key.** `sudo ssh-keygen -t ed25519 -N '' -C root@proto-agents-maverick-mcp-src -f /root/.ssh/maverick_mcp_deploy`.
+   Copy the public half somewhere `ubuntu` can read (`sudo cp /root/.ssh/maverick_mcp_deploy.pub /tmp/k.pub`) and
+   add it as a **read-only** deploy key (no `--allow-write`):
+   `gh repo deploy-key add /tmp/k.pub -R TapDashPayments/maverick-mcp -t proto-agents-root-read`.
+   GitHub's host key: `/root/.ssh/known_hosts_github` (the same pinned line as `~hermes/.ssh/known_hosts_github`).
+2. **Checkout.**
+
+   ```sh
+   sudo env GIT_SSH_COMMAND="ssh -i /root/.ssh/maverick_mcp_deploy -o IdentitiesOnly=yes \
+     -o UserKnownHostsFile=/root/.ssh/known_hosts_github -o StrictHostKeyChecking=yes" \
+     git clone -q git@github.com:TapDashPayments/maverick-mcp.git /opt/maverick-mcp-src
+   sudo git -C /opt/maverick-mcp-src checkout -q "$(cat <worktree>/durable-park/deploy/tunnel/maverick-mcp.sha)"
+   sudo chown -R root:root /opt/maverick-mcp-src && sudo chmod -R u=rwX,go=rX /opt/maverick-mcp-src
    ```
 
-3. **Checkout.** As `hermes`:
-   `git clone git@github-maverick-mcp:TapDashPayments/maverick-mcp.git /home/hermes/maverick-mcp`, then
-   `git -C /home/hermes/maverick-mcp checkout "$(cat <worktree>/durable-park/deploy/tunnel/maverick-mcp.sha)"`.
-   Check: `git -C /home/hermes/maverick-mcp rev-parse HEAD` prints the same 40 characters as the file.
+   Check: `sudo git -C /opt/maverick-mcp-src rev-parse HEAD` prints the same 40 characters as the file.
 
 **Move to a new commit** (after a reviewed change is merged to `maverick-mcp` `main`):
 
 1. In a TapDash-Agents worktree, write the new commit into `maverick-mcp.sha` (one line, 40 characters), and change
    the `-mav-<first 7>` part of the image tag in `docker-compose.yml` (both services) and in the docs.
-2. As `hermes`: `git -C /home/hermes/maverick-mcp fetch origin && git -C /home/hermes/maverick-mcp checkout <new sha>`.
-3. Rebuild with `sudo bash build.sh` (below). It refuses when the checkout's commit differs from the file, when the
-   checkout has any local change (also ignored files such as `__pycache__`), or when the image tag does not end in
-   `-mav-<first 7>`. Then check `--list-approvals`, and update the approval rules if a tool was added or changed its
-   approval level.
+2. As root, with the `GIT_SSH_COMMAND` above: `git -C /opt/maverick-mcp-src fetch -q origin && git -C
+   /opt/maverick-mcp-src checkout -q <new sha>`, then the same `chown` and `chmod`.
+3. Rebuild with `sudo bash build.sh` (below). It refuses when the checkout is not root's or has a writable or foreign
+   file, has grafts or replace refs, is at another commit, has any local change (also ignored files such as
+   `__pycache__`), or when the image tag does not end in `-mav-<first 7>`. Then check `--list-approvals`, and update
+   the approval rules if a tool was added or changed its approval level.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman`. Stage `maverick`: builds the Maverick server into the venv `/opt/maverick-mcp` (see [The Maverick server in the image](#the-maverick-server-in-the-image)), launcher `/usr/local/bin/maverick-mcp-server`, creates `/data/maverick-inbox` (`withhuman`, 0700) |
-| `deploy/tunnel/build.sh` | the only way to build: checks the Maverick checkout (pinned commit, no local changes) and the image tag, then runs `docker compose build`. Never starts or stops the tunnel |
+| `deploy/tunnel/build.sh` | the only way to build: checks the Maverick checkout (root's, nothing writable by others, no grafts or replace refs, pinned commit, no local changes) and the image tag, then runs `docker compose build`. Never starts or stops the tunnel |
 | `deploy/tunnel/maverick-mcp.sha` | the pinned `maverick-mcp` commit (one line) |
 | `deploy/tunnel/tunnel.yaml` | two servers: `quickbooks` (`command: ["qbo-mcp-server"]` + env) and `maverick` (`command: ["maverick-mcp-server"]` + env) |
-| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build context `maverick-src` = `${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, two env files `/etc/durable-park/tunnel.env` and `/etc/durable-park/maverick.env` (paths overridable with `TUNNEL_ENV_FILE`, `MAVERICK_ENV_FILE`); profile service `check` (same two env files) |
+| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build context `maverick-src` = `${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, two env files `/etc/durable-park/tunnel.env` and `/etc/durable-park/maverick.env` (paths overridable with `TUNNEL_ENV_FILE`, `MAVERICK_ENV_FILE`); profile service `check` (same two env files) |
 | `deploy/tunnel/enter-secrets.sh` | interactive script that writes `/etc/durable-park/tunnel.env` |
 | `deploy/tunnel/enter-maverick-secrets.sh` | interactive script that writes `/etc/durable-park/maverick.env` (3 values) |
 

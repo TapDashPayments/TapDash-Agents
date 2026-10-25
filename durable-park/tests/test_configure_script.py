@@ -277,7 +277,8 @@ def test_hermes_mcp_script_values_and_guards():
                    "TOOL_INCLUDE='[\"quickbooks__*\", \"maverick__*\"]'",
                    "EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read",
                    "has \"$registered\" -F -- \"$EXPECTED_TOOL_MAVERICK\"",
-                   "set_cfg skills.external_dirs '[\"/home/hermes/maverick-mcp/skills\"]'"):
+                   "MAVERICK_SKILLS_DIR=/opt/maverick-mcp-src/skills",
+                   'set_cfg skills.external_dirs "[\\"$MAVERICK_SKILLS_DIR\\"]"'):
         assert needle in text, needle
     code = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
     for line in code:

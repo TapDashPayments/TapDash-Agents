@@ -14,10 +14,10 @@ services:
     image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44
     build:
       context: .
-      # The Maverick server source: the read-only checkout at the commit in maverick-mcp.sha.
+      # The Maverick server source: root's read-only checkout at the commit in maverick-mcp.sha.
       # build.sh refuses to build when it is another commit or has local changes.
       additional_contexts:
-        maverick-src: ${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}
+        maverick-src: ${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}
     restart: unless-stopped
     env_file:
       - ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}

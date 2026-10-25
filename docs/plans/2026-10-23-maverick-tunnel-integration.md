@@ -1,6 +1,6 @@
 # Maverick Tunnel Integration Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Use superpowers:test-driven-development for every code change. Read `AGENTS.md` first.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. Use superpowers:test-driven-development for every code change. Read `AGENTS.md` first.
 
 **Goal:** Run the Maverick MCP server next to QuickBooks in the withHuman tunnel, and wire it into withHuman approvals, durable-park and Hermes, so the agent can use the 42 Maverick tools with the approval split from the spec.
 
@@ -41,10 +41,10 @@
 - Create: `durable-park/deploy/tunnel/maverick-mcp.sha` (one line: the 40-character commit on `maverick-mcp` `main`)
 - Modify: `durable-park/docs/gateway-setup.md` (new section "Maverick server source")
 
-- [ ] **Step 1:** As `hermes`, create `~/.ssh/maverick_mcp_deploy` (`ssh-keygen -t ed25519 -N '' -C hermes@proto-agents-maverick-mcp`). As `ubuntu`, add the public key read-only: `gh repo deploy-key add ~hermes/.ssh/maverick_mcp_deploy.pub -R TapDashPayments/maverick-mcp -t proto-agents-read`.
-- [ ] **Step 2:** Add to `~hermes/.ssh/config`: `Host github-maverick-mcp` / `HostName github.com` / `User git` / `IdentityFile ~/.ssh/maverick_mcp_deploy` / `IdentitiesOnly yes`.
-- [ ] **Step 3:** Clone `git@github-maverick-mcp:TapDashPayments/maverick-mcp.git` to `/home/hermes/maverick-mcp`, check out the commit in `maverick-mcp.sha`. Expected: `git -C /home/hermes/maverick-mcp rev-parse HEAD` equals the file.
-- [ ] **Step 4:** Document the three steps and "how to move to a new commit" in `gateway-setup.md`. Commit `docs(tunnel): pinned read-only checkout of maverick-mcp`.
+- [x] **Step 1:** As `hermes`, create `~/.ssh/maverick_mcp_deploy` (`ssh-keygen -t ed25519 -N '' -C hermes@proto-agents-maverick-mcp`). As `ubuntu`, add the public key read-only: `gh repo deploy-key add ~hermes/.ssh/maverick_mcp_deploy.pub -R TapDashPayments/maverick-mcp -t proto-agents-read`.
+- [x] **Step 2:** Add to `~hermes/.ssh/config`: `Host github-maverick-mcp` / `HostName github.com` / `User git` / `IdentityFile ~/.ssh/maverick_mcp_deploy` / `IdentitiesOnly yes`.
+- [x] **Step 3:** Clone `git@github-maverick-mcp:TapDashPayments/maverick-mcp.git` to `/home/hermes/maverick-mcp`, check out the commit in `maverick-mcp.sha`. Expected: `git -C /home/hermes/maverick-mcp rev-parse HEAD` equals the file.
+- [x] **Step 4:** Document the three steps and "how to move to a new commit" in `gateway-setup.md`. Commit `docs(tunnel): pinned read-only checkout of maverick-mcp`.
 
 ---
 
@@ -59,12 +59,12 @@
 **Interfaces:**
 - Produces: launcher `/usr/local/bin/maverick-mcp-server` (`exec /opt/maverick-mcp/bin/python -m maverick_mcp "$@"`); image tag `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-<first 7 of maverick-mcp.sha>` in **both** compose services; named volume `durable-park-maverick-inbox` mounted at `/data/maverick-inbox` (owner `withhuman`, mode 0700) in the `wh-tunnel` service.
 
-- [ ] **Step 1: Write the failing tests** (plain text checks, no YAML package): `test_both_services_use_the_same_tag_with_maverick_sha`; `test_compose_has_maverick_build_context` (`additional_contexts` maps `maverick-src` to `${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}`); `test_dockerfile_installs_with_require_hashes` (`--require-hashes -r requirements.lock` and `--no-deps`); `test_dockerignore_still_excludes_env`; `test_build_script_checks_sha_and_clean_tree` (`bash -n`, `shellcheck`, and the script text compares `git rev-parse HEAD` to `maverick-mcp.sha` and runs `git status --porcelain`).
-- [ ] **Step 2: Run** (FAIL).
-- [ ] **Step 3: Dockerfile:** new stage `FROM ${TUNNEL_IMAGE} AS maverick`, `USER root`, `COPY --from=maverick-src requirements.lock pyproject.toml /src/maverick/`, `COPY --from=maverick-src src /src/maverick/src`, `python3 -m venv /opt/maverick-mcp`, `/opt/maverick-mcp/bin/pip install --no-cache-dir --require-hashes -r /src/maverick/requirements.lock`, then `--no-deps /src/maverick`. Runtime stage: `COPY --from=maverick /opt/maverick-mcp /opt/maverick-mcp`, the launcher, `mkdir -p /data/maverick-inbox && chown withhuman:withhuman /data/maverick-inbox && chmod 0700 /data/maverick-inbox`, still `USER withhuman` last.
-- [ ] **Step 4: `build.sh`:** stops with a message if the checkout's HEAD is not the pinned SHA or the tree is dirty, then `docker compose build`.
-- [ ] **Step 5: Run** the tests (PASS). Build: `sudo bash build.sh`. Expected: the image builds; `docker run --rm --entrypoint maverick-mcp-server <tag> --list-approvals` prints 42 entries.
-- [ ] **Step 6:** Update the docs listed above. Commit `feat(tunnel): add the Maverick MCP server to the tunnel image`.
+- [x] **Step 1: Write the failing tests** (plain text checks, no YAML package): `test_both_services_use_the_same_tag_with_maverick_sha`; `test_compose_has_maverick_build_context` (`additional_contexts` maps `maverick-src` to `${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}`); `test_dockerfile_installs_with_require_hashes` (`--require-hashes -r requirements.lock` and `--no-deps`); `test_dockerignore_still_excludes_env`; `test_build_script_checks_sha_and_clean_tree` (`bash -n`, `shellcheck`, and the script text compares `git rev-parse HEAD` to `maverick-mcp.sha` and runs `git status --porcelain`).
+- [x] **Step 2: Run** (FAIL).
+- [x] **Step 3: Dockerfile:** new stage `FROM ${TUNNEL_IMAGE} AS maverick`, `USER root`, `COPY --from=maverick-src requirements.lock pyproject.toml /src/maverick/`, `COPY --from=maverick-src src /src/maverick/src`, `python3 -m venv /opt/maverick-mcp`, `/opt/maverick-mcp/bin/pip install --no-cache-dir --require-hashes -r /src/maverick/requirements.lock`, then `--no-deps /src/maverick`. Runtime stage: `COPY --from=maverick /opt/maverick-mcp /opt/maverick-mcp`, the launcher, `mkdir -p /data/maverick-inbox && chown withhuman:withhuman /data/maverick-inbox && chmod 0700 /data/maverick-inbox`, still `USER withhuman` last.
+- [x] **Step 4: `build.sh`:** stops with a message if the checkout's HEAD is not the pinned SHA or the tree is dirty, then `docker compose build`.
+- [x] **Step 5: Run** the tests (PASS). Build: `sudo bash build.sh`. Expected: the image builds; `docker run --rm --entrypoint maverick-mcp-server <tag> --list-approvals` prints 42 entries.
+- [x] **Step 6:** Update the docs listed above. Commit `feat(tunnel): add the Maverick MCP server to the tunnel image`.
 
 ---
 
@@ -79,9 +79,9 @@
 **Interfaces:**
 - Produces: `/etc/durable-park/maverick.env` (root, 0600) with exactly `MAVERICK_TOKEN`, `MAVERICK_GATEWAY_URL`, `MAVERICK_DASHBOARD_URL`; `tunnel.yaml` entry `maverick: {command: ["maverick-mcp-server"], env: {MAVERICK_TOKEN: ${MAVERICK_TOKEN}, MAVERICK_GATEWAY_URL: ${MAVERICK_GATEWAY_URL}, MAVERICK_DASHBOARD_URL: ${MAVERICK_DASHBOARD_URL}, MAVERICK_INBOX_DIR: /data/maverick-inbox}}`; both compose services list `env_file: [${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}, ${MAVERICK_ENV_FILE:-/etc/durable-park/maverick.env}]`.
 
-- [ ] **Step 1: Write the failing tests**: `test_tunnel_yaml_has_maverick_server`; `test_both_services_load_maverick_env`; `test_enter_maverick_secrets_script` (`bash -n`, `shellcheck`; `names=(MAVERICK_TOKEN MAVERICK_GATEWAY_URL MAVERICK_DASHBOARD_URL)`; values read with `read -rs`; the same character rules as `enter-secrets.sh`; URLs must start `https://`; writes via `mktemp` + `mv -f`, mode 0600, owner root; asks before overwriting).
-- [ ] **Step 2–4:** fail, implement, pass.
-- [ ] **Step 5:** Document in the runbook: until Maverick sandbox access arrives, Yaakov enters `MAVERICK_TOKEN=pending`, `https://maverick.invalid` for both URLs; every Maverick call then fails with a clear "did not answer" error, never silently. Commit `feat(tunnel): Maverick settings file and tunnel entry`.
+- [x] **Step 1: Write the failing tests**: `test_tunnel_yaml_has_maverick_server`; `test_both_services_load_maverick_env`; `test_enter_maverick_secrets_script` (`bash -n`, `shellcheck`; `names=(MAVERICK_TOKEN MAVERICK_GATEWAY_URL MAVERICK_DASHBOARD_URL)`; values read with `read -rs`; the same character rules as `enter-secrets.sh`; URLs must start `https://`; writes via `mktemp` + `mv -f`, mode 0600, owner root; asks before overwriting).
+- [x] **Step 2–4:** fail, implement, pass.
+- [x] **Step 5:** Document in the runbook: until Maverick sandbox access arrives, Yaakov enters `MAVERICK_TOKEN=pending`, `https://maverick.invalid` for both URLs; every Maverick call then fails with a clear "did not answer" error, never silently. Commit `feat(tunnel): Maverick settings file and tunnel entry`.
 
 ---
 
@@ -95,9 +95,9 @@
 **Interfaces:**
 - Produces: `ALLOWED_TOOL_PREFIXES = ("mcp__wh__quickbooks__", "mcp__wh__maverick__")`; `hermes_mcp.sh`: `TOOL_INCLUDE='["quickbooks__*", "maverick__*"]'`, `ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick)__'` used with `grep -vE`, a second expected tool `EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read`, and `set_cfg skills.external_dirs '["/home/hermes/maverick-mcp/skills"]'`; `DEFAULT_FORM_CHECKED_TOOLS` gains a **third, last** entry `r"mcp__wh__maverick__maverick_[a-z0-9_]+"` (index 0 stays the QuickBooks regex, which `test_pipeline_policy.py:258-261` pins).
 
-- [ ] **Step 1: Write the failing tests**: in `test_is_allowed`, `mcp__wh__maverick__maverick_read` True and `mcp__wh__maverickX__a` False; in `test_hermes_mcp_checks_before_and_after_and_scopes_wh_tools` and `test_hermes_mcp_script_values_and_guards`, the new literals above; `test_maverick_tools_are_form_checked` (`mcp__wh__maverick__maverick_refund_transaction` matches, `mcp__wh__maverick__x` does not).
-- [ ] **Step 2–4:** fail, implement, pass (the whole durable-park suite).
-- [ ] **Step 5:** Docs. Commit `feat: allow and form-check Maverick tools`.
+- [x] **Step 1: Write the failing tests**: in `test_is_allowed`, `mcp__wh__maverick__maverick_read` True and `mcp__wh__maverickX__a` False; in `test_hermes_mcp_checks_before_and_after_and_scopes_wh_tools` and `test_hermes_mcp_script_values_and_guards`, the new literals above; `test_maverick_tools_are_form_checked` (`mcp__wh__maverick__maverick_refund_transaction` matches, `mcp__wh__maverick__x` does not).
+- [x] **Step 2–4:** fail, implement, pass (the whole durable-park suite).
+- [x] **Step 5:** Docs. Commit `feat: allow and form-check Maverick tools`.
 
 ---
 
@@ -108,9 +108,9 @@
 - Test: `durable-park/tests/test_tool_policy.py`, `durable-park/tests/test_pipeline_policy.py`
 - Docs: `durable-park/docs/runbook.md` (how to open `skills` in `/etc/durable-park/allowed_toolsets`), `durable-park/docs/architecture.md`
 
-- [ ] **Step 1: Write the failing tests**: `test_skills_toolset_can_be_opened` (`read_allowed` accepts `skills`); `test_skill_manage_is_always_denied` (`pa-hermes-local-deny` lists `skill_manage`, and it sits before any approve rule that could match it); `test_check_refuses_skills_without_the_deny` (policy `check` fails when given a pipeline without that deny); the other six Phase-2 toolsets stay refused.
-- [ ] **Step 2–4:** fail, implement, pass.
-- [ ] **Step 5:** Yaakov adds `skills` to `/etc/durable-park/allowed_toolsets` (admin step in the runbook); run `hermes_tool_policy.py apply` and `check` (PASS). Commit `feat(policy): allow skill reading; skill_manage stays denied`.
+- [x] **Step 1: Write the failing tests**: `test_skills_toolset_can_be_opened` (`read_allowed` accepts `skills`); `test_skill_manage_is_always_denied` (`pa-hermes-local-deny` lists `skill_manage`, and it sits before any approve rule that could match it); `test_check_refuses_skills_without_the_deny` (policy `check` fails when given a pipeline without that deny); the other six Phase-2 toolsets stay refused.
+- [x] **Step 2–4:** fail, implement, pass.
+- [x] **Step 5:** Yaakov adds `skills` to `/etc/durable-park/allowed_toolsets` (admin step in the runbook); run `hermes_tool_policy.py apply` and `check` (PASS). Commit `feat(policy): allow skill reading; skill_manage stays denied`.
 
 ---
 
@@ -130,10 +130,10 @@
   7. `mav-gateway-write-bridge`: server equals `maverick` → webhook block `mav-gateway-write-bridge-webhook`, `endpoint_key: durable-park-bridge`, `allowed_outcomes: ["human", "approve"]`, `include` all false, 5 s, 3 attempts, escalation `notify-yaakov-yehuda` (same settings as `qb-gateway-write-bridge`).
   Everything else on `park:maverick` falls to `money-server-human` (already matches `maverick`) → a person.
 
-- [ ] **Step 1: Write the failing tests**: update `EXPECTED_ORDER`; add `park:maverick` to `MONEY_SERVERS`; new `DECISIONS` cases (proto-agents): park `maverick_read` → approve; park `maverick_refund_transaction` → human; park `maverick_create_ticket` with both flags false → approve; with `notify_merchant: true` → human; with the flags **missing** → human; with `"false"` as a string → human; park `maverick_read_all` → human; gateway `maverick_read` → approve; gateway `maverick_refund_transaction` → bridge webhook; tapdash-ops (not proto-agents) `maverick_read` → human.
-- [ ] **Step 2–4:** fail, edit the JSON (new UUIDs for every condition id), pass.
-- [ ] **Step 5: Apply** with the withHuman MCP: `update_pipeline` (key `entry`, the file's blocks, `activate: false`), `preview_pipeline` for each DECISIONS case above (expected outcomes match), then `activate_pipeline_revision`. Record the revision number in `architecture.md`.
-- [ ] **Step 6:** Commit `feat(pipeline): Maverick approval rules`.
+- [x] **Step 1: Write the failing tests**: update `EXPECTED_ORDER`; add `park:maverick` to `MONEY_SERVERS`; new `DECISIONS` cases (proto-agents): park `maverick_read` → approve; park `maverick_refund_transaction` → human; park `maverick_create_ticket` with both flags false → approve; with `notify_merchant: true` → human; with the flags **missing** → human; with `"false"` as a string → human; park `maverick_read_all` → human; gateway `maverick_read` → approve; gateway `maverick_refund_transaction` → bridge webhook; tapdash-ops (not proto-agents) `maverick_read` → human.
+- [x] **Step 2–4:** fail, edit the JSON (new UUIDs for every condition id), pass.
+- [x] **Step 5: Apply** with the withHuman MCP: `update_pipeline` (key `entry`, the file's blocks, `activate: false`), `preview_pipeline` for each DECISIONS case above (expected outcomes match), then `activate_pipeline_revision`. Record the revision number in `architecture.md`.
+- [x] **Step 6:** Commit `feat(pipeline): Maverick approval rules`.
 
 ---
 

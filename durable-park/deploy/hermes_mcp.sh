@@ -38,7 +38,7 @@ EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read
 # Only QuickBooks and Maverick tools (also ALLOWED_TOOL_PREFIXES in deploy/hermes_tool_policy.py)
 ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick)__'
 # The Maverick skills (how-to notes the agent reads with skill_view) come from the pinned read-only checkout.
-MAVERICK_SKILLS_DIR=/home/hermes/maverick-mcp/skills
+MAVERICK_SKILLS_DIR=/opt/maverick-mcp-src/skills
 
 log() { printf 'hermes_mcp: %s\n' "$*"; }
 die() { printf 'hermes_mcp: ERROR: %s\n' "$*" >&2; exit 1; }
@@ -89,6 +89,8 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 as_hermes cp -p "$HERMES_HOME/config.yaml" "$HERMES_HOME/config.yaml.bak-hermes-mcp-$stamp"
 log "backed up config.yaml to config.yaml.bak-hermes-mcp-$stamp"
 set_cfg() { hermes_cli config set "$1" "$2" >/dev/null; }
+# Before any write: the Maverick skills must exist (a missing checkout must not leave a half-written config).
+[[ -d $MAVERICK_SKILLS_DIR ]] || die "$MAVERICK_SKILLS_DIR is missing: check out maverick-mcp first (gateway-setup.md, Maverick server source)"
 set_cfg "mcp_servers.$SERVER.url" "$GATEWAY_URL"
 # Bare ${VAR}, not the env:-prefixed form: same resolution at connect time, but no "Config ref ... is not set" warning in
 # every Hermes process (the config loads before the secrets.command helper runs). An unset variable still fails
@@ -100,8 +102,7 @@ set_cfg "mcp_servers.$SERVER.tools.include" "$TOOL_INCLUDE"
 set_cfg "mcp_servers.$SERVER.tools.resources" false
 set_cfg "mcp_servers.$SERVER.tools.prompts" false
 set_cfg "mcp_servers.$SERVER.enabled" true
-[[ -d $MAVERICK_SKILLS_DIR ]] || die "$MAVERICK_SKILLS_DIR is missing: check out maverick-mcp first (gateway-setup.md, Maverick server source)"
-set_cfg skills.external_dirs '["/home/hermes/maverick-mcp/skills"]'
+set_cfg skills.external_dirs "[\"$MAVERICK_SKILLS_DIR\"]"
 # The agent tool policy now names `wh` in every platform list (an MCP allowlist) instead of `no_mcp`.
 tool_policy apply || die "could not apply the agent tool policy"
 policy_report=$(tool_policy check) \
@@ -132,8 +133,6 @@ done
 log "${registered#*INFO }"
 has "$registered" -F -- "$EXPECTED_TOOL" \
     || die "$EXPECTED_TOOL is not registered: is the QuickBooks server granted to agent proto-agents in withHuman?"
-has "$registered" -F -- "$EXPECTED_TOOL_MAVERICK" \
-    || die "$EXPECTED_TOOL_MAVERICK is not registered: is the Maverick server registered (slug maverick) and granted to agent proto-agents in withHuman?"
 # Every registered wh tool must be a QuickBooks or Maverick tool ("registered N tool(s): a, b, ..."; Hermes v0.22.2
 # tools/mcp_tool_discovery.py:354). Anything else (another gateway server, withhuman__*) fails the deploy.
 wh_tools=$(grep -oE 'mcp__wh__[A-Za-z0-9_]+' <<<"${registered#*tool(s):}" | sort -u || true)
@@ -150,4 +149,8 @@ has "$(log_since "$since")" -F "durable-park loaded" || log "WARNING: no 'durabl
 policy_report=$(tool_policy check) \
     || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed after adding $SERVER"; }
 log "tool policy ok: $(grep -E '^cli:' <<<"$policy_report")"
+# Last, after the scope and policy checks ran: the Maverick server must be registered and granted (register it first,
+# runbook "Maverick switch-on"; until then this fails here, with every safety check above already done).
+has "$registered" -F -- "$EXPECTED_TOOL_MAVERICK" \
+    || die "$EXPECTED_TOOL_MAVERICK is not registered: is the Maverick server registered (slug maverick) and granted to agent proto-agents in withHuman?"
 log "done: $EXPECTED_TOOL and $EXPECTED_TOOL_MAVERICK available. Live check: DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py"
