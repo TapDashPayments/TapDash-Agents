@@ -6,7 +6,7 @@ This document tracks the rollout of Hermes toolsets through `durable-park` and `
 
 Where things stand: the v1 tool lockdown is still applied ([architecture section 0](architecture.md#0-how-strong-is-it-today)),
 so the agent reaches none of the tool groups below today. This page is about which groups have a pipeline rule
-(`deploy/withhuman/entry-pipeline.json`, revision 15) and which do not.
+(`deploy/withhuman/entry-pipeline.json`: revision 15 is live; the file also holds six accept.blue and Authorize.net blocks that are a candidate revision 16, not live yet) and which do not.
 
 ## Profile Scoping in AAP Context
 
@@ -44,7 +44,7 @@ When tool calls are processed by `gatecall.py`, `user_id` and `profile` context 
    - Chat messaging send tools (Telegram, Teams, Discord)
    - Status: **no rule yet.** The spec proposed one (§4.3 row 5, approve on the test VM), but it was never written:
      there is no messaging rule in `entry-pipeline.json`. A messaging call is a `hermes` call that no earlier block
-     matches, so it hits the pipeline's catch-all rule (block 10, `pa-default-human`) and asks an approver every time.
+     matches, so it hits the pipeline's catch-all rule (`pa-default-human`, row 29 of the file's table in [architecture](architecture.md#1-system-map); block 23 in the live revision 15) and asks an approver every time.
 
 3. **Group C (Browser automation)**:
    - `browser_*` without credential fields.

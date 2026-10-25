@@ -274,11 +274,19 @@ def test_hermes_mcp_script_values_and_guards():
     for needle in ("GATEWAY_URL=https://app.withhuman.ai/gateway/mcp", "set_cfg \"mcp_servers.$SERVER.trust\" full",
                    "'Bearer ${DURABLE_PARK_WH_TOKEN}'", "TOKEN_FILE=/etc/durable-park/instance_token",
                    "does not exist: provision the instance first",
-                   "TOOL_INCLUDE='[\"quickbooks__*\", \"maverick__*\", \"supabase-crm-dev__*\", \"monday__*\", \"docusign-demo__*\"]'",
+                   "TOOL_INCLUDE='[\"quickbooks__*\", \"maverick__*\", \"acceptblue__*\", \"authnet__*\", \"supabase-crm-dev__*\", "
+                   "\"monday__*\", \"docusign-demo__*\"]'",
                    "EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read",
                    "has \"$registered\" -F -- \"$EXPECTED_TOOL_MAVERICK\"",
                    "MAVERICK_SKILLS_DIR=/opt/maverick-mcp-src/skills",
-                   'set_cfg skills.external_dirs "[\\"$MAVERICK_SKILLS_DIR\\"]"'):
+                   "EXPECTED_TOOL_ACCEPTBLUE=mcp__wh__acceptblue__ablue_read",
+                   "EXPECTED_TOOL_AUTHNET=mcp__wh__authnet__authnet_read",
+                   'has "$registered" -F -- "$EXPECTED_TOOL_ACCEPTBLUE"',
+                   'has "$registered" -F -- "$EXPECTED_TOOL_AUTHNET"',
+                   "ACCEPTBLUE_SKILLS_DIR=/opt/acceptblue-mcp-src/skills",
+                   "AUTHNET_SKILLS_DIR=/opt/authorizenet-mcp-src/skills",
+                   'set_cfg skills.external_dirs "[\\"$MAVERICK_SKILLS_DIR\\", \\"$ACCEPTBLUE_SKILLS_DIR\\", '
+                   '\\"$AUTHNET_SKILLS_DIR\\"]"'):
         assert needle in text, needle
     code = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
     for line in code:
@@ -606,3 +614,16 @@ def test_every_venv_pin_is_the_version_the_tests_run_against():
     dev = (SCRIPT.parents[1] / "requirements-dev.txt").read_text().split()
     pins = _receiver_package_pins()
     assert pins and all(pin in dev for pin in pins), [pin for pin in pins if pin not in dev]
+
+
+def test_hermes_mcp_script_checks_every_skills_folder_before_it_writes_anything():
+    text = MCP_SCRIPT.read_text()
+    first_write = text.index('set_cfg "mcp_servers.$SERVER.url"')
+    for var in ("MAVERICK_SKILLS_DIR", "ACCEPTBLUE_SKILLS_DIR", "AUTHNET_SKILLS_DIR"):
+        check = text.index(f"[[ -d ${var} ]] || die")
+        assert check < first_write, var
+    # the two new servers are required last, after the scope and policy checks (as Maverick is)
+    last_checks = [text.index(f'has "$registered" -F -- "$EXPECTED_TOOL_{name}"')
+                   for name in ("MAVERICK", "ACCEPTBLUE", "AUTHNET")]
+    assert last_checks == sorted(last_checks)
+    assert last_checks[0] > text.index("tool policy ok")

@@ -1,10 +1,12 @@
 # withHuman tunnel config, mounted read-only at /etc/withhuman/tunnel.yaml.
-# The server keys (`quickbooks`, `maverick`) are the names entered in withHuman when
+# The server keys (`quickbooks`, `maverick`, `acceptblue`, `authnet`) are the names entered in withHuman when
 # registering each gateway server "Through a tunnel". ${VAR} values come from the
-# tunnel's environment (/etc/durable-park/tunnel.env and /etc/durable-park/maverick.env
+# tunnel's environment (/etc/durable-park/tunnel.env, maverick.env, acceptblue.env and authnet.env
 # via docker compose); the tunnel refuses to start if one is unset, so a missing
-# maverick.env stops the whole tunnel instead of running QuickBooks alone.
+# env file stops the whole tunnel instead of running only some of the servers.
 # Each command server only sees its own env.
+# Authorize.net: AUTHNET_ENV is fixed to sandbox (production is a reviewed change to this file, not a typed value);
+# the server's own default addresses for the sandbox are used, and its optional webhook receiver is not run.
 servers:
   quickbooks:
     command: ["qbo-mcp-server"]
@@ -24,3 +26,15 @@ servers:
       MAVERICK_GATEWAY_URL: ${MAVERICK_GATEWAY_URL}
       MAVERICK_DASHBOARD_URL: ${MAVERICK_DASHBOARD_URL}
       MAVERICK_INBOX_DIR: /data/maverick-inbox
+  acceptblue:
+    command: ["acceptblue-mcp-server"]
+    env:
+      ACCEPTBLUE_SOURCE_KEY: ${ACCEPTBLUE_SOURCE_KEY}
+      ACCEPTBLUE_PIN: ${ACCEPTBLUE_PIN}
+      ACCEPTBLUE_BASE_URL: ${ACCEPTBLUE_BASE_URL}
+  authnet:
+    command: ["authnet-mcp-server"]
+    env:
+      AUTHNET_ENV: sandbox
+      AUTHNET_LOGIN_ID: ${AUTHNET_LOGIN_ID}
+      AUTHNET_TRANSACTION_KEY: ${AUTHNET_TRANSACTION_KEY}

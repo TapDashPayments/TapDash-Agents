@@ -738,6 +738,298 @@
       }
     },
     {
+      "id": "pa-park-acceptblue-auto",
+      "name": "Park: accept.blue lookups and drafts",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "9e40041c-e61f-4f14-858f-42f481f4f160",
+          "all": [
+            {
+              "id": "642ad81c-f683-4454-802f-f2991a0a36cf",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "44b82a50-814f-4355-a596-e1f16aafd21b",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:acceptblue"
+            },
+            {
+              "id": "3945b133-7e68-45e4-a1db-bc93d03a4a84",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^mcp__wh__acceptblue__ablue_(create_customer|create_customer_from_transaction|create_invoice|describe_lookup|read|search_lookups|update_customer)$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-acceptblue-auto-outcome",
+            "name": "Park: accept.blue lookups and drafts",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "accept.blue lookup, customer record or draft invoice (the server's auto list): no money moves, no card is stored, nothing is sent and nobody outside is told."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-gateway-acceptblue-auto",
+      "name": "Gateway: accept.blue lookups and drafts",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "ed20762f-a312-454d-8759-6fab83155ce5",
+          "all": [
+            {
+              "id": "e2445a71-901d-4d03-b312-7fc9429b8fc9",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "2b38684e-449d-449a-a37d-291a8c64d501",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "acceptblue"
+            },
+            {
+              "id": "d8d81a0e-0c0d-4925-8019-374821c2586e",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(acceptblue__)?ablue_(create_customer|create_customer_from_transaction|create_invoice|describe_lookup|read|search_lookups|update_customer)$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-gateway-acceptblue-auto-outcome",
+            "name": "Gateway: accept.blue lookups and drafts",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "accept.blue lookup, customer record or draft invoice (the server's auto list): no money moves, no card is stored, nothing is sent and nobody outside is told."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "acceptblue-gateway-write-bridge",
+      "name": "proto-agents other accept.blue calls",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "27092a0d-5c4a-4504-9e25-443285f710a5",
+          "all": [
+            {
+              "id": "eab26752-8f2c-4037-86fb-cd0e5aa858ff",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "487c3c73-7706-46b3-b6cf-5ed174cfaebe",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "acceptblue"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "acceptblue-gateway-write-bridge-webhook",
+            "name": "durable-park-bridge",
+            "type": "webhook",
+            "enabled": true,
+            "timeout": "5s",
+            "max_attempts": 3,
+            "config": {
+              "endpoint_key": "durable-park-bridge",
+              "allowed_outcomes": [
+                "human",
+                "approve"
+              ],
+              "include": {
+                "agent_reasoning": false,
+                "context": false,
+                "previous_metadata": false
+              },
+              "reason": "durable-park bridge: approves only a call matching an approved park; anything else goes to Yaakov.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ],
+        "reason": ""
+      }
+    },
+    {
+      "id": "pa-park-authnet-auto",
+      "name": "Park: Authorize.net lookups and drafts",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "ea7fe1e7-8a49-4d70-ac42-980218a4975c",
+          "all": [
+            {
+              "id": "e5da6ff9-efb4-4741-9c3b-67496257e121",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "80b78816-b1b8-4b05-af46-911d971949a9",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:authnet"
+            },
+            {
+              "id": "43ef0169-4240-4732-a2f0-1a616efe0e81",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^mcp__wh__authnet__authnet_(describe_lookup|read|save_customer_profile|save_shipping_address|search_lookups)$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-authnet-auto-outcome",
+            "name": "Park: Authorize.net lookups and drafts",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Authorize.net lookup, or a saved customer or shipping address with no card (the server's auto list): no money moves, no card is stored and nobody outside is told."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-gateway-authnet-auto",
+      "name": "Gateway: Authorize.net lookups and drafts",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "370dcaf0-f7b4-44dd-b5be-27a364c50972",
+          "all": [
+            {
+              "id": "9d79d4f2-de17-465f-a7dd-1facc15117e7",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "e1987dc1-fc37-4dd1-9953-bf5b5b86253c",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "authnet"
+            },
+            {
+              "id": "ae2b0b5e-88cc-4773-8b26-644295486535",
+              "field": "/request/tool",
+              "operator": "regex",
+              "value": "^(authnet__)?authnet_(describe_lookup|read|save_customer_profile|save_shipping_address|search_lookups)$"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-gateway-authnet-auto-outcome",
+            "name": "Gateway: Authorize.net lookups and drafts",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Authorize.net lookup, or a saved customer or shipping address with no card (the server's auto list): no money moves, no card is stored and nobody outside is told."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "authnet-gateway-write-bridge",
+      "name": "proto-agents other Authorize.net calls",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "e428db2b-63a9-442f-a6ce-8fd8650b8930",
+          "all": [
+            {
+              "id": "cddd9c23-3401-4774-92e2-14c44a5cc925",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "eaaaa192-46f6-4e43-90fe-e63e8748235b",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "authnet"
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "authnet-gateway-write-bridge-webhook",
+            "name": "durable-park-bridge",
+            "type": "webhook",
+            "enabled": true,
+            "timeout": "5s",
+            "max_attempts": 3,
+            "config": {
+              "endpoint_key": "durable-park-bridge",
+              "allowed_outcomes": [
+                "human",
+                "approve"
+              ],
+              "include": {
+                "agent_reasoning": false,
+                "context": false,
+                "previous_metadata": false
+              },
+              "reason": "durable-park bridge: approves only a call matching an approved park; anything else goes to Yaakov.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ],
+        "reason": ""
+      }
+    },
+    {
       "id": "money-server-human",
       "name": "Money server: always a person",
       "type": "branch",

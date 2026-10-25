@@ -32,6 +32,12 @@ EXPECTED_ORDER = [
     "pa-gateway-maverick-note",
     "pa-gateway-maverick-ticket",
     "mav-gateway-write-bridge",
+    "pa-park-acceptblue-auto",
+    "pa-gateway-acceptblue-auto",
+    "acceptblue-gateway-write-bridge",
+    "pa-park-authnet-auto",
+    "pa-gateway-authnet-auto",
+    "authnet-gateway-write-bridge",
     "money-server-human",
     "pa-park-supabase-read",
     "pa-park-monday-read",
@@ -590,3 +596,189 @@ def test_remote_gateway_rules_match_on_the_server_only(blocks):
         assert {leaf["field"] for leaf in block_leaves(gw)} == {"/agent/slug", "/request/server"}
         # A prefixed tool name on another (or no) server is not this server's call.
         assert _decide(blocks, "proto-agents", "other-server", f"{slug}__list_things") == ("pa-default-human", "human")
+
+
+# --- accept.blue and Authorize.net (feat/acceptblue-authnet-tunnel) -----------------------------------------------
+# Same shape as Maverick: the server's own "auto" tools are approved on both paths (park and gateway), every other
+# tool is a person at park time and goes to the bridge at the gateway. The server lists are in payments_servers.py.
+from payments_servers import (ACCEPTBLUE_APPROVALS, AUTHNET_APPROVALS, SERVERS, auto_tools,  # noqa: E402
+                              person_tools)
+
+# slug -> the ids of its three blocks
+PAYMENT_BLOCKS = {
+    "acceptblue": ("pa-park-acceptblue-auto", "pa-gateway-acceptblue-auto", "acceptblue-gateway-write-bridge"),
+    "authnet": ("pa-park-authnet-auto", "pa-gateway-authnet-auto", "authnet-gateway-write-bridge"),
+}
+PAYMENT_CASES = [(slug, tool) for slug, (_, approvals) in sorted(SERVERS.items()) for tool in sorted(approvals)]
+
+
+def _hermes_name(slug, tool):
+    return f"mcp__wh__{slug}__{tool}"
+
+
+def test_payment_server_blocks_sit_together_after_maverick_and_before_the_money_rule(blocks):
+    ids = [b["id"] for b in blocks]
+    start = ids.index("mav-gateway-write-bridge") + 1
+    assert ids[start:start + 6] == [*PAYMENT_BLOCKS["acceptblue"], *PAYMENT_BLOCKS["authnet"]]
+    assert ids[start + 6] == "money-server-human"
+
+
+@pytest.mark.parametrize("slug,tool", PAYMENT_CASES)
+def test_every_payment_tool_is_decided_as_the_server_says(blocks, slug, tool):
+    prefix, approvals = SERVERS[slug]
+    park_id, gateway_id, bridge_id = PAYMENT_BLOCKS[slug]
+    name = _hermes_name(slug, tool)
+    if approvals[tool] == "auto":
+        assert _decide(blocks, "proto-agents", f"park:{slug}", name) == (park_id, "approve")
+        assert _decide(blocks, "proto-agents", slug, tool) == (gateway_id, "approve")
+        assert _decide(blocks, "proto-agents", slug, f"{slug}__{tool}") == (gateway_id, "approve")
+    else:
+        # a person at park time (money never auto-approves), the bridge at the gateway
+        assert approvals[tool] == "you"
+        assert _decide(blocks, "proto-agents", f"park:{slug}", name) == ("money-server-human", "human")
+        assert _decide(blocks, "proto-agents", slug, tool) == (bridge_id, "webhook")
+        assert _decide(blocks, "proto-agents", slug, f"{slug}__{tool}") == (bridge_id, "webhook")
+    # any other agent: a person, whatever the tool
+    assert _decide(blocks, "tapdash-ops", f"park:{slug}", name) == ("money-server-human", "human")
+    assert _decide(blocks, "tapdash-ops", slug, tool) == ("money-server-human", "human")
+
+
+@pytest.mark.parametrize("slug", sorted(SERVERS))
+def test_auto_rules_name_exactly_the_servers_auto_set(blocks, slug):
+    """The two regexes name exactly the tools the server lists as auto (--list-approvals at the pinned commit)."""
+    prefix, approvals = SERVERS[slug]
+    park_id, gateway_id, _ = PAYMENT_BLOCKS[slug]
+    for block_id, head in ((park_id, f"^mcp__wh__{slug}__{prefix}("), (gateway_id, f"^({slug}__)?{prefix}(")):
+        block = next(b for b in blocks if b["id"] == block_id)
+        pattern = next(leaf["value"] for leaf in block_leaves(block) if leaf["field"] == "/request/tool")
+        assert pattern.startswith(head) and pattern.endswith(")$"), pattern
+        names = pattern[len(head):-2].split("|")
+        assert sorted(prefix + n for n in names) == auto_tools(approvals), block_id
+        assert len(names) == len(set(names))
+
+
+def test_the_auto_sets_are_the_ones_reviewed():
+    assert auto_tools(ACCEPTBLUE_APPROVALS) == [
+        "ablue_create_customer", "ablue_create_customer_from_transaction", "ablue_create_invoice",
+        "ablue_describe_lookup", "ablue_read", "ablue_search_lookups", "ablue_update_customer"]
+    assert auto_tools(AUTHNET_APPROVALS) == [
+        "authnet_describe_lookup", "authnet_read", "authnet_save_customer_profile", "authnet_save_shipping_address",
+        "authnet_search_lookups"]
+
+
+@pytest.mark.parametrize("slug", sorted(SERVERS))
+def test_payment_rules_are_for_proto_agents_and_their_own_server_only(blocks, slug):
+    prefix, approvals = SERVERS[slug]
+    other_slug = next(s for s in SERVERS if s != slug)
+    other_prefix = SERVERS[other_slug][0]
+    read = f"{prefix}read"
+    # a lookalike or another server's tool name is not this server's tool
+    for server, tool in ((f"park:{slug}", f"mcp__wh__{slug}X__{read}"), (f"park:{slug}", f"mcp__wh__{slug}__{read}_all"),
+                         (f"park:{slug}", f"mcp__wh__{slug}__{read}x"), (f"park:{slug}", f"mcp__wh__{slug}__{prefix}Read"),
+                         (f"park:{slug}", f"mcp__wh__{other_slug}__{other_prefix}read"),
+                         (f"park:{slug}", f"mcp__wh__{slug}__{other_prefix}read"),
+                         (slug, f"{other_prefix}read"), (slug, f"{slug}__{read}_all"), (slug, f"{slug}X__{read}"),
+                         (slug, f"{read}x")):
+        _, outcome = _decide(blocks, "proto-agents", server, tool)
+        assert outcome in ("human", "webhook"), (server, tool, outcome)
+    # the gateway replay of an unknown tool on the server goes to the bridge, never to an approval
+    assert _decide(blocks, "proto-agents", slug, f"{read}_all") == (PAYMENT_BLOCKS[slug][2], "webhook")
+    # the other server's tool name on this gateway server is not an auto tool either
+    assert _decide(blocks, "proto-agents", slug, f"{other_prefix}read") == (PAYMENT_BLOCKS[slug][2], "webhook")
+
+
+@pytest.mark.parametrize("slug", sorted(SERVERS))
+def test_payment_bridge_block_matches_the_quickbooks_bridge(blocks, slug):
+    qb = next(b for b in blocks if b["id"] == "qb-gateway-write-bridge")["config"]["blocks"][0]
+    bridge_id = PAYMENT_BLOCKS[slug][2]
+    block = next(b for b in blocks if b["id"] == bridge_id)
+    hook = block["config"]["blocks"][0]
+    assert hook["id"] == f"{bridge_id}-webhook"
+    assert {k: v for k, v in hook.items() if k != "id"} == {k: v for k, v in qb.items() if k != "id"}
+    # the block takes every call of the server for proto-agents, nothing narrower
+    assert {leaf["field"] for leaf in block_leaves(block)} == {"/agent/slug", "/request/server"}
+    assert block["id"] == bridge_id and len(block["config"]["blocks"]) == 1
+    assert block["timeout"] == "50ms" and block["max_attempts"] == 1
+
+
+@pytest.mark.parametrize("slug", sorted(SERVERS))
+def test_payment_auto_blocks_approve_with_a_reason_and_nothing_else(blocks, slug):
+    for block_id in PAYMENT_BLOCKS[slug][:2]:
+        block = next(b for b in blocks if b["id"] == block_id)
+        inner = block["config"]["blocks"][0]
+        assert inner["type"] == "outcome" and inner["id"] == f"{block_id}-outcome"
+        assert inner["config"]["outcome"] == "approve" and inner["config"]["reason"]
+        assert "escalation_path" not in inner["config"]
+        fields = [leaf["field"] for leaf in block_leaves(block)]
+        assert fields == ["/agent/slug", "/request/server", "/request/tool"]
+
+
+def test_hermes_names_of_all_payment_tools_fit_in_64_characters():
+    """Hermes shortens a longer name with a hash, and then the gateway's own name no longer pairs with the park.
+    The longest one today is 63 characters, so a longer tool name in a future pin must be seen here first."""
+    from bridge.verify import expected_park, hermes_tool_name
+
+    longest = 0
+    for slug, (prefix, approvals) in SERVERS.items():
+        for tool in approvals:
+            assert tool.startswith(prefix), tool
+            name = _hermes_name(slug, tool)
+            assert len(name) <= 64, (name, len(name))
+            assert hermes_tool_name(slug, tool) == name
+            assert expected_park(slug, tool) == (name, f"park:{slug}")
+            longest = max(longest, len(name))
+    assert longest == 63
+
+
+# --- the committed --list-approvals files (deploy/tunnel/*-approvals.json) ---------------------------------------
+# build.sh compares each server's real output, inside the freshly built image, with these files. These tests tie the
+# same files to the hand-copied lists in payments_servers.py and to the pipeline rules, so a rule cannot drift away
+# from what the image will be proved to say.
+TUNNEL_DIR = PIPELINE.parent.parent / "tunnel"
+APPROVAL_FILE_NAMES = {"maverick": "maverick-approvals.json", "acceptblue": "acceptblue-approvals.json",
+                       "authnet": "authnet-approvals.json"}
+
+
+def _approvals_file(key):
+    return TUNNEL_DIR / APPROVAL_FILE_NAMES[key]
+
+
+@pytest.mark.parametrize("key", sorted(APPROVAL_FILE_NAMES))
+def test_approvals_files_are_exactly_what_the_servers_print(key):
+    """`python -m <package> --list-approvals` prints sorted JSON, two-space indent, a final newline."""
+    text = _approvals_file(key).read_text()
+    data = json.loads(text)
+    assert text == json.dumps(data, indent=2, sort_keys=True) + "\n"
+    assert set(data.values()) <= {"auto", "auto_unless_notify", "you"}
+    assert all(name.startswith({"maverick": "maverick_", "acceptblue": "ablue_", "authnet": "authnet_"}[key])
+               for name in data)
+
+
+def test_payment_approvals_files_equal_the_test_copies():
+    assert json.loads(_approvals_file("acceptblue").read_text()) == ACCEPTBLUE_APPROVALS
+    assert json.loads(_approvals_file("authnet").read_text()) == AUTHNET_APPROVALS
+
+
+def test_maverick_approvals_file_agrees_with_the_rules():
+    data = json.loads(_approvals_file("maverick").read_text())
+    assert len(data) == 42
+    assert sorted(n for n, level in data.items() if level == "auto") == sorted(MAVERICK_AUTO)
+    assert sorted(n for n, level in data.items() if level == "auto_unless_notify") == [
+        "maverick_add_boarding_note", "maverick_create_ticket", "maverick_reply_to_ticket"]
+    assert sum(level == "you" for level in data.values()) == 26
+
+
+@pytest.mark.parametrize("key", sorted(APPROVAL_FILE_NAMES))
+def test_every_tool_in_an_approvals_file_is_decided_as_the_file_says(blocks, key):
+    """auto: approved on both paths. you: a person at park time, the bridge at the gateway. A tool the server
+    approves only while its notify flags are off: a person when the flags are missing."""
+    slug = key
+    for tool, level in json.loads(_approvals_file(key).read_text()).items():
+        park = _decide(blocks, "proto-agents", f"park:{slug}", f"mcp__wh__{slug}__{tool}")
+        gateway = _decide(blocks, "proto-agents", slug, tool)
+        if level == "auto":
+            assert park[1] == "approve" and gateway[1] == "approve", tool
+        else:
+            assert park == ("money-server-human", "human"), tool
+            assert gateway[1] == "webhook", tool
+

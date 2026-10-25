@@ -49,7 +49,7 @@ Rules:
   Claude can run them. Keep the rule that the admin confirms risky actions first (anything destructive, hard to undo, or
   that touches secrets, sudoers, sshd, Tailscale or a running gateway). The agent (`hermes`) has no sudo and no terminal tool.
 - **One agent, one Hermes install, v1 tool lockdown.** The `hermes` install is the only agent on the VM. The agent can
-  reach only `clarify`, `parked_action_execute`, `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*` and the remote servers'
+  reach only `clarify`, `parked_action_execute`, `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*`, `mcp__wh__acceptblue__*`, `mcp__wh__authnet__*` and the remote servers'
   `mcp__wh__supabase_crm_dev__*`, `mcp__wh__monday__*`, `mcp__wh__docusign_demo__*`, plus the three Tool Search bridge tools
   (`tool_search`, `tool_describe`, `tool_call`) while Tool Search is on. **This is not a full security boundary
   today.** How strong it is, what an agent could still do and where Clean Setup Phase 1 and Phase 2 stand:
@@ -321,7 +321,7 @@ then run `sqlite3 <ledger> 'VACUUM;'` as `hermes`.
 
 `durable-park ALERT: the form checker is not working - <reason>. Risky actions will be refused until it is fixed.`
 
-Form-checked calls (QuickBooks money moves, DocuSign writes, Maverick tools) are blocked (fail closed) until it is fixed; other
+Form-checked calls (QuickBooks money moves, DocuSign writes, Maverick, accept.blue and Authorize.net tools) are blocked (fail closed) until it is fixed; other
 tool calls are still asked about as usual. Read `formcheck_status.json` and the reason:
 
 | Reason | Likely cause | Fix |
@@ -1431,18 +1431,18 @@ that has to agree:
    gateway servers the agent needs (spec section 7, Q5) ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
    sends its `park:docusign` request to a person, and add it to pipeline **block 2** (`block-06ebcdd6`), so the bridge decides its
    replays (it asks withHuman for the matching park, by the Hermes name `mcp__wh__<slug>__<tool>`) ([block 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
-2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*`, `maverick__*`, `supabase-crm-dev__*`,
-   `monday__*` and `docusign-demo__*` tools in (`TOOL_INCLUDE`),
+2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*`, `maverick__*`, `acceptblue__*`, `authnet__*`,
+   `supabase-crm-dev__*`, `monday__*` and `docusign-demo__*` tools in (`TOOL_INCLUDE`),
    and fails if any other `mcp__wh__` tool registers (`ALLOWED_PREFIX_RE`). Allow the new server in both.
 3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*`,
-   `mcp__wh__supabase_crm_dev__*`, `mcp__wh__monday__*` and `mcp__wh__docusign_demo__*`
+   `mcp__wh__acceptblue__*`, `mcp__wh__authnet__*`, `mcp__wh__supabase_crm_dev__*`, `mcp__wh__monday__*` and `mcp__wh__docusign_demo__*`
    (`ALLOWED_TOOL_PREFIXES`; plus `clarify`,
    `parked_action_execute` and, once Tool Search is on, the three bridge tools `tool_search`, `tool_describe`, `tool_call`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
    list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
 4. **Form-checked list**: the plugin form-checks tools matching the form-checked patterns (setting
    `plugins.entries.durable-park.settings.form_checked_tools`, see [Plugin settings](#plugin-settings); default
-   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools and every Maverick
-   tool are already in the default (Maverick last: index 0 stays the QuickBooks pattern the pipeline test pins). Leaving a tool off this list does **not** let it through: it is still asked about.
+   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools and every Maverick,
+   accept.blue and Authorize.net tool are already in the default (those three last: index 0 stays the QuickBooks pattern the pipeline test pins). Leaving a tool off this list does **not** let it through: it is still asked about.
 5. **Docs**: the pipeline table and system map in [architecture.md](architecture.md), this runbook, the setup guide.
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
 
@@ -1575,7 +1575,7 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
 2. As admin, add the toolset's name on its own line (for example `web`), save.
    `terminal`, `file`, `code_execution`, `delegation`, `cronjob` and `computer_use` are refused until
    Clean Setup Phase 2; a typo is refused too (exit 2, message on stderr, nothing changed).
-   `skills` may be opened (the agent reads the Maverick how-to notes with `skills_list` and `skill_view`), but only
+   `skills` may be opened (the agent reads the Maverick, accept.blue and Authorize.net how-to notes with `skills_list` and `skill_view`), but only
    while the entry pipeline denies `skill_manage`, which writes skill files: `check` reads
    `deploy/withhuman/entry-pipeline.json` and fails (`skills: LEAK ...`) if any block before the deny
    (`pa-hermes-local-deny`) could approve or ask about a `skill_manage` call. Keep `skill_manage` in that block.
@@ -1707,7 +1707,7 @@ it is not known whether Maverick made the change (the server cannot know the add
 approved Maverick change replayed under the placeholders ends as an `unknown` ledger row that a person clears
 (see [architecture](architecture.md)); that is expected, not a bug, and with this address nothing left the VM. When the real values arrive, run the script again (it asks before
 overwriting) and recreate the tunnel (no ledger row `parked`, `approved` or `executing`, then
-from `deploy/tunnel`: `sudo docker compose up -d wh-tunnel`).
+from `deploy/tunnel`: `sudo docker compose up -d --no-build wh-tunnel`).
 
 Never `cat` the file or run `docker compose config`, `docker inspect` or `docker exec ... env`: they print it.
 
@@ -1718,13 +1718,103 @@ Never `cat` the file or run `docker compose config`, `docker inspect` or `docker
    deploy/tunnel/build.sh` builds the image.
 3. The placeholder settings above (`maverick.env`).
 4. No ledger row `parked`, `approved` or `executing` ([health check](#health-check)); then from `deploy/tunnel`:
-   `sudo docker compose run --rm check` (lists 42 `maverick_` tools) and `sudo docker compose up -d wh-tunnel`.
+   `sudo docker compose run --rm check` (lists 42 `maverick_` tools) and `sudo docker compose up -d --no-build wh-tunnel`.
 5. In withHuman: register gateway server `maverick` through tunnel `proto-agents`, tunnel entry `maverick`, one scope
    `default` (auth none); grant it to agent `proto-agents`. The approval rules are entry revision 15.
 6. Open `skills` in `/etc/durable-park/allowed_toolsets` ([Open a toolset](#open-a-toolset)).
 7. `sudo bash deploy/hermes_mcp.sh`: it restarts the gateway, checks the tool scope and policy, and only then
    checks that `mcp__wh__maverick__maverick_read` registered (so step 5 must come first).
 8. Test in Teams: a lookup runs without asking; a refund asks a person (deny it).
+
+## accept.blue and Authorize.net
+
+In plain English: these are two more TapDash payment servers, one for accept.blue and one for Authorize.net. Like
+Maverick, each runs inside the tunnel container, so the agent reaches them only through withHuman. **The reviewed code
+and rules are in the repo; nothing here is built, registered or switched on yet.** What each step needs and why:
+[gateway setup](gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet).
+
+What the agent may do without a person is only what each server itself marks `auto`, and none of it moves money or
+stores a card:
+
+| Server | `auto` (no person; the same list in the park and gateway rules) | Everything else |
+| --- | --- | --- |
+| accept.blue (28 tools, names start `ablue_`) | `describe_lookup`, `read`, `search_lookups`, `create_customer`, `create_customer_from_transaction`, `update_customer`, `create_invoice` (a draft only: nothing is sent or charged) | 21 tools, **a person approves each**: charges, refunds, voids, captures, saved payment methods, sending, changing or cancelling invoices, recurring schedules, webhooks, deletes |
+| Authorize.net (24 tools, names start `authnet_`) | `describe_lookup`, `read`, `search_lookups`, `save_customer_profile`, `save_shipping_address` | 19 tools, **a person approves each**: charges, refunds, voids, captures, subscriptions, payment forms, deleting records, webhooks, test mode |
+
+### Settings (placeholders until access)
+
+The tunnel will not start without `/etc/durable-park/acceptblue.env` and `/etc/durable-park/authnet.env`. Yaakov runs, in a
+terminal on the VM (not screen-shared), one script for each:
+
+```sh
+sudo bash /home/hermes/tapdash-agents/durable-park/deploy/tunnel/enter-acceptblue-secrets.sh
+sudo bash /home/hermes/tapdash-agents/durable-park/deploy/tunnel/enter-authnet-secrets.sh
+```
+
+(before the live clone has these scripts, run them from the reviewed worktree, see the switch-on order) and types the placeholders: for accept.blue `pending` for the source key, `pending` for the PIN and
+`https://api.sandbox.accept.blue/api/v2` for the address (it must be an accept.blue address: the server refuses any
+other, so a made-up `.invalid` address does not work here); for Authorize.net `pending` for the login id and `pending` for the
+transaction key. The scripts print `saved 3 values` and `saved 2 values`. With these, the sandbox simply refuses every
+call, a person is still asked first, and nothing leaves the VM except those refused calls to the two sandboxes. When the real
+sandbox values arrive, run the script again (it asks before overwriting) and recreate the tunnel (no ledger row `parked`,
+`approved` or `executing`, then from `deploy/tunnel`: `sudo docker compose up -d --no-build wh-tunnel`). Authorize.net stays on its
+sandbox: `AUTHNET_ENV=sandbox` is fixed in `tunnel.yaml`, and going live is a separate reviewed change.
+
+Never `cat` these files or run `docker compose config`, `docker inspect` or `docker exec ... env`: they print the values.
+
+### accept.blue and Authorize.net switch-on (in this order)
+
+**Why the order matters.** The running tunnel container reads `tunnel.yaml` from the live clone. The moment the live
+clone is fast-forwarded to the reviewed change, `tunnel.yaml` asks for two servers (`acceptblue-mcp-server`,
+`authnet-mcp-server`) that the old image does not have. If the old container restarted in that gap, it could not start,
+and QuickBooks and Maverick would be offline until the new image runs. So do everything that does not touch the live clone
+first (steps 1 and 2), then do steps 3 to 6 back to back, without stopping in between.
+
+1. **Before the live clone changes.** For each server, a read-only deploy key and root's checkout at the pinned commit
+   ([gateway setup](gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)). Read the pinned commits from the
+   reviewed branch (`git -C /home/hermes/tapdash-agents-wt/ab-an show origin/feat/acceptblue-authnet-tunnel:durable-park/deploy/tunnel/acceptblue-mcp.sha`,
+   and `authorizenet-mcp.sha`), not from the live clone, which does not have them yet.
+2. **Settings, still before the live clone changes.** Yaakov runs the two scripts from the reviewed worktree
+   (`sudo bash /home/hermes/tapdash-agents-wt/ab-an/durable-park/deploy/tunnel/enter-acceptblue-secrets.sh`, then the same
+   with `enter-authnet-secrets.sh`; the live clone does not have them yet; they only write `/etc/durable-park/acceptblue.env` and `authnet.env`, which the running tunnel
+   does not read until it is recreated). Placeholders: see Settings above.
+3. **Back to back from here** (no ledger row `parked`, `approved` or `executing`, [health check](#health-check)).
+   Merge the reviewed change and fast-forward the live clone ([Deploy a change](#deploy-a-change)). Do not restart the
+   gateway now: `hermes_mcp.sh` (step 8) does that.
+4. From `deploy/tunnel`: `sudo bash build.sh` builds the image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36` (it refuses a checkout that is not root's,
+   another commit or not clean). **Then it proves the approvals**: it runs `--list-approvals` for the Maverick, accept.blue and
+   Authorize.net launchers in the new image and compares each with the committed `*-approvals.json` file (28 and 24 tools,
+   7 + 21 and 5 + 19 for the two new ones). Any difference stops it with an error and a diff: do not run that image
+   ([gateway setup](gateway-setup.md#the-acceptblue-and-authorizenet-servers-in-the-image)).
+5. `sudo docker compose run --rm check` (it should list `acceptblue: ok, 28 tools` and `authnet: ok, 24 tools` next to the
+   others).
+6. `sudo docker compose up -d --no-build wh-tunnel` (`--no-build`: compose must never build a missing image on its own, that
+   would skip the checks in `build.sh`). Watch the tunnel come back **online**. If a step from 4 to 6 fails, fix it and go on, or
+   roll back (below); do not leave the live clone ahead of the image.
+7. In withHuman: register gateway servers `acceptblue` and `authnet` through the tunnel (tunnel server names `acceptblue`
+   and `authnet`) and grant both to agent `proto-agents` ([HUMAN STEP B2](gateway-setup.md#human-step-b2-register-the-acceptblue-and-authorizenet-servers)).
+   Then save `deploy/withhuman/entry-pipeline.json` as a new entry revision (the file has 31 blocks, the live revision 15
+   has 25; this is revision 16) and activate it. Check with `preview_pipeline`: a `park:acceptblue` call to
+   `mcp__wh__acceptblue__ablue_read` and a `park:authnet` call to `mcp__wh__authnet__authnet_read` approve, and a
+   `park:acceptblue` call to `mcp__wh__acceptblue__ablue_refund_transaction` and a `park:authnet` call to
+   `mcp__wh__authnet__authnet_refund_transaction` ask a person. Do this **before** step 8, so the agent never sees the
+   servers without their rules.
+8. `sudo bash deploy/hermes_mcp.sh`: it checks the three skills folders, restarts the gateway, checks the tool scope and policy,
+   and only then checks that `mcp__wh__acceptblue__ablue_read` and `mcp__wh__authnet__authnet_read` registered. If one is not
+   registered (step 7 not done), the script exits 1 with a message and the gateway **stays up**, without the two servers: the
+   scope and policy checks have already passed by then, so that is safe. Do step 7 and run the script again.
+9. Test in Teams: a lookup runs without asking; a refund asks a person (deny it).
+
+Not wired on purpose: Authorize.net's webhook receiver (no `AUTHNET_WEBHOOK_LISTEN`, no signature key, no open port).
+
+### Roll back the two servers
+
+- **The pipeline rules misbehave**: `activate_pipeline_revision` to revision 15. The two servers then ask a person for every call
+  (the money-server rule names both), which is safe and noisy.
+- **The tunnel image misbehaves**: from `deploy/tunnel`, check out the previous `docker-compose.yml`, `tunnel.yaml` and `Dockerfile`
+  (so the tag is `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` again), no ledger row `parked`, `approved` or `executing`,
+  then `sudo docker compose up -d --no-build wh-tunnel`. That image is still on the VM. Then run `deploy/hermes_mcp.sh` from the matching
+  checkout, or the agent keeps a list that names tools that are gone.
 
 ## Rotate secrets before production
 
@@ -1737,6 +1827,8 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - [ ] Issue a new withHuman tunnel token
 - [ ] Replace the Maverick placeholders (or any Maverick token that was ever shared) with real values:
       [Maverick settings](#maverick-settings-placeholders-until-sandbox-access)
+- [ ] Replace the accept.blue and Authorize.net placeholders (or any key of theirs that was ever shared) with real values:
+      [accept.blue and Authorize.net settings](#settings-placeholders-until-access)
 - [ ] Rotate the `durable-park-bridge` webhook endpoint secret and re-store `bridge_secret` (`root:root 0600`), then
       `sudo systemctl restart durable-park-bridge` ([how](#store-or-rotate-the-bridges-keys))
 - [ ] Regenerate `wake_secret`
