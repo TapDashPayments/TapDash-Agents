@@ -32,6 +32,48 @@ safety items needs finishing: [what is left](durable-park/docs/backlog.md#before
 | **Admin** | Runs the system: health checks, deploys, alerts, secrets, root steps on the VM, withHuman settings | Root on the VM (`tailscale ssh`), admin in withHuman, write access to this repo |
 | **Developer** (person or AI agent) | Changes code and its docs | This repo; AI agents also follow [`AGENTS.md`](AGENTS.md) |
 
+
+## Project map
+
+**In plain English:** the agent never touches money or outside systems by itself. Every risky tool call is
+saved, a person says yes or no in the withHuman app, and only then does the saved call run, once. This is the
+short map; the full one (every part, port and file) is in [architecture section 1](durable-park/docs/architecture.md#1-system-map).
+
+```mermaid
+flowchart TD
+  U(["User in Teams or Telegram"]) -->|"asks for something"| A["Hermes agent<br/>(on the test VM)"]
+  A -->|"every tool call"| P["durable-park plugin<br/>(park hook)"]
+  P -->|"saves the exact call"| L[("Ledger<br/>(each call runs once)")]
+  P -->|"asks: may this run?"| W["withHuman<br/>(approval rules)"]
+  W -->|"risky: asks a person"| AP(["Approver in the withHuman app"])
+  AP -->|"yes or no"| W
+  W -->|"decision, signed"| R["Receiver<br/>(wakes the plugin)"]
+  R -->|"wake"| P
+  P -->|"approved: run the saved call"| G["withHuman MCP gateway"]
+  G -->|"checks the call matches<br/>an approved one"| B["Bridge"]
+  B -->|"approve or ask a person"| G
+  G -->|"through the tunnel"| T["Tunnel container<br/>(QuickBooks and Maverick servers)"]
+  T -->|"QuickBooks API"| Q[("QuickBooks Online<br/>sandbox")]
+  T -->|"Maverick API<br/>(placeholder until sandbox)"| M[("Maverick Payments")]
+  G -->|"with withHuman's sign-in"| S[("Supabase CRM dev, monday,<br/>DocuSign demo")]
+  A -->|"copies of every turn"| F[("Langfuse<br/>traces, 30 days")]
+```
+
+| Part | What it does | Where it lives |
+|---|---|---|
+| **Hermes agent** | The chat bot. It reads messages and calls tools. | Installed on the test VM (v0.22.3) |
+| **durable-park plugin** | Catches every tool call, saves it, asks withHuman, and runs an approved call once. | [`durable-park/plugin/`](durable-park/plugin/) |
+| **Ledger** | Remembers every saved call so nothing runs twice or gets lost. | A file on the VM |
+| **withHuman** | Holds the approval rules and asks a person when a rule says so. | Hosted ([app.withhuman.ai](https://app.withhuman.ai)); rules in [`entry-pipeline.json`](durable-park/deploy/withhuman/entry-pipeline.json) |
+| **Approver** | The only one who can say yes to a risky action. | A person in the withHuman app |
+| **Receiver** | Gets withHuman's signed decision and wakes the plugin. | [`durable-park/receiver/`](durable-park/receiver/) |
+| **withHuman MCP gateway** | Passes tool calls on to the right server, after the rules say yes. | Hosted |
+| **Bridge** | When the gateway asks, says yes only for a call that matches an approved one. | [`durable-park/bridge/`](durable-park/bridge/) |
+| **Tunnel container** | Runs the QuickBooks and Maverick servers on the VM and connects them to the gateway. | [`durable-park/deploy/tunnel/`](durable-park/deploy/tunnel/) |
+| **QuickBooks, Maverick** | The payment and accounting systems (sandbox; Maverick has placeholder settings for now). | Intuit, Maverick |
+| **Supabase, monday, DocuSign** | Their own official servers on the internet; withHuman holds the sign-in. | Hosted by each company |
+| **Langfuse** | Keeps a copy of every chat and tool call for review (30 days). | Hosted ([us.cloud.langfuse.com](https://us.cloud.langfuse.com)) |
+
 **Admins start here:** [runbook](durable-park/docs/runbook.md) (health check, deploy, alerts, troubleshooting,
 secrets, rollback) and [architecture](durable-park/docs/architecture.md) (what runs where).
 
@@ -56,7 +98,7 @@ running on the test VM.
 | AAP - Agent Approval Protocol | The open protocol and Python SDK (`agentapprovalprotocol`) we use to open approval requests, use an approval once, and verify signed webhooks | SDK 0.3.3 | Apache-2.0 | [github](https://github.com/agentapprovalprotocol/agentapprovalprotocol) · [site](https://agentapprovalprotocol.io) |
 | withHuman tunnel | Container that connects the QuickBooks and Maverick servers on the VM to the withHuman gateway | `quay.io/withhuman/tunnel:0.0.369` | withHuman's | [withHuman](https://withhuman.ai) |
 | QuickBooks Online MCP server (Intuit) | The QuickBooks tools (create bill, payment, ...). Built into the tunnel image | commit `31a1dd5` | Apache-2.0 | [github](https://github.com/intuit/quickbooks-online-mcp-server) |
-| Maverick MCP server (TapDash, `maverick-mcp`) | The 42 Maverick Payments tools (lookups, boarding, vault, ACH, disputes, tickets, refunds). Built into the tunnel image from root's read-only checkout `/opt/maverick-mcp-src`, pinned in [`maverick-mcp.sha`](durable-park/deploy/tunnel/maverick-mcp.sha); its Python packages come only from its hashed lock file. Live since 2026-10-25 with **placeholder settings** until Maverick gives sandbox access ([gateway setup](durable-park/docs/gateway-setup.md#maverick-server-source)) | commit `e4a2b10036a260808c2c18c6a75fdbeaed16b8b2` (`e4a2b10`) | private (TapDash) | [github](https://github.com/TapDashPayments/maverick-mcp) (private) |
+| Maverick MCP server (TapDash, `maverick-mcp`) | The 42 Maverick Payments tools (lookups, boarding, vault, ACH, disputes, tickets, refunds). Built into the tunnel image from root's read-only checkout `/opt/maverick-mcp-src`, pinned in [`maverick-mcp.sha`](durable-park/deploy/tunnel/maverick-mcp.sha); its Python packages come only from its hashed lock file. Live since 2026-10-25 with **placeholder settings** until Maverick gives sandbox access ([gateway setup](durable-park/docs/gateway-setup.md#maverick-server-source)) | commit `d6f43f922a9cf3416c6fdb536a07fd67caec17ac` (`d6f43f9`) | private (TapDash) | [github](https://github.com/TapDashPayments/maverick-mcp) (private) |
 | MCP - Model Context Protocol | The standard the agent uses to call tools through the gateway | - | open standard | [site](https://modelcontextprotocol.io) |
 | Starlette + uvicorn | Web framework and server for the bridge and the receiver | 1.9.0 / 0.54.0 | BSD-3-Clause | [starlette](https://github.com/encode/starlette) · [uvicorn](https://github.com/encode/uvicorn) |
 | httpx | HTTP client used by one-time provisioning | 0.28.1 | BSD-3-Clause | [github](https://github.com/encode/httpx) |

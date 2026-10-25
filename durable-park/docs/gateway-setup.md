@@ -18,7 +18,7 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel digest | `sha256:dad0c8b52d653b4969161a8ec589cf37048da6eec5747e098969e6a281f0c3e0` (this is also what `:latest` pointed to when pinned; published 2026-10-16) |
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
-| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10` (2026-10-25: QuickBooks + Maverick at e4a2b10; built with `build.sh`). **Running** in `wh-tunnel` since 2026-10-25 02:38 UTC; rollback image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (QuickBooks only: also remove the `maverick` entry from `tunnel.yaml`) |
+| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` (2026-10-25: QuickBooks + Maverick at d6f43f9; built with `build.sh`). **Running** in `wh-tunnel` since 2026-10-25. Rollback images: `...-mav-e4a2b10` (the previous Maverick pin; also set it back in `maverick-mcp.sha`, `docker-compose.yml` and `/opt/maverick-mcp-src`) and `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (QuickBooks only: also remove the `maverick` entry from `tunnel.yaml`) |
 | Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
@@ -36,7 +36,7 @@ the agent's user (`hermes`) can read it (the agent reads the Maverick skills fro
 | Thing | Value |
 | --- | --- |
 | Repo | `TapDashPayments/maverick-mcp` (private) |
-| Pinned commit | the one line in [`deploy/tunnel/maverick-mcp.sha`](../deploy/tunnel/maverick-mcp.sha) (`e4a2b10036a260808c2c18c6a75fdbeaed16b8b2`, `main` after PR #3: notify_staff must be a real true or false) |
+| Pinned commit | the one line in [`deploy/tunnel/maverick-mcp.sha`](../deploy/tunnel/maverick-mcp.sha) (`d6f43f922a9cf3416c6fdb536a07fd67caec17ac`, `main` after PR #4: a failed connection is named, not called a slow answer) |
 | Checkout on the VM | `/opt/maverick-mcp-src` (owner `root`, mode 0755, files 0644, detached at the pinned commit) |
 | Access | deploy key `proto-agents-root-read` (**read-only**), private key `/root/.ssh/maverick_mcp_deploy` |
 | Skills the agent reads | `/opt/maverick-mcp-src/skills` (`skills.external_dirs`, set by `hermes_mcp.sh`) |
@@ -156,10 +156,12 @@ The `maverick` stage of the `Dockerfile` (verified 2026-10-24, image `durable-pa
 Check a built image (no secrets needed, does not touch the running tunnel):
 
 ```bash
-sudo docker run --rm --entrypoint maverick-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10 --list-approvals
+sudo docker run --rm --entrypoint maverick-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9 --list-approvals
 ```
 
-Verified 2026-10-24: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you` (a person approves).
+Verified 2026-10-24 on `...-mav-e4a2b10`: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you` (a person
+approves). Verified again 2026-10-25 on `...-mav-d6f43f9`: the same 42 tools and levels (the two outputs are
+byte-identical, same SHA-256), and `check` said `maverick: ok, 42 tools`.
 
 ## Environment variables
 

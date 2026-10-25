@@ -11,7 +11,7 @@ name: durable-park-tunnel
 services:
   wh-tunnel:
     container_name: wh-tunnel
-    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10
+    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9
     build:
       context: .
       # The Maverick server source: root's read-only checkout at the commit in maverick-mcp.sha.
@@ -35,7 +35,7 @@ services:
   # still are, because tunnel.yaml references them). No data volume: nothing is persisted.
   check:
     profiles: ["check"]
-    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10
+    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9
     command: ["check"]
     env_file:
       - ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
