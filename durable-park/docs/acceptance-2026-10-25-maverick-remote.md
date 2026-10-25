@@ -49,6 +49,10 @@ different server could have used (a reviewer's finding on pull request 54). Test
 
 - `maverick-mcp` said "did not answer in 30 s" for a call that could not connect at all. Its PR #4 (merged,
   `d6f43f9`) names a failed or broken connection separately from a timeout; the tunnel now runs image `-mav-d6f43f9`.
+  Checked 2026-10-25 on both images with the same placeholder settings (`/etc/durable-park/maverick.env`), one
+  lookup each (`GET /payment/1`) straight through the server's client in a throw-away container:
+  `-mav-e4a2b10` said "Maverick did not answer in 30 s. Nothing changed."; `-mav-d6f43f9` said "Could not
+  connect to Maverick (check its address and the network). Nothing changed." Both failed at once (0.0 s).
 
 ## Still open
 

@@ -159,7 +159,9 @@ Check a built image (no secrets needed, does not touch the running tunnel):
 sudo docker run --rm --entrypoint maverick-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9 --list-approvals
 ```
 
-Verified 2026-10-24: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you` (a person approves).
+Verified 2026-10-24 on `...-mav-e4a2b10`: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you` (a person
+approves). Verified again 2026-10-25 on `...-mav-d6f43f9`: the same 42 tools and levels (the two outputs are
+byte-identical, same SHA-256), and `check` said `maverick: ok, 42 tools`.
 
 ## Environment variables
 
