@@ -1,22 +1,33 @@
 # durable-park
 
 A [Hermes Agent](https://hermes-agent.nousresearch.com) plugin, plus two small services, that make an AI agent
-**ask a person before it does anything risky**. When the agent tries to move money in QuickBooks, the call is
-stopped and saved, an approver approves or denies it in [withHuman](https://withhuman.ai) - minutes or days
+**ask a person before it does anything risky**. When the agent tries to move money (or tell someone outside), the
+call is stopped and saved, an approver approves or denies it in [withHuman](https://withhuman.ai) - minutes or days
 later - and then the exact saved call runs once, in the same chat. It survives restarts and never retries on its own.
 
-Status: **v1 accepted on 2026-10-20**, QuickBooks **sandbox** only, on the test VM `proto-agents`
-([acceptance results](docs/acceptance-2026-10-20.md)). The agent reaches only `clarify`, `parked_action_execute` and
-`mcp__wh__quickbooks__*`, plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`) while
+Status: **v1 accepted on 2026-10-20** with QuickBooks, and it now reaches more systems, all still test setups, on the
+test VM `proto-agents` ([acceptance results](docs/acceptance-2026-10-20.md)). What the agent can reach today:
+
+- **Through the tunnel container on the VM:** the QuickBooks **sandbox** (fake books), and the Maverick, accept.blue and
+  Authorize.net servers. Maverick, accept.blue and Authorize.net run on **placeholder settings** until we get sandbox
+  access, so their calls fail or are refused on purpose
+  ([accept.blue and Authorize.net record](docs/acceptance-2026-10-25-acceptblue-authnet.md)).
+- **As remote servers on the internet:** Supabase CRM dev, monday and DocuSign demo. withHuman holds their sign-in
+  ([Maverick and remote servers record](docs/acceptance-2026-10-25-maverick-remote.md)).
+
+The agent's tools are locked down to `clarify`, `parked_action_execute` and the tools of those servers
+(`mcp__wh__<server>__*`), plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`) while
 Tool Search is on (the v1 tool lockdown, re-applied 2026-10-21 03:16 UTC; Tool Search is on since 2026-10-21 19:59 UTC,
 [record](docs/acceptance-2026-10-21-tool-search.md), [runbook](docs/runbook.md#turn-on-tool-search)). durable-park asks
 withHuman about every tool call except `parked_action_execute`, `clarify` and the read-only Tool Search catalog tools
-(`tool_search`, `tool_describe`), and withHuman's pipeline decides which ones need a person
-([spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
+(`tool_search`, `tool_describe`), and withHuman's pipeline (rules revision 16) decides which ones need a person
+([spec](../docs/specs/2026-10-21-all-tools-withhuman-design.md)). Lookups, and the calls a server itself marks `auto`
+(nothing is paid, nothing is sent to anyone outside), are approved without a person; money moves and anything that tells
+someone outside always wait for one.
 
 **How safe is it today?** Not a full security boundary yet. `hermes`, the agent's own Linux user, no longer has sudo
 (Clean Setup Phase 1, done 2026-10-22), but it still owns the ledger (Phase 2 is open), so file, terminal and code
-tools stay off and only QuickBooks sandbox books are connected. The one canonical statement, with what an agent could
+tools stay off and only sandbox or demo systems (placeholder settings for three of them) are connected. The one canonical statement, with what an agent could
 still do, is [architecture section 0](docs/architecture.md#0-how-strong-is-it-today). What must be done before real
 books: the [backlog](docs/backlog.md#before-real-books). Before you re-run `configure_hermes.sh`, follow
 [Before you run the configure script](docs/runbook.md#before-you-run-the-configure-script).
@@ -32,18 +43,27 @@ flowchart LR
   gw -->|"is this the approved call?"| bridge["bridge"]
   bridge -->|"yes, once"| gw
   bridge -->|"asks: was it approved<br/>and not used yet?"| wh
-  gw --> qbo[("QuickBooks")]
+  gw -->|"over the tunnel"| tun["tunnel container<br/>on the VM"]
+  tun -->|"QuickBooks API"| qbo[("QuickBooks sandbox")]
+  tun -.->|"Maverick API<br/>(placeholder settings)"| mav[("Maverick")]
+  tun -.->|"accept.blue API<br/>(placeholder settings)"| ab[("accept.blue")]
+  tun -.->|"Authorize.net API<br/>(placeholder settings)"| an[("Authorize.net")]
+  gw -->|"with the sign-in withHuman holds"| remote[("Supabase CRM dev,<br/>monday, DocuSign demo")]
 ```
 
-1. The agent calls a risky tool: create, update or delete of one of 12 QuickBooks money types. Those are the calls
-   the pipeline sends to a person. (The form check also knows six DocuSign writes, but no DocuSign server is
-   connected today.)
+Lookups and the servers' own `auto` calls skip the saving and waiting: the rules approve them right away.
+
+1. The agent calls a risky tool: for example a create, update or delete of one of 12 QuickBooks money types, or any
+   Maverick, accept.blue or Authorize.net call that is not a lookup or on the server's `auto` list. Those are the calls
+   the pipeline sends to a person. (The form check also knows six DocuSign writes; DocuSign demo is connected as a
+   remote server, so they are asked before they run.)
 2. The plugin checks the call against the tool's rules, saves it in a ledger and opens an approval request.
    The agent is told it is waiting.
 3. An approver approves in withHuman. A signed webhook wakes the plugin, which tells the original chat.
 4. The agent runs `parked_action_execute`; the plugin uses the approval once and replays the saved call.
 5. The withHuman gateway asks the bridge whether this exact call was approved; the bridge checks in withHuman (not the ledger) and says yes once.
-6. QuickBooks gets the call. The ledger records the result.
+6. The system gets the call: through the tunnel for QuickBooks, Maverick, accept.blue and Authorize.net, or straight to
+   the remote server for Supabase CRM dev, monday and DocuSign demo. The ledger records the result.
 
 The full picture - every component, arrow, state and failure path: **[docs/architecture.md](docs/architecture.md)**.
 

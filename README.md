@@ -35,9 +35,10 @@ safety items needs finishing: [what is left](durable-park/docs/backlog.md#before
 
 ## Project map
 
-**In plain English:** the agent never touches money or outside systems by itself. Every risky tool call is
-saved, a person says yes or no in the withHuman app, and only then does the saved call run, once. This is the
-short map; the full one (every part, port and file) is in [architecture section 1](durable-park/docs/architecture.md#1-system-map).
+**In plain English:** the agent can never move money, or tell anyone outside, without a person. Every risky tool
+call is saved, a person says yes or no in the withHuman app, and only then does the saved call run, once. Lookups,
+and the calls a server itself marks `auto` (no money moves, nothing is sent to anyone outside), run on their own. This
+is the short map; the full one (every part, port and file) is in [architecture section 1](durable-park/docs/architecture.md#1-system-map).
 
 ```mermaid
 flowchart TD
@@ -143,8 +144,11 @@ running on the test VM.
 
 The map below shows who does what. Plain version: people chat with the agent in Telegram or Teams. The agent's
 durable-park plugin stops every risky request and asks withHuman. An approver says yes or no in the withHuman app.
-After a yes, the saved request runs once, through withHuman's gateway and a small tunnel container, into the
-QuickBooks sandbox.
+After a yes, the saved request runs once, through withHuman's gateway. QuickBooks, Maverick, accept.blue and
+Authorize.net are reached through a small tunnel container on the VM (QuickBooks is a sandbox; the other three run on
+placeholder settings until we get sandbox access). Supabase CRM dev, monday and DocuSign demo are remote servers that
+the gateway reaches over the internet. Lookups and each server's own `auto` calls (no money, nothing sent outside) are
+approved by the rules without asking a person.
 
 ```mermaid
 flowchart LR
@@ -165,12 +169,16 @@ flowchart LR
     bridge["Bridge<br/>(user dpbridge)"]
     sweep["Sweep<br/>every 5 minutes"]
     relay["Deck relay<br/>(user hermes, Tailscale only)"]
-    tun["wh-tunnel container<br/>(QuickBooks tool server)"]
+    tun["wh-tunnel container<br/>(QuickBooks, Maverick, accept.blue<br/>and Authorize.net tool servers)"]
   end
 
   deckapp(["Deck app<br/>on your computer"])
   wh["withHuman<br/>approvals + gateway"]
   qbo[("QuickBooks sandbox")]
+  mav[("Maverick<br/>(placeholder settings)")]
+  ab[("accept.blue<br/>(placeholder settings)")]
+  an[("Authorize.net<br/>(placeholder settings)")]
+  remote[("Supabase CRM dev, monday,<br/>DocuSign demo<br/>(remote servers)")]
   lf[("Langfuse cloud")]
 
   person -->|"messages"| tg
@@ -187,6 +195,10 @@ flowchart LR
   bridge -->|"checks withHuman, read-only"| wh
   wh -->|"approved call, over the tunnel"| tun
   tun -->|"QuickBooks API"| qbo
+  tun -.->|"Maverick API"| mav
+  tun -.->|"accept.blue API"| ab
+  tun -.->|"Authorize.net API"| an
+  wh -->|"approved call, with the sign-in withHuman holds"| remote
   agent -->|"every turn and tool call"| lfp
   lfp -->|"traces out, one way"| lf
   agent -->|"every tool call, watch only"| deckp
