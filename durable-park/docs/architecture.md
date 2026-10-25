@@ -595,8 +595,8 @@ flowchart TD
   check, and the executor's own dispatch never runs the hook. The wake is not a turn at all (the
   `pre_gateway_dispatch` hook drops the `webhook` event); the message it injects starts a normal turn in the
   parked chat, on that chat's own platform (`teams` or `telegram`), so that turn passes. A park can no longer
-  start from the CLI. If `HERMES_PLATFORM` is ever set in the gateway's own environment (to anything, `cli`
-  or `teams` alike), Hermes reads it before the session platform, so every chat can be refused: leave it unset.
+  start from the CLI. If `HERMES_PLATFORM` is ever set in the gateway's own environment to a non-chat value (`cli`,
+  `local`, `gateway`), Hermes reads it before the session platform, so every chat is refused: leave it unset.
 - **Lifting the note.** The withHuman gateway's tool schema is `{params: {...}, withhuman_context: string}`, and the
   gateway strips only the top-level `withhuman_context` before forwarding. When the model nests the note inside an
   argument object (`{"params": {..., "withhuman_context": "..."}}`), the QuickBooks server would get an unknown
