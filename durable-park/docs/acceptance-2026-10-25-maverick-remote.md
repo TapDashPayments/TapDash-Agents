@@ -35,6 +35,7 @@ Everything else asks Yaakov first. Money calls on any server always ask a person
 | 5b | 02:46 | (the agent, on its own) read and then tried to edit its Maverick skill | P-89326D56, P-68064834, P-CEC69529 | Reading (`skills_list`, `skill_view`) was allowed. Editing (`skill_manage`) was refused by withHuman, as designed |
 | 6 | 02:47 | Refund Maverick transaction 1, $1.00 | P-4296295C | **Parked; asked Yaakov.** He denied it in withHuman (04:14 UTC); the ledger row is `denied`. Nothing ran |
 | 7 | 02:54:37 (after revision 15 went live at 02:54:06) | Revision 15 check: Monday workspaces, Supabase tables, DocuSign user | P-D9A3A465, P-C22078C8, P-AA4FB8B7 | Ran without asking under revision 15 |
+| 8 | 15:23 | Maverick read and QuickBooks company info, right after the new image `-mav-d6f43f9` went live (15:22) | P-A2668396, P-2FD4C3A0, P-5DD40EEE, P-AB4861E5 | `maverick_read` answered "Could not connect to Maverick (check its address and the network). Nothing changed." (the right reason now, see Fixed afterwards); QuickBooks `get_company_info` returned "Sandbox Company US b8ce" |
 
 The Supabase project `tapdash-crm-dev` is a new, empty dev project (only Supabase's own `auth`, `storage`, `vault` and
 `realtime` tables). It is not the real CRM.
@@ -52,7 +53,7 @@ different server could have used (a reviewer's finding on pull request 54). Test
   Checked 2026-10-25 on both images with the same placeholder settings (`/etc/durable-park/maverick.env`), one
   lookup each (`GET /payment/1`) straight through the server's client in a throw-away container:
   `-mav-e4a2b10` said "Maverick did not answer in 30 s. Nothing changed."; `-mav-d6f43f9` said "Could not
-  connect to Maverick (check its address and the network). Nothing changed." Both failed at once (0.0 s).
+  connect to Maverick (check its address and the network). Nothing changed." Both failed at once (0.0 s). Test 8 shows the new message live.
 
 ## Still open
 

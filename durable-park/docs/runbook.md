@@ -1720,7 +1720,7 @@ Never `cat` the file or run `docker compose config`, `docker inspect` or `docker
 4. No ledger row `parked`, `approved` or `executing` ([health check](#health-check)); then from `deploy/tunnel`:
    `sudo docker compose run --rm check` (lists 42 `maverick_` tools) and `sudo docker compose up -d --no-build wh-tunnel`.
 5. In withHuman: register gateway server `maverick` through tunnel `proto-agents`, tunnel entry `maverick`, one scope
-   `default` (auth none); grant it to agent `proto-agents`. The approval rules are entry revision 15.
+   `default` (auth none); grant it to agent `proto-agents`. The approval rules were entry revision 15 at the time (revision 16 since 2026-10-25 16:35 UTC).
 6. Open `skills` in `/etc/durable-park/allowed_toolsets` ([Open a toolset](#open-a-toolset)).
 7. `sudo bash deploy/hermes_mcp.sh`: it restarts the gateway, checks the tool scope and policy, and only then
    checks that `mcp__wh__maverick__maverick_read` registered (so step 5 must come first).
@@ -1729,8 +1729,8 @@ Never `cat` the file or run `docker compose config`, `docker inspect` or `docker
 ## accept.blue and Authorize.net
 
 In plain English: these are two more TapDash payment servers, one for accept.blue and one for Authorize.net. Like
-Maverick, each runs inside the tunnel container, so the agent reaches them only through withHuman. **The reviewed code
-and rules are in the repo; nothing here is built, registered or switched on yet.** What each step needs and why:
+Maverick, each runs inside the tunnel container, so the agent reaches them only through withHuman. **It was switched on
+on 2026-10-25, with placeholder settings (image live 16:31 UTC, servers registered 16:32, rules revision 16 live 16:35); the record is [acceptance-2026-10-25-acceptblue-authnet.md](acceptance-2026-10-25-acceptblue-authnet.md).** What each step needs and why:
 [gateway setup](gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet).
 
 What the agent may do without a person is only what each server itself marks `auto`, and none of it moves money or
@@ -1764,6 +1764,8 @@ Never `cat` these files or run `docker compose config`, `docker inspect` or `doc
 
 ### accept.blue and Authorize.net switch-on (in this order)
 
+Done in this order on 2026-10-25 ([the record](acceptance-2026-10-25-acceptblue-authnet.md)). Keep the steps for a rebuild or a new commit.
+
 **Why the order matters.** The running tunnel container reads `tunnel.yaml` from the live clone. The moment the live
 clone is fast-forwarded to the reviewed change, `tunnel.yaml` asks for two servers (`acceptblue-mcp-server`,
 `authnet-mcp-server`) that the old image does not have. If the old container restarted in that gap, it could not start,
@@ -1793,8 +1795,8 @@ first (steps 1 and 2), then do steps 3 to 6 back to back, without stopping in be
    roll back (below); do not leave the live clone ahead of the image.
 7. In withHuman: register gateway servers `acceptblue` and `authnet` through the tunnel (tunnel server names `acceptblue`
    and `authnet`) and grant both to agent `proto-agents` ([HUMAN STEP B2](gateway-setup.md#human-step-b2-register-the-acceptblue-and-authorizenet-servers)).
-   Then save `deploy/withhuman/entry-pipeline.json` as a new entry revision (the file has 31 blocks, the live revision 15
-   has 25; this is revision 16) and activate it. Check with `preview_pipeline`: a `park:acceptblue` call to
+   Then save `deploy/withhuman/entry-pipeline.json` as a new entry revision (the file has 31 blocks; revision 15 had 25,
+   and this became revision 16 on 2026-10-25) and activate it. Check with `preview_pipeline`: a `park:acceptblue` call to
    `mcp__wh__acceptblue__ablue_read` and a `park:authnet` call to `mcp__wh__authnet__authnet_read` approve, and a
    `park:acceptblue` call to `mcp__wh__acceptblue__ablue_refund_transaction` and a `park:authnet` call to
    `mcp__wh__authnet__authnet_refund_transaction` ask a person. Do this **before** step 8, so the agent never sees the
@@ -1809,7 +1811,7 @@ Not wired on purpose: Authorize.net's webhook receiver (no `AUTHNET_WEBHOOK_LIST
 
 ### Roll back the two servers
 
-- **The pipeline rules misbehave**: `activate_pipeline_revision` to revision 15. The two servers then ask a person for every call
+- **The pipeline rules misbehave**: `activate_pipeline_revision` to revision 15 (revision 16 has been live since 2026-10-25 16:35 UTC). The two servers then ask a person for every call
   (the money-server rule names both), which is safe and noisy.
 - **The tunnel image misbehaves**: from `deploy/tunnel`, check out the previous `docker-compose.yml`, `tunnel.yaml` and `Dockerfile`
   (so the tag is `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` again), no ledger row `parked`, `approved` or `executing`,
