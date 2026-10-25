@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+import types
 from types import SimpleNamespace
 
 import httpx
@@ -24,6 +25,7 @@ from agentapprovalprotocol import Gate
 from durable_park.breaker import Breaker
 from durable_park.formcheck import FormChecker
 from durable_park.park_hook import DEFAULT_FORM_CHECKED_TOOLS, make_pre_tool_call
+from durable_park.park_hook import default_is_chat as REAL_DEFAULT_IS_CHAT
 
 REAL_POLICY_PROBLEM = policy_problem
 REAL_IS_GATEWAY = durable_park.is_gateway_process if hasattr(durable_park, "is_gateway_process") else None
@@ -2423,3 +2425,132 @@ def test_acceptblue_and_authnet_tools_are_form_checked():
     assert DEFAULT_FORM_CHECKED_TOOLS[0].startswith(r"mcp__wh__quickbooks__")
     assert DEFAULT_FORM_CHECKED_TOOLS[-2:] == (r"mcp__wh__acceptblue__ablue_[a-z0-9_]+",
                                                r"mcp__wh__authnet__authnet_[a-z0-9_]+")
+
+
+# --- chat only: a one-shot CLI, TUI or desktop turn has a session key but no chat to wake -------------------------
+# Hermes's own rule (gateway/session_context.py ``session_is_messaging_surface``): a turn counts as a chat only when
+# HERMES_PLATFORM, HERMES_SESSION_PLATFORM or HERMES_SESSION_SOURCE names a surface outside this list.
+HERMES_NON_MESSAGING = frozenset({"", "api_server", "cli", "codex", "desktop", "gateway", "kanban", "local",
+                                  "msgraph_webhook", "tool", "tui", "webhook"})
+
+
+def fake_hermes_turn(monkeypatch, *, platform="", source="", key=SESSION_KEY):
+    """Stand in for Hermes's ``gateway.session_context`` for one turn (same rule as Hermes, see above)."""
+    module = types.ModuleType("gateway.session_context")
+
+    def session_is_messaging_surface():
+        idents = (str(v or "").strip().lower() for v in (platform, source))
+        return any(ident and ident not in HERMES_NON_MESSAGING for ident in idents)
+
+    module.session_is_messaging_surface = session_is_messaging_surface
+    module.get_session_env = lambda name, default="": {"HERMES_SESSION_KEY": key}.get(name, default)
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.session_context", module)
+
+
+def real_defaults_hook(env, monkeypatch):
+    """The hook with NO injected session or chat function: what runs inside Hermes. (The test suite replaces
+    ``default_is_chat`` for every other test, see tests/conftest.py; here the real one goes back.)"""
+    monkeypatch.setattr("durable_park.park_hook.default_is_chat", REAL_DEFAULT_IS_CHAT)
+    return make_pre_tool_call(env.ledger, lambda: make_gate(BASE_URL, TOKEN, client=env.provider.client(retry_budget=0.5)),
+                              RISKY)
+
+
+NOT_A_CHAT = [
+    {"source": "cli"}, {"source": "tui"}, {"source": "desktop"}, {"platform": "local"}, {"platform": "webhook"},
+    {"platform": "api_server"}, {},  # {}: nothing names a surface at all (the one-shot ``hermes chat -q`` case)
+]
+
+
+@pytest.mark.parametrize("where", NOT_A_CHAT)
+@pytest.mark.parametrize("tool", ["web_search", "mcp__wh__quickbooks__create_payment"])
+def test_a_turn_that_is_not_a_chat_is_refused_even_with_a_session_key(env, monkeypatch, where, tool):
+    fake_hermes_turn(monkeypatch, **where)  # there IS a session key: this is the CLI turn that used to pass
+    hook = real_defaults_hook(env, monkeypatch)
+    assert call(hook, tool) == {"action": "block", "message": NO_SESSION}
+    assert call(hook, "clarify", tool_call_id="c2") is None  # the exempt tools stay exempt
+    assert env.ledger.get_by_call("sess-1", "call-1") is None  # no ledger write
+    assert env.provider.requests == {}  # no withHuman call
+
+
+@pytest.mark.parametrize("platform", ["teams", "telegram"])
+def test_a_chat_turn_still_parks_a_money_call(env, monkeypatch, platform):
+    fake_hermes_turn(monkeypatch, platform=platform)
+    hook = real_defaults_hook(env, monkeypatch)
+    tool = "mcp__wh__quickbooks__create_payment"
+    result = call(hook, tool)
+    (row,) = env.ledger.list_by_status("parked")
+    assert result == {"action": "block", "message": park_message(row.park_id, tool)}
+    assert row.session_key == SESSION_KEY and len(env.provider.requests) == 1
+
+
+@pytest.mark.parametrize("platform", ["teams", "telegram"])
+def test_a_chat_turn_still_runs_an_instantly_allowed_call(env, monkeypatch, platform):
+    fake_hermes_turn(monkeypatch, platform=platform)
+    env.provider.auto = "approved"
+    assert call(real_defaults_hook(env, monkeypatch), "web_search", {"query": "x"}) is None
+    assert len(env.ledger.list_by_status("allowed")) == 1
+
+
+def test_an_injected_chat_check_decides_step_3(env):
+    refused = make_hook(env, is_chat_fn=lambda: False)
+    assert call(refused, "mcp__wh__quickbooks__create_payment") == {"action": "block", "message": NO_SESSION}
+    assert env.ledger.list_by_status("parked") == [] and env.provider.requests == {}
+    allowed = make_hook(env, is_chat_fn=lambda: True)
+    assert call(allowed, "mcp__wh__quickbooks__create_payment", tool_call_id="c2")["message"].startswith("PARKED P-")
+
+
+def test_an_empty_session_key_is_refused_even_in_a_chat(env):
+    hook = make_hook(env, session_key_fn=lambda: "", is_chat_fn=lambda: True)
+    assert call(hook, "web_search") == {"action": "block", "message": NO_SESSION}
+    assert env.provider.requests == {}
+
+
+def test_a_chat_check_that_raises_fails_closed(env):
+    def boom():
+        raise RuntimeError("cannot tell")
+    hook = make_hook(env, is_chat_fn=boom)
+    assert call(hook, "mcp__wh__quickbooks__create_payment") == {"action": "block", "message": COULD_NOT_OPEN}
+    assert env.ledger.get_by_call("sess-1", "call-1") is None and env.provider.requests == {}
+
+
+def test_default_is_chat_follows_hermes(monkeypatch):
+    fake_hermes_turn(monkeypatch, platform="teams")
+    assert REAL_DEFAULT_IS_CHAT() is True
+    fake_hermes_turn(monkeypatch, source="cli")
+    assert REAL_DEFAULT_IS_CHAT() is False
+
+
+def test_default_is_chat_fails_closed_when_hermes_cannot_be_asked(monkeypatch):
+    # Hermes missing, or too old to have the check: not a chat.
+    monkeypatch.setitem(sys.modules, "gateway.session_context", None)  # ``import`` raises ImportError
+    assert REAL_DEFAULT_IS_CHAT() is False
+    module = types.ModuleType("gateway.session_context")  # no ``session_is_messaging_surface`` in it
+    monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
+    monkeypatch.setitem(sys.modules, "gateway.session_context", module)
+    assert REAL_DEFAULT_IS_CHAT() is False
+
+    def boom():
+        raise RuntimeError("cannot tell")
+    module.session_is_messaging_surface = boom  # the check itself raises
+    assert REAL_DEFAULT_IS_CHAT() is False
+    module.session_is_messaging_surface = lambda: None  # not a real yes
+    assert REAL_DEFAULT_IS_CHAT() is False
+
+
+def test_the_real_hook_refuses_when_the_chat_check_is_missing(env, monkeypatch):
+    fake_hermes_turn(monkeypatch, platform="telegram")
+    del sys.modules["gateway.session_context"].session_is_messaging_surface  # an older Hermes
+    hook = real_defaults_hook(env, monkeypatch)
+    assert call(hook, "mcp__wh__quickbooks__create_payment") == {"action": "block", "message": NO_SESSION}
+    assert env.ledger.list_by_status("parked") == [] and env.provider.requests == {}
+
+
+@pytest.mark.parametrize("where", NOT_A_CHAT)
+def test_the_executor_tool_stays_exempt_off_chat(env, monkeypatch, where):
+    # parked_action_execute is judged at step 1, before the chat check: the executor path is untouched.
+    fake_hermes_turn(monkeypatch, **where)
+    hook = real_defaults_hook(env, monkeypatch)
+    assert call(hook, "parked_action_execute", {"park_id": "P-1"}) is None
+    assert call(hook, "tool_search", {"query": "x"}, tool_call_id="c2") is None
+    assert env.provider.requests == {} and env.ledger.get_by_call("sess-1", "call-1") is None

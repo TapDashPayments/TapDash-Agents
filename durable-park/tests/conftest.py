@@ -45,3 +45,11 @@ def _permissive_tool_rules(monkeypatch):
     """Unit tests run without Hermes's tool registry: the default rules lookup accepts any object.
     Tests of the form check pass their own rules explicitly."""
     monkeypatch.setattr("durable_park.formcheck.registry_schema", lambda tool: {"type": "object"})
+
+
+@pytest.fixture(autouse=True)
+def _turn_is_a_chat(monkeypatch):
+    """Unit tests run without Hermes, where the default chat check (Hermes's own ``session_is_messaging_surface``)
+    fails closed and every call would be refused. They pass their session key by hand, so the default answers
+    "this turn is a chat". The tests of the chat check itself pass ``is_chat_fn`` or put the real function back."""
+    monkeypatch.setattr("durable_park.park_hook.default_is_chat", lambda: True)

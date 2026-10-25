@@ -25,6 +25,8 @@ in each of those, and a WARNING from the sweep reached ``errors.log`` every few 
   wrapper itself otherwise; the bridge tools are ``tool_search`` / ``tool_describe`` / ``tool_call``
   (tools/tool_search_catalog.py ``BRIDGE_TOOL_NAMES``); ``tool_call`` reaches only the session's own catalog
   (model_tools.py:743) and ``handle_function_call`` re-resolves a wrapper with the hook off (model_tools.py:906-922);
+- ``gateway.session_context.session_is_messaging_surface`` (gateway/session_context.py), asked by the park hook
+  at step 3 to refuse a turn that is not a chat (CLI, TUI, desktop); missing or failing means "not a chat";
 - MCP tool-error wording the executor classifies as failed/unknown (tools/mcp_tool_handlers.py, executor R15),
   and the display failure heuristic (agent/display.py:999-1037).
 """
@@ -44,6 +46,7 @@ DEPENDS_ON = (
     "ctx._manager.iter_hook_callbacks('pre_tool_call') (hermes_cli/plugins_dispatch.py:523)",
     "ctx._manager._middleware['tool_request'/'tool_execution'] (hermes_cli/plugins.py:1183, :937-952)",
     "Tool Search bridge: pre_tool_call sees the real tool for a single-entry tool_call (agent/tool_executor.py:399-441)",
+    "gateway.session_context.session_is_messaging_surface (park hook step 3: refuse a turn that is not a chat)",
     "MCP tool-error wording (tools/mcp_tool_handlers.py; executor failed/unknown classification)",
 )
 

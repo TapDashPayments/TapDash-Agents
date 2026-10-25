@@ -41,9 +41,20 @@ def _hermes() -> str:
     return found
 
 
+def _hermes_env() -> dict[str, str]:
+    """The environment for the real ``hermes`` subprocess.
+
+    pytest sets ``PYTEST_CURRENT_TEST`` and the child inherits it. Hermes treats that as "this is a unit test"
+    and its auth store refuses to open the real ``~/.hermes/auth.json`` ("Refusing to touch real user auth
+    store during test run"). These live tests deliberately run the real agent as ``hermes``, so we drop that
+    one marker for the child only. Everything else (HERMES_HOME, PATH, secrets) is passed through unchanged.
+    """
+    return {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"}
+
+
 def _run(*args: str, timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run([_hermes(), *args], capture_output=True, text=True, timeout=timeout,
-                          stdin=subprocess.DEVNULL)
+                          stdin=subprocess.DEVNULL, env=_hermes_env())
 
 
 def _assert_no_token(*texts: str) -> None:

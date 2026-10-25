@@ -206,7 +206,7 @@ flowchart LR
 | Langfuse plugin (Nous Research's, patched by us) | Live since 2026-10-22: TapDash's patched copy `tapdash-langfuse`, in [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse) of this repo (changes listed in its `PATCHES.md`), installed as a symlink `~/.hermes/plugins/tapdash-langfuse` into the live clone. It replaced Nous Research's unpatched `langfuse` plugin, which is no longer enabled | Sends traces to Langfuse Cloud: one per turn, one generation per model call, one observation per tool call, full content ([runbook](runbook.md#tracing-langfuse)). The patched copy also sets the chat sender id as `userId`, names traces by platform and tags traces by configured patterns such as `park:P-...`. Its `pre_tool_call` hook only observes and is listed in `observer_hooks` (`hermes_plugins.tapdash_langfuse.on_pre_tool_call`; the function is byte-identical to upstream's). No durable-park code or approval behaviour changes. A one-way arrow out: Langfuse sends nothing back and cannot change a call. Tracing live since 2026-10-22 04:37 UTC (unpatched at first, patched copy since about 19:52 UTC). |
 | Hermes Deck plugin and relay (Hermes-Deck, third party) | Live since 2026-10-22: the plugin in `~/.hermes/plugins/hermes-deck`, the relay as the user service `hermes-deck-relay`. Shows the Deck app what the agent is doing; its one `pre_tool_call` hook is a reviewed observer ([runbook](runbook.md#hermes-deck-desktop-app)) |
 | plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook and middleware registries on every call for other plugins' `pre_tool_call` hooks and `tool_request` / `tool_execution` middleware (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
-| park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); lifts a `withhuman_context` note the model nested inside an argument object to the top level (gateway tools only, [section 4](#4-tool-call-form-check-then-one-question-to-withhuman)); checks the form (form-checked tools only), saves the call, and asks withHuman once, with the note as the approver's reason. An instant approval lets the tool run (row `allowed`; Hermes gets the lifted arguments when anything was lifted); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
+| park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a call that is not from a chat (no session key, or a turn from the CLI, TUI or desktop: Hermes's own check, [section 4](#4-tool-call-form-check-then-one-question-to-withhuman)); refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); lifts a `withhuman_context` note the model nested inside an argument object to the top level (gateway tools only, [section 4](#4-tool-call-form-check-then-one-question-to-withhuman)); checks the form (form-checked tools only), saves the call, and asks withHuman once, with the note as the approver's reason. An instant approval lets the tool run (row `allowed`; Hermes gets the lifted arguments when anything was lifted); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
 | ledger | `plugin/durable_park/ledger.py` | SQLite record of every tool call that was asked about and its state. The single source of truth. |
 | wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. |
@@ -538,8 +538,8 @@ flowchart TD
   exempt -->|"yes"| runs0["Tool runs<br/>(no row, nobody asked)"]
   exempt -->|"no"| foreign{"Another plugin hook that<br/>could change the arguments?"}
   foreign -->|"yes"| bforeign["Block: foreign hook<br/>(no row, nobody asked)"]
-  foreign -->|"no"| ids{"Chat session and<br/>tool call id?"}
-  ids -->|"no"| bids["Block: no chat session<br/>or no tool call id"]
+  foreign -->|"no"| ids{"A chat turn with a session key<br/>(not CLI, TUI or desktop),<br/>and a tool call id?"}
+  ids -->|"no"| bids["Block: no chat session<br/>or no tool call id<br/>(no row, nobody asked)"]
   ids -->|"yes"| lift["Lift a nested withhuman_context<br/>to the top level (gateway tools only;<br/>JSON text keys coerced first)<br/>from here on: the lifted args<br/>problems go to lift_status.json"]
   lift --> fc{"Form-checked tool,<br/>call id not seen before?"}
   fc -->|"yes"| rules{"Rules for this tool<br/>found and usable?"}
@@ -566,6 +566,23 @@ flowchart TD
   busy -->|"no"| parked["Attach request id<br/>Block: PARKED, a person decides"]
 ```
 
+- **Chat turns only.** Hermes gives a one-shot `hermes chat -q` turn a session key too (it looks like
+  `agent:main:local:dm:local-...`), so a key alone does not prove there is a chat. A call from the CLI could
+  have run a read, and a money call would have parked with no chat to tell when it was decided (that happened:
+  a QuickBooks read, ledger row `P-336DFFBB`). So step 3 now asks Hermes's own question as well,
+  `gateway.session_context.session_is_messaging_surface()` (`park_hook.default_is_chat`): is this turn on a
+  messaging surface? It is yes only when `HERMES_PLATFORM`, `HERMES_SESSION_PLATFORM` or `HERMES_SESSION_SOURCE`
+  names something outside Hermes's list of non-chat surfaces (`cli`, `tui`, `desktop`, `local`, `api_server`,
+  `webhook`, `gateway`, `kanban`, `tool`, `codex`, `msgraph_webhook`, or nothing at all). In plain words:
+  **refusing turns that are not a chat covers the CLI, the TUI and the desktop app, using Hermes's own check.**
+  A Teams or Telegram message passes: the gateway sets `HERMES_SESSION_PLATFORM` to `teams` or `telegram`.
+  It fails closed: if Hermes cannot be asked (the import fails, an older Hermes has no such check, the check
+  raises, or it answers anything but a plain yes) the turn is not a chat and the call is refused with the same
+  `no chat session` message, with no ledger row and no withHuman request. The exempt tools and the executor are
+  not affected: `parked_action_execute` is exempt at step 1, before this check, and the executor's own
+  dispatch never runs the hook. The wake is not a turn at all (the `pre_gateway_dispatch` hook drops the
+  `webhook` event); the message it injects starts a normal turn in the parked chat, on that chat's own platform
+  (`teams` or `telegram`), so that turn passes. A park can no longer start from the CLI.
 - **Lifting the note.** The withHuman gateway's tool schema is `{params: {...}, withhuman_context: string}`, and the
   gateway strips only the top-level `withhuman_context` before forwarding. When the model nests the note inside an
   argument object (`{"params": {..., "withhuman_context": "..."}}`), the QuickBooks server would get an unknown
@@ -678,7 +695,7 @@ and re-run against the real code on the VM (2026-10-21):
 | withHuman refuses at once (a pipeline deny rule) | Row `refused`; the call is blocked with "refused by withHuman policy" (and the rule's note, if any; the ledger note says "policy", never "a reviewer"). | Nobody |
 | withHuman cannot be reached | Row `refused`; the call is blocked with "withHuman could not be reached". After 3 errors in a row the breaker refuses at once for 30 s, then tries again; the sweep alerts once on open and once on close. | Check withHuman ([runbook](runbook.md#withhuman-could-not-be-reached)) |
 | Another `pre_tool_call` callback (a plugin's hook, a `config.yaml` shell hook or outbound webhook) or another plugin's `tool_request` / `tool_execution` middleware could change arguments after approval | Every tool call except the exempt ones is blocked. | An admin removes the hook or lists it in `observer_hooks` |
-| No chat session (e.g. a one-shot `hermes chat -q`) | Every tool call except the exempt ones is blocked. | Use a chat |
+| Not a chat turn: no session key, or a turn from the CLI, TUI or desktop (e.g. a one-shot `hermes chat -q`), or Hermes's chat check cannot be read | Every tool call except the exempt ones is blocked with `no chat session`, with no row and no request. Hermes's own `session_is_messaging_surface()` decides; if it cannot be asked, the turn counts as not a chat. | Use a chat (Teams or Telegram) |
 | No decision in 168 h | Row `expired`; the chat is told it can ask again. | Nobody |
 | Approval expired before running | Row `expired`; nothing ran. | Ask again if still wanted |
 | Gateway crashes after the approval was used | Row stays `executing`; after 10 min the sweep marks it `unknown` and alerts. Never retried. | Check QuickBooks ([runbook](runbook.md#outcome-unknown)) |

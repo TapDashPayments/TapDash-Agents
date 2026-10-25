@@ -555,3 +555,17 @@ def test_executor_sends_the_park_time_user_and_profile_whoever_is_in_the_chat_no
     assert out["status"] == "executed"
     assert sent[0].context == sent[-1].context and sent[-1].context["user_id"] == "u1"
     assert env.provider.only().consumed_at is not None
+
+
+def test_executor_never_asks_whether_the_turn_is_a_chat(env, monkeypatch):
+    """The park hook refuses non-chat turns (``default_is_chat``). The executor is a separate path: the approved,
+    saved call runs from the parked chat's own session key, and nothing here may depend on the chat check."""
+    row = env.approve()
+
+    def boom():
+        raise AssertionError("the executor must not call default_is_chat")
+    monkeypatch.setattr("durable_park.park_hook.default_is_chat", boom)
+    out = run(env.build(), row.park_id)
+    assert out["status"] == "executed"
+    assert env.dispatched == [(TOOL, ARGS)]
+    assert env.ledger.get(row.park_id).status == "executed"

@@ -67,6 +67,7 @@ PARK_MESSAGE = (
     "Do not retry it or try another way to do it. Tell the user it is waiting for approval; "
     "you will be told here when it is decided."
 )
+# Refused when there is no session key OR the turn is not a chat (a one-shot CLI, TUI or desktop turn has a key too).
 NO_SESSION_MESSAGE = "durable-park: no chat session; the tool call was refused"
 NO_CALL_ID_MESSAGE = "durable-park: no tool call id; the tool call was refused"
 REFUSED_MESSAGE = (
@@ -152,6 +153,21 @@ def default_session_key() -> str:
     return get_session_env("HERMES_SESSION_KEY", "") or ""
 
 
+def default_is_chat() -> bool:
+    """Is the running turn a human chat (Teams, Telegram, ...) that an approval can wake later?
+
+    This is Hermes's own check (``gateway.session_context.session_is_messaging_surface``): it is False for the
+    CLI, TUI, desktop, local, api_server and webhook surfaces. It fails closed: if Hermes cannot be asked (the
+    import fails, the check is missing in an older Hermes, or it raises) or it does not answer a plain ``True``,
+    the turn is NOT a chat.
+    """
+    try:
+        from gateway.session_context import session_is_messaging_surface
+        return session_is_messaging_surface() is True
+    except Exception:  # noqa: BLE001 - fail closed: not knowing means "not a chat"
+        return False
+
+
 def default_user_profile() -> tuple[str, str]:
     """The Hermes user id and profile of the running turn; empty outside a chat."""
     try:
@@ -189,6 +205,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                        exempt: Iterable[str] = DEFAULT_EXEMPT_TOOLS, breaker: Breaker | None = None,
                        foreign_hooks_fn: Callable[[], list[str]] | None = None,
                        session_key_fn: Callable[[], str] | None = None,
+                       is_chat_fn: Callable[[], bool] | None = None,
                        user_profile_fn: Callable[[], tuple[str, str]] | None = None,
                        form_checker: FormChecker | None = None,
                        schema_fn: Callable[[str], dict | None] | None = None,
@@ -208,7 +225,10 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
     run is reported to ``lift_status`` (a ``LiftStatus``, or one built for ``lift_status_path``:
     ``lift_status.json``; the sweep alerts on it) once the call has passed its form check (a refused call never
     reaches a server), and the call goes on: with the lifted arguments, or the original ones when the lift could not
-    run."""
+    run.
+    ``session_key_fn`` and ``is_chat_fn`` (default: ``default_session_key`` and ``default_is_chat``, looked up when
+    called) decide step 3: a call needs a session key AND a turn that is a chat (a one-shot CLI turn has a key but
+    no chat to wake, so it is refused)."""
     checker = form_checker if form_checker is not None else FormChecker()
     exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
 
@@ -314,9 +334,11 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 log.error("foreign pre_tool_call hook(s) present (%s); refusing tool=%s", names, tool)
                 return _block(FOREIGN_HOOK_MESSAGE.format(names=names))
 
-            # Step 3: a call must belong to a chat and carry an id.
+            # Step 3: a call must belong to a chat and carry an id. A session key alone is not enough: Hermes also
+            # gives a one-shot CLI, TUI or desktop turn a key, but nobody could be woken there, so only a turn on a
+            # messaging surface (Hermes's own check) passes. An error in the check lands in step 11 (refused).
             session_key = (session_key_fn or default_session_key)() or ""
-            if not session_key:
+            if not session_key or not (is_chat_fn or default_is_chat)():
                 return _block(NO_SESSION_MESSAGE)
             session_id = str(kw.get("session_id") or "")
             tool_call_id = str(kw.get("tool_call_id") or "")
