@@ -599,7 +599,7 @@ Not settled by the code: which of the two cases a given CLI row hits (the state 
 at that moment), and whether `PluginContext._gateway_injection_allowed` and the TUI injector (`plugins_injection.py:36-51`)
 change the result in the gateway process. Nobody has watched this live, so treat the table as a reading of the code.
 
-**The owner has not decided how to handle it.** Do not add a rule that refuses CLI calls: every surface goes
+**Left for now (owner, 2026-10-25): the CLI is only used for tests.** Do not add a rule that refuses CLI calls: every surface goes
 through withHuman (a closed PR tried that and was wrong). Until a fix is chosen, a one-shot CLI call that withHuman
 sends to a person will leave an `approved` row that blocks restarts.
 
