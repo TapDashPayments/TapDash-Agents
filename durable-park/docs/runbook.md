@@ -1431,10 +1431,11 @@ that has to agree:
    gateway servers the agent needs (spec section 7, Q5) ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
    sends its `park:docusign` request to a person, and add it to pipeline **block 2** (`block-06ebcdd6`), so the bridge decides its
    replays (it asks withHuman for the matching park, by the Hermes name `mcp__wh__<slug>__<tool>`) ([block 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
-2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` and `maverick__*` tools in (`TOOL_INCLUDE`),
+2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*`, `maverick__*`, `supabase-crm-dev__*`,
+   `monday__*` and `docusign-demo__*` tools in (`TOOL_INCLUDE`),
    and fails if any other `mcp__wh__` tool registers (`ALLOWED_PREFIX_RE`). Allow the new server in both.
-3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*` and the
-   three remote servers (`mcp__wh__supabase_crm_dev__*`, `mcp__wh__monday__*`, `mcp__wh__docusign_demo__*`)
+3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*`,
+   `mcp__wh__supabase_crm_dev__*`, `mcp__wh__monday__*` and `mcp__wh__docusign_demo__*`
    (`ALLOWED_TOOL_PREFIXES`; plus `clarify`,
    `parked_action_execute` and, once Tool Search is on, the three bridge tools `tool_search`, `tool_describe`, `tool_call`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
    list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
