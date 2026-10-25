@@ -1,27 +1,33 @@
 # WARNING: this stack's env files hold real secrets. NEVER run
 # `docker compose config`, `docker inspect wh-tunnel`, `docker exec wh-tunnel env`,
-# `cat /etc/durable-park/tunnel.env` or `cat /etc/durable-park/maverick.env`:
-# they print every secret in plain text.
+# `cat /etc/durable-park/tunnel.env` or `cat` any other /etc/durable-park/*.env file (maverick.env, acceptblue.env,
+# authnet.env): they print every secret in plain text.
 # Run from this directory (as root / via sudo):
-#   bash build.sh                           # checks the pinned Maverick checkout, then `docker compose build`
-#   docker compose up -d wh-tunnel          # needs /etc/durable-park/tunnel.env (5 values) + maverick.env (3)
+#   bash build.sh                           # checks the three pinned checkouts, then `docker compose build`
+#   docker compose up -d wh-tunnel          # needs /etc/durable-park/tunnel.env (5 values), maverick.env (3),
+#                                           # acceptblue.env (3) and authnet.env (2)
 #   docker compose run --rm check           # list tools; does not connect to withHuman
 name: durable-park-tunnel
 
 services:
   wh-tunnel:
     container_name: wh-tunnel
-    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9
+    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36
     build:
       context: .
-      # The Maverick server source: root's read-only checkout at the commit in maverick-mcp.sha.
-      # build.sh refuses to build when it is another commit or has local changes.
+      # The TapDash server sources: root's read-only checkouts at the commits in maverick-mcp.sha,
+      # acceptblue-mcp.sha and authorizenet-mcp.sha. build.sh refuses to build when one is another commit or has
+      # local changes.
       additional_contexts:
         maverick-src: ${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}
+        acceptblue-src: ${ACCEPTBLUE_MCP_SRC:-/opt/acceptblue-mcp-src}
+        authnet-src: ${AUTHORIZENET_MCP_SRC:-/opt/authorizenet-mcp-src}
     restart: unless-stopped
     env_file:
       - ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
       - ${MAVERICK_ENV_FILE:-/etc/durable-park/maverick.env}
+      - ${ACCEPTBLUE_ENV_FILE:-/etc/durable-park/acceptblue.env}
+      - ${AUTHNET_ENV_FILE:-/etc/durable-park/authnet.env}
     volumes:
       - ./tunnel.yaml:/etc/withhuman/tunnel.yaml:ro
       - qbo-data:/data
@@ -31,15 +37,17 @@ services:
 
   # `docker compose run --rm check` -> `withhuman-tunnel check`: starts every
   # configured server once and lists its tools. Never connects to withHuman, so
-  # WITHHUMAN_TUNNEL_TOKEN is not needed (the QUICKBOOKS_* and MAVERICK_* vars
+  # WITHHUMAN_TUNNEL_TOKEN is not needed (the QUICKBOOKS_*, MAVERICK_*, ACCEPTBLUE_* and AUTHNET_* vars
   # still are, because tunnel.yaml references them). No data volume: nothing is persisted.
   check:
     profiles: ["check"]
-    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9
+    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36
     command: ["check"]
     env_file:
       - ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
       - ${MAVERICK_ENV_FILE:-/etc/durable-park/maverick.env}
+      - ${ACCEPTBLUE_ENV_FILE:-/etc/durable-park/acceptblue.env}
+      - ${AUTHNET_ENV_FILE:-/etc/durable-park/authnet.env}
     volumes:
       - ./tunnel.yaml:/etc/withhuman/tunnel.yaml:ro
 

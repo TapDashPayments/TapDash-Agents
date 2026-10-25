@@ -19,6 +19,7 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
 | Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` (2026-10-25: QuickBooks + Maverick at d6f43f9; built with `build.sh`). **Running** in `wh-tunnel` since 2026-10-25. Rollback images: `...-mav-e4a2b10` (the previous Maverick pin; also set it back in `maverick-mcp.sha`, `docker-compose.yml` and `/opt/maverick-mcp-src`) and `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (QuickBooks only: also remove the `maverick` entry from `tunnel.yaml`) |
+| Next image (reviewed, **not built or running yet**) | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36`: the same plus the accept.blue server at `9bb8d72` and the Authorize.net server at `6084f36`. The tag lists the commit of every server inside. Until an admin builds it, the running tunnel is the `-mav-d6f43f9` image and the new servers are not reachable. **To go back** after it is live: the previous image above, with the previous `docker-compose.yml`, `tunnel.yaml` and the two new `.env` files left unused (see [rollback](runbook.md#acceptblue-and-authorizenet)) |
 | Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
@@ -85,6 +86,74 @@ How it was set up (2026-10-25), and how to redo it on a fresh VM (as `ubuntu`, w
    `__pycache__`), or when the image tag does not end in `-mav-<first 7>`. Then check `--list-approvals`, and update
    the approval rules if a tool was added or changed its approval level.
 
+## Payment server sources (accept.blue and Authorize.net)
+
+In plain English: the tunnel image also carries two more TapDash payment servers, one for accept.blue and one for
+Authorize.net. Like Maverick, each lives in a **private** GitHub repo, so the VM will keep a read-only copy of each,
+frozen at one reviewed commit. Both copies belong to **root**: the agent's user (`hermes`) can read them (the agent
+reads the how-to notes in their `skills` folders) but cannot change them, because `build.sh` runs as root and builds
+the payments servers from them. Everything said above about why root, and about what `build.sh` refuses, holds for
+all three checkouts.
+
+| Thing | accept.blue | Authorize.net |
+| --- | --- | --- |
+| Repo | `TapDashPayments/acceptblue-mcp` (private) | `TapDashPayments/authorizenet-mcp` (private) |
+| Pinned commit | the one line in [`deploy/tunnel/acceptblue-mcp.sha`](../deploy/tunnel/acceptblue-mcp.sha) (`9bb8d722a0d5fc9dce08437eedc8328d34005bcc`) | the one line in [`deploy/tunnel/authorizenet-mcp.sha`](../deploy/tunnel/authorizenet-mcp.sha) (`6084f3693b135d8e3d4c237cc147ad963826d654`) |
+| Checkout on the VM | `/opt/acceptblue-mcp-src` (owner `root`, mode 0755, files 0644, detached at the pinned commit) | `/opt/authorizenet-mcp-src` (same) |
+| Access (to create) | deploy key `proto-agents-root-read` on that repo (**read-only**), private key `/root/.ssh/acceptblue_mcp_deploy` | deploy key `proto-agents-root-read` on that repo (**read-only**), private key `/root/.ssh/authorizenet_mcp_deploy` |
+| Skills the agent reads | `/opt/acceptblue-mcp-src/skills` | `/opt/authorizenet-mcp-src/skills` |
+| Python package, tool prefix | `acceptblue_mcp`, `ablue_` | `authorizenet_mcp`, `authnet_` |
+| Gateway server slug (the name in withHuman) | `acceptblue` | `authnet` |
+| Tools at the pinned commit | 28: 7 `auto`, 21 `you` (a person approves) | 24: 5 `auto`, 19 `you` |
+| Agent's names | `mcp__wh__acceptblue__ablue_*` | `mcp__wh__authnet__authnet_*` |
+
+GitHub lets a deploy key belong to only one repo, so each repo gets its own key (do not reuse the Maverick key).
+
+```mermaid
+flowchart LR
+  shaA["acceptblue-mcp.sha<br/>(pinned commit)"] -->|"names the commit for"| coA["/opt/acceptblue-mcp-src<br/>(root's read-only checkout)"]
+  shaN["authorizenet-mcp.sha<br/>(pinned commit)"] -->|"names the commit for"| coN["/opt/authorizenet-mcp-src<br/>(root's read-only checkout)"]
+  ghA["GitHub<br/>TapDashPayments/acceptblue-mcp"] -->|"git fetch as root with its own read-only deploy key"| coA
+  ghN["GitHub<br/>TapDashPayments/authorizenet-mcp"] -->|"git fetch as root with its own read-only deploy key"| coN
+  coA -->|"build context acceptblue-src (build.sh checks owner, commit, clean tree)"| img["tunnel image<br/>(docker compose build)"]
+  coN -->|"build context authnet-src (build.sh checks owner, commit, clean tree)"| img
+  coA -->|"skills folder, read only"| hermes["Hermes agent<br/>(skills_list, skill_view)"]
+  coN -->|"skills folder, read only"| hermes
+```
+
+How to set them up on the VM (as `ubuntu`, with sudo; **not done yet**, these are the admin steps). Do the whole list
+once per server, with the names from the table (`acceptblue` and `acceptblue-mcp`, then `authorizenet` and `authorizenet-mcp`):
+
+1. **Key.** `sudo ssh-keygen -t ed25519 -N '' -C root@proto-agents-acceptblue-mcp-src -f /root/.ssh/acceptblue_mcp_deploy`.
+   Copy the public half somewhere `ubuntu` can read (`sudo cp /root/.ssh/acceptblue_mcp_deploy.pub /tmp/k.pub`) and
+   add it as a **read-only** deploy key (no `--allow-write`):
+   `gh repo deploy-key add /tmp/k.pub -R TapDashPayments/acceptblue-mcp -t proto-agents-root-read`. GitHub's host key
+   is already in `/root/.ssh/known_hosts_github` (the Maverick step made it).
+2. **Checkout.**
+
+   ```sh
+   sudo env GIT_SSH_COMMAND="ssh -i /root/.ssh/acceptblue_mcp_deploy -o IdentitiesOnly=yes \
+     -o UserKnownHostsFile=/root/.ssh/known_hosts_github -o StrictHostKeyChecking=yes" \
+     git clone -q git@github.com:TapDashPayments/acceptblue-mcp.git /opt/acceptblue-mcp-src
+   sudo git -C /opt/acceptblue-mcp-src checkout -q "$(cat <worktree>/durable-park/deploy/tunnel/acceptblue-mcp.sha)"
+   sudo chown -R root:root /opt/acceptblue-mcp-src && sudo chmod -R u=rwX,go=rX /opt/acceptblue-mcp-src
+   ```
+
+   Check: `sudo git -C /opt/acceptblue-mcp-src rev-parse HEAD` prints the same 40 characters as the file. The same for
+   Authorize.net, with `authorizenet_mcp_deploy`, `TapDashPayments/authorizenet-mcp`, `/opt/authorizenet-mcp-src` and
+   `authorizenet-mcp.sha`.
+
+**Move to a new commit** (after a reviewed change is merged to the server's `main`): as for Maverick above, but write the new
+commit into that server's `.sha` file and change **that** server's part of the image tag (`-ab-<first 7>` for accept.blue,
+`-an-<first 7>` for Authorize.net) in `docker-compose.yml` (both services) and in the docs. Then run `--list-approvals`
+on the new image and update `tests/payments_servers.py` and the pipeline rules in the same change (the tests compare the
+pipeline's `auto` lists with that file, and that file with the pinned commits).
+
+**Why the image tag is long.** `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36` names the
+tunnel version and the commit of every server inside (`qbo` QuickBooks, `mav` Maverick, `ab` accept.blue, `an`
+Authorize.net), so the tag alone says what is in the image, and `build.sh` refuses a tag that does not match the three
+`.sha` files. The tag part is 53 characters (Docker allows 128).
+
 ## Remote gateway servers (Supabase CRM dev, monday, DocuSign demo)
 
 In plain English: three services run their own official MCP servers on the internet. withHuman connects to them with
@@ -128,13 +197,15 @@ activate pipeline revisions; removing that permission once setup is done is Yaak
 
 | File | Purpose |
 | --- | --- |
-| `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman`. Stage `maverick`: builds the Maverick server into the venv `/opt/maverick-mcp` (see [The Maverick server in the image](#the-maverick-server-in-the-image)), launcher `/usr/local/bin/maverick-mcp-server`, creates `/data/maverick-inbox` (`withhuman`, 0700) |
-| `deploy/tunnel/build.sh` | the only way to build: checks the Maverick checkout (root's, nothing writable by others, no grafts or replace refs, pinned commit, no local changes) and the image tag, then runs `docker compose build`. Never starts or stops the tunnel |
-| `deploy/tunnel/maverick-mcp.sha` | the pinned `maverick-mcp` commit (one line) |
-| `deploy/tunnel/tunnel.yaml` | two servers: `quickbooks` (`command: ["qbo-mcp-server"]` + env) and `maverick` (`command: ["maverick-mcp-server"]` + env) |
-| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build context `maverick-src` = `${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, two env files `/etc/durable-park/tunnel.env` and `/etc/durable-park/maverick.env` (paths overridable with `TUNNEL_ENV_FILE`, `MAVERICK_ENV_FILE`); profile service `check` (same two env files) |
+| `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman`. Stages `maverick`, `acceptblue` and `authnet`: each builds its server into its own venv (`/opt/maverick-mcp`, `/opt/acceptblue-mcp`, `/opt/authnet-mcp`; see [The Maverick server in the image](#the-maverick-server-in-the-image) and [The accept.blue and Authorize.net servers in the image](#the-acceptblue-and-authorizenet-servers-in-the-image)), launchers `/usr/local/bin/{maverick,acceptblue,authnet}-mcp-server`, creates `/data/maverick-inbox` (`withhuman`, 0700; the two new servers write no files) |
+| `deploy/tunnel/build.sh` | the only way to build: checks the three TapDash checkouts (Maverick, accept.blue, Authorize.net: each root's, nothing writable by others, no grafts or replace refs, pinned commit, no local changes, also no ignored files) and the image tag (`-mav-<7>-ab-<7>-an-<7>`), then runs `docker compose build`. Never starts or stops the tunnel |
+| `deploy/tunnel/maverick-mcp.sha`, `acceptblue-mcp.sha`, `authorizenet-mcp.sha` | the pinned commit of each TapDash server (one line each, 40 characters) |
+| `deploy/tunnel/tunnel.yaml` | four servers: `quickbooks` (`command: ["qbo-mcp-server"]` + env), `maverick` (`command: ["maverick-mcp-server"]` + env), `acceptblue` (`command: ["acceptblue-mcp-server"]`, env `ACCEPTBLUE_SOURCE_KEY`, `ACCEPTBLUE_PIN`, `ACCEPTBLUE_BASE_URL`) and `authnet` (`command: ["authnet-mcp-server"]`, env `AUTHNET_ENV: sandbox` fixed, `AUTHNET_LOGIN_ID`, `AUTHNET_TRANSACTION_KEY`). It sets no `AUTHNET_WEBHOOK_LISTEN`, so Authorize.net's optional webhook receiver does not run |
+| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build contexts `maverick-src` = `${MAVERICK_MCP_SRC:-/opt/maverick-mcp-src}`, `acceptblue-src` = `${ACCEPTBLUE_MCP_SRC:-/opt/acceptblue-mcp-src}` and `authnet-src` = `${AUTHORIZENET_MCP_SRC:-/opt/authorizenet-mcp-src}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, four env files `/etc/durable-park/tunnel.env`, `maverick.env`, `acceptblue.env` and `authnet.env` (paths overridable with `TUNNEL_ENV_FILE`, `MAVERICK_ENV_FILE`, `ACCEPTBLUE_ENV_FILE`, `AUTHNET_ENV_FILE`); profile service `check` (same four env files) |
 | `deploy/tunnel/enter-secrets.sh` | interactive script that writes `/etc/durable-park/tunnel.env` |
 | `deploy/tunnel/enter-maverick-secrets.sh` | interactive script that writes `/etc/durable-park/maverick.env` (3 values) |
+| `deploy/tunnel/enter-acceptblue-secrets.sh` | interactive script that writes `/etc/durable-park/acceptblue.env` (3 values) |
+| `deploy/tunnel/enter-authnet-secrets.sh` | interactive script that writes `/etc/durable-park/authnet.env` (2 values) |
 
 ## The Maverick server in the image
 
@@ -162,6 +233,43 @@ sudo docker run --rm --entrypoint maverick-mcp-server durable-park/wh-tunnel:0.0
 Verified 2026-10-24 on `...-mav-e4a2b10`: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you` (a person
 approves). Verified again 2026-10-25 on `...-mav-d6f43f9`: the same 42 tools and levels (the two outputs are
 byte-identical, same SHA-256), and `check` said `maverick: ok, 42 tools`.
+
+## The accept.blue and Authorize.net servers in the image
+
+The `acceptblue` and `authnet` stages of the `Dockerfile` are the `maverick` stage again with other names (written and
+tested, **not built yet**: the build needs Docker and an admin, see [the admin steps](runbook.md#acceptblue-and-authorizenet)).
+For each server, in plain words:
+
+1. The builder is the pinned tunnel image, so the venv's Python is the image's own.
+2. `requirements.lock`, `requirements-dev.lock`, `pyproject.toml` and `src/` come from the build context
+   (`acceptblue-src` or `authnet-src`, root's checkout). Nothing is fetched from git inside the build.
+3. A throw-away build venv installs `requirements-dev.lock` with `--require-hashes --only-binary=:all:` and builds
+   the package wheel with `--no-deps --no-build-isolation --check-build-dependencies`.
+4. The runtime venv (`/opt/acceptblue-mcp`, `/opt/authnet-mcp`) gets only `requirements.lock` (hash-checked, wheels
+   only), then the wheel with `--no-deps --no-index`. The build fails if `python -m acceptblue_mcp --list-approvals`
+   or `python -m authorizenet_mcp --list-approvals` does not run.
+5. The runtime stage copies the venvs (owner root, read-only for `withhuman`) and writes the launchers
+   `/usr/local/bin/acceptblue-mcp-server` (`exec /opt/acceptblue-mcp/bin/python -m acceptblue_mcp "$@"`) and
+   `/usr/local/bin/authnet-mcp-server` (`exec /opt/authnet-mcp/bin/python -m authorizenet_mcp "$@"`).
+
+Only the stdio server of each package is started. Authorize.net's optional webhook receiver (a small web server for
+Authorize.net's event notices) is **not** run: nothing sets `AUTHNET_WEBHOOK_LISTEN` or `AUTHNET_SIGNATURE_KEY`, so no
+port opens in the container. Wiring it needs a public address, a signature key and its own review: it is a separate task.
+
+What was checked outside Docker (2026-10-25, at the pinned commits): both wheels were built from the pinned sources with
+`pip wheel`, and `--list-approvals` gave the lists above. **Not checked:** the image build itself, and whether every
+native wheel in the two lock files exists for this image's platform (the runtime lock of each server is the same
+as Maverick's, which builds; the build stops with a clear error if one is missing).
+
+Check a built image (no secrets needed, does not touch the running tunnel):
+
+```bash
+sudo docker run --rm --entrypoint acceptblue-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36 --list-approvals
+sudo docker run --rm --entrypoint authnet-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36 --list-approvals
+```
+
+Expect 28 accept.blue tools (7 `auto`, 21 `you`) and 24 Authorize.net tools (5 `auto`, 19 `you`). If the numbers
+or names differ, stop: the pipeline rules are written for exactly these lists (`tests/payments_servers.py`).
 
 ## Environment variables
 
@@ -220,12 +328,42 @@ start: `withhuman-tunnel: the configuration refers to variables that are not set
 tunnel does not quietly run QuickBooks alone. Both were seen on 2026-10-24 with dummy files (no real secrets, a
 separate compose project, the running tunnel untouched).
 
+### accept.blue settings: `/etc/durable-park/acceptblue.env`
+
+A third file (0600 root:root, never committed), written only by `sudo bash deploy/tunnel/enter-acceptblue-secrets.sh`.
+`tunnel.yaml` passes the three values to the `acceptblue` server only:
+
+| Variable | Meaning |
+| --- | --- |
+| `ACCEPTBLUE_SOURCE_KEY` | accept.blue source key (`pending` until access). A key that starts with `pk_` is a public web-page key: the script and the server both refuse it |
+| `ACCEPTBLUE_PIN` | the PIN that goes with the source key (`pending` until access) |
+| `ACCEPTBLUE_BASE_URL` | API base address. It must be `https://<host>.accept.blue/api/v2`: the server refuses any other host. Placeholder: the real sandbox address `https://api.sandbox.accept.blue/api/v2` (a `.invalid` placeholder, as Maverick has, is refused by this server, and the server was not weakened for it, so the placeholder key just gets a refusal from the sandbox) |
+
+### Authorize.net settings: `/etc/durable-park/authnet.env`
+
+A fourth file (0600 root:root, never committed), written only by `sudo bash deploy/tunnel/enter-authnet-secrets.sh`:
+
+| Variable | Meaning |
+| --- | --- |
+| `AUTHNET_LOGIN_ID` | API login id (`pending` until access); at most 20 characters, which the script checks |
+| `AUTHNET_TRANSACTION_KEY` | transaction key (`pending` until access); at most 16 characters, which the script checks |
+
+Fixed in `tunnel.yaml` (not secrets): `AUTHNET_ENV=sandbox`. The server then uses its own sandbox addresses
+(`apitest.authorize.net`, `test.authorize.net`) and refuses any other. **To go live** (production) is a separate,
+reviewed change: it is not an option in the script on purpose.
+
+Both scripts use the same rules as `enter-secrets.sh`: each value is asked with `read -rs`, an empty value or a value with
+whitespace, quotes, `$`, `#`, a backslash, a backtick or a control character is refused, it asks before overwriting, and it
+writes through a temporary file and `mv -f`. They print `saved 3 values` and `saved 2 values`.
+**No file, no tunnel**, as for Maverick: a missing `acceptblue.env` or `authnet.env` stops `docker compose up` and `run`
+at once, and a missing value stops the tunnel from starting.
+
 ## Build, check, run (Task 2 Step 3, after the human step below)
 
 All commands from `/home/hermes/durable-park/deploy/tunnel`, with `sudo`:
 
 ```bash
-sudo bash build.sh                         # check the Maverick checkout, then build the image (no secrets needed)
+sudo bash build.sh                         # check the three TapDash checkouts, then build the image (no secrets needed)
 sudo docker compose run --rm check         # starts the server once, lists tools; no tunnel token needed
 sudo docker compose up -d wh-tunnel        # long-running tunnel
 sudo docker logs -f wh-tunnel              # watch it connect
@@ -243,11 +381,12 @@ Verified result (dummy credentials, 2026-10-19): `quickbooks: ok, 142 tools`
 (the server's README claims 145; `tools/list` over MCP returns 142).
 With the Maverick server (image `...-mav-e4a2b10`, dummy QuickBooks values and the Maverick placeholders,
 2026-10-24): `maverick: ok, 42 tools` and `quickbooks: ok, 142 tools`.
+With the two payment servers added, `check` should also say `acceptblue: ok, 28 tools` and `authnet: ok, 24 tools` (expected from `--list-approvals`; **not run yet**, the image is not built).
 
 ## Never run these (they print the secrets)
 
-`wh-tunnel` gets all five values from `/etc/durable-park/tunnel.env` and three more from
-`/etc/durable-park/maverick.env`, and these commands print them in plain text. Do not run them, and do not paste their output
+`wh-tunnel` gets all five values from `/etc/durable-park/tunnel.env`, three more from
+`/etc/durable-park/maverick.env`, three from `acceptblue.env` and two from `authnet.env`, and these commands print them in plain text. Do not run them, and do not paste their output
 anywhere:
 
 - `docker compose config` (prints the resolved `env_file` values)
@@ -255,7 +394,7 @@ anywhere:
   (the container's `Env` lists every value)
 - `docker exec wh-tunnel env` / `printenv` / `cat /proc/1/environ`
 - `docker compose run ... env`, `docker run --env-file ... env`
-- `sudo cat /etc/durable-park/tunnel.env` or `sudo cat /etc/durable-park/maverick.env`
+- `sudo cat` of any of the four files in `/etc/durable-park/` that end in `.env` (`tunnel`, `maverick`, `acceptblue`, `authnet`)
 - `docker logs wh-tunnel` is probably safe, but nobody has checked its output for
   secrets: skim it yourself before sharing it.
 
@@ -367,6 +506,24 @@ the wizard layout is **unverified** on the live tenant.
    including future tools**. Click **Activate and continue**.
 5. Approval step: leave for now (pipeline rules are set up later); nothing is
    saved on this step. If the **Tools** list is empty, click **Reload tools**.
+
+### HUMAN STEP B2: register the accept.blue and Authorize.net servers
+
+Only after the new image is built and running and the tunnel shows **online** (and `check` said `ok` for both).
+Do it once per server, the same way as step B, with these names (the slug is permanent):
+
+| | accept.blue | Authorize.net |
+| --- | --- | --- |
+| Server name (slug) | `acceptblue` | `authnet` |
+| Through a tunnel | the same tunnel | the same tunnel |
+| Tunnel server name | `acceptblue` | `authnet` |
+| Grant to agent | `proto-agents`, all tools | `proto-agents`, all tools |
+
+Granting a tool does not make it run: money tools still ask a person (see the pipeline below). Save the pipeline file as a
+new entry revision **after** both servers are registered, so the rules and the servers arrive together.
+Until then, `hermes_mcp.sh` fails on purpose (it expects `mcp__wh__acceptblue__ablue_read` and
+`mcp__wh__authnet__authnet_read` to be registered) and leaves the agent without the two servers.
+
 
 ## Verified live
 
@@ -513,8 +670,10 @@ is **unverified** on the live tenant.
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline)**
 
 The live entry pipeline is **revision 15** (active since 2026-10-25 02:54 UTC; revision 12 added the Maverick blocks, 13 and 14 the three remote servers, 15 made those servers' gateway rules match the server name only). Its source of truth is the reviewed
-file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (25 blocks), and
-[architecture section 1](architecture.md#1-system-map) has the same list as a table. Do not rebuild it from this
+file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (31 blocks, six more than the live 25: see the next paragraph), and
+[architecture section 1](architecture.md#1-system-map) has the same list as a table. **The file is ahead of the live revision:** it adds six blocks for the accept.blue and Authorize.net servers (a candidate
+revision 16, row 7a below), which are not live until an admin saves the file as a new revision and activates it. Until then
+every call to those two servers asks a person twice (block 8 names both servers). Do not rebuild it from this
 page: save the file's blocks as a new entry revision in withHuman and activate it (a save activates at once). Blocks
 run in order and the first one that decides ends the pipeline. Every block for `proto-agents` also tests the agent
 slug. Every "ask an approver" uses the escalation path `notify-yaakov-yehuda`.
@@ -528,6 +687,7 @@ slug. Every "ask an approver" uses the escalation path `notify-yaakov-yehuda`.
 | 5 | `pa-park-quickbooks-read` | server `park:quickbooks`, a read tool (same verbs) | Approve |
 | 6 | `pa-hermes-read` | server `hermes`, one of 12 read-only tools (for example `web_search`, `memory`) | Approve |
 | 7 | `pa-hermes-local-deny` | server `hermes`, one of 12 local machine tools (for example `terminal`, `write_file`) | Deny, until Clean Setup Phase 2 |
+| 7a | `pa-park-acceptblue-auto`, `pa-gateway-acceptblue-auto`, `acceptblue-gateway-write-bridge`, `pa-park-authnet-auto`, `pa-gateway-authnet-auto`, `authnet-gateway-write-bridge` (file only, candidate revision 16) | for each server: park and gateway rules that approve only the tools **the server itself marks `auto`** (accept.blue: `describe_lookup`, `read`, `search_lookups`, `create_customer`, `create_customer_from_transaction`, `update_customer`, `create_invoice` (a draft); Authorize.net: `describe_lookup`, `read`, `search_lookups`, `save_customer_profile`, `save_shipping_address`), then a gateway rule that sends every other call to webhook block `durable-park-bridge` (approve only the replay of an approved park) | Approve the listed tools; bridge for the rest. Everything else on these servers reaches block 8 at park time (a person) |
 | 8 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
 | 9 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
 | 10 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
@@ -601,9 +761,11 @@ then restarts `hermes-gateway` and waits until `mcp__wh__quickbooks__get_company
 
 The `include` filter also keeps the gateway's built-in `withhuman__*` management tools away from the model.
 Hermes tool names are `mcp__wh__<slug>__<tool>`, so they match the plugin's risky patterns and the bridge's
-`mcp__wh__<server>__<tool>`. The agent tool policy admits `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*`,
-`mcp__wh__supabase_crm_dev__*`, `mcp__wh__monday__*` and `mcp__wh__docusign_demo__*`, and `hermes_mcp.sh`
-fails (stopping the gateway) if any other `mcp__wh__` tool registers.
+`mcp__wh__<server>__<tool>`. The agent tool policy admits `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*`, `mcp__wh__acceptblue__*`,
+`mcp__wh__authnet__*`, `mcp__wh__supabase_crm_dev__*`, `mcp__wh__monday__*` and `mcp__wh__docusign_demo__*`, and
+`hermes_mcp.sh` fails (stopping the gateway) if any other `mcp__wh__` tool registers. Every Hermes name must stay at most
+64 characters, or Hermes shortens it with a hash and the gateway call no longer pairs with its park (the longest name
+here is 63; `tests/test_pipeline_policy.py` proves it for both new servers).
 
 Live check (manual): `DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py`. The pipeline
 must let the read-only `get_company_info` call through.

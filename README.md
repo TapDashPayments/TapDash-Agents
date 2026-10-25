@@ -52,9 +52,11 @@ flowchart TD
   P -->|"approved: run the saved call"| G["withHuman MCP gateway"]
   G -->|"checks the call matches<br/>an approved one"| B["Bridge"]
   B -->|"approve or ask a person"| G
-  G -->|"through the tunnel"| T["Tunnel container<br/>(QuickBooks and Maverick servers)"]
+  G -->|"through the tunnel"| T["Tunnel container<br/>(QuickBooks, Maverick, accept.blue<br/>and Authorize.net servers)"]
   T -->|"QuickBooks API"| Q[("QuickBooks Online<br/>sandbox")]
   T -->|"Maverick API<br/>(placeholder until sandbox)"| M[("Maverick Payments")]
+  T -->|"accept.blue API<br/>(not switched on yet)"| AB[("accept.blue")]
+  T -->|"Authorize.net API<br/>(not switched on yet)"| AN[("Authorize.net")]
   G -->|"with withHuman's sign-in"| S[("Supabase CRM dev, monday,<br/>DocuSign demo")]
   A -->|"copies of every turn"| F[("Langfuse<br/>traces, 30 days")]
 ```
@@ -69,8 +71,8 @@ flowchart TD
 | **Receiver** | Gets withHuman's signed decision and wakes the plugin. | [`durable-park/receiver/`](durable-park/receiver/) |
 | **withHuman MCP gateway** | Passes tool calls on to the right server, after the rules say yes. | Hosted |
 | **Bridge** | When the gateway asks, says yes only for a call that matches an approved one. | [`durable-park/bridge/`](durable-park/bridge/) |
-| **Tunnel container** | Runs the QuickBooks and Maverick servers on the VM and connects them to the gateway. | [`durable-park/deploy/tunnel/`](durable-park/deploy/tunnel/) |
-| **QuickBooks, Maverick** | The payment and accounting systems (sandbox; Maverick has placeholder settings for now). | Intuit, Maverick |
+| **Tunnel container** | Runs the QuickBooks, Maverick, accept.blue and Authorize.net servers on the VM and connects them to the gateway. | [`durable-park/deploy/tunnel/`](durable-park/deploy/tunnel/) |
+| **QuickBooks, Maverick, accept.blue, Authorize.net** | The payment and accounting systems (sandbox; Maverick has placeholder settings for now; accept.blue and Authorize.net are wired in the code but not switched on yet). | Intuit, Maverick, accept.blue, Authorize.net |
 | **Supabase, monday, DocuSign** | Their own official servers on the internet; withHuman holds the sign-in. | Hosted by each company |
 | **Langfuse** | Keeps a copy of every chat and tool call for review (30 days). | Hosted ([us.cloud.langfuse.com](https://us.cloud.langfuse.com)) |
 
@@ -96,9 +98,11 @@ running on the test VM.
 | Hermes Deck (Hermes-Deck) | The desktop app and its Hermes plugin and relay that show what the agent is doing; watch only. [Runbook](durable-park/docs/runbook.md#hermes-deck-desktop-app) | 1.0.0 (`2b2b2b7`) | not stated (no LICENSE file in the repo) | [github](https://github.com/Hermes-Deck/hermes-deck) |
 | withHuman | Approvals: pipeline rules, the approval app, escalation paths, the MCP gateway in front of QuickBooks | hosted ([app.withhuman.ai](https://app.withhuman.ai)) | Elastic License 2.0 (source-available) | [github](https://github.com/withHumanAI/withhuman) |
 | AAP - Agent Approval Protocol | The open protocol and Python SDK (`agentapprovalprotocol`) we use to open approval requests, use an approval once, and verify signed webhooks | SDK 0.3.3 | Apache-2.0 | [github](https://github.com/agentapprovalprotocol/agentapprovalprotocol) · [site](https://agentapprovalprotocol.io) |
-| withHuman tunnel | Container that connects the QuickBooks and Maverick servers on the VM to the withHuman gateway | `quay.io/withhuman/tunnel:0.0.369` | withHuman's | [withHuman](https://withhuman.ai) |
+| withHuman tunnel | Container that connects the QuickBooks, Maverick, accept.blue and Authorize.net servers on the VM to the withHuman gateway | `quay.io/withhuman/tunnel:0.0.369` | withHuman's | [withHuman](https://withhuman.ai) |
 | QuickBooks Online MCP server (Intuit) | The QuickBooks tools (create bill, payment, ...). Built into the tunnel image | commit `31a1dd5` | Apache-2.0 | [github](https://github.com/intuit/quickbooks-online-mcp-server) |
 | Maverick MCP server (TapDash, `maverick-mcp`) | The 42 Maverick Payments tools (lookups, boarding, vault, ACH, disputes, tickets, refunds). Built into the tunnel image from root's read-only checkout `/opt/maverick-mcp-src`, pinned in [`maverick-mcp.sha`](durable-park/deploy/tunnel/maverick-mcp.sha); its Python packages come only from its hashed lock file. Live since 2026-10-25 with **placeholder settings** until Maverick gives sandbox access ([gateway setup](durable-park/docs/gateway-setup.md#maverick-server-source)) | commit `d6f43f922a9cf3416c6fdb536a07fd67caec17ac` (`d6f43f9`) | private (TapDash) | [github](https://github.com/TapDashPayments/maverick-mcp) (private) |
+| accept.blue MCP server (TapDash, `acceptblue-mcp`) | The 28 accept.blue tools (lookups, customers, invoices, charges, refunds, ...; 7 need no person, 21 always ask one). Built into the tunnel image from root's read-only checkout `/opt/acceptblue-mcp-src`, pinned in [`acceptblue-mcp.sha`](durable-park/deploy/tunnel/acceptblue-mcp.sha); its Python packages come only from its hashed lock file. **Reviewed in the repo, not built or switched on yet** ([gateway setup](durable-park/docs/gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)) | commit `9bb8d722a0d5fc9dce08437eedc8328d34005bcc` (`9bb8d72`) | private (TapDash) | [github](https://github.com/TapDashPayments/acceptblue-mcp) (private) |
+| Authorize.net MCP server (TapDash, `authorizenet-mcp`) | The 24 Authorize.net tools (lookups, customer profiles, charges, refunds, subscriptions, ...; 5 need no person, 19 always ask one). Built into the tunnel image from root's read-only checkout `/opt/authorizenet-mcp-src`, pinned in [`authorizenet-mcp.sha`](durable-park/deploy/tunnel/authorizenet-mcp.sha); its Python packages come only from its hashed lock file; its webhook receiver is not run. **Reviewed in the repo, not built or switched on yet** ([gateway setup](durable-park/docs/gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)) | commit `6084f3693b135d8e3d4c237cc147ad963826d654` (`6084f36`) | private (TapDash) | [github](https://github.com/TapDashPayments/authorizenet-mcp) (private) |
 | MCP - Model Context Protocol | The standard the agent uses to call tools through the gateway | - | open standard | [site](https://modelcontextprotocol.io) |
 | Starlette + uvicorn | Web framework and server for the bridge and the receiver | 1.9.0 / 0.54.0 | BSD-3-Clause | [starlette](https://github.com/encode/starlette) · [uvicorn](https://github.com/encode/uvicorn) |
 | httpx | HTTP client used by one-time provisioning | 0.28.1 | BSD-3-Clause | [github](https://github.com/encode/httpx) |
