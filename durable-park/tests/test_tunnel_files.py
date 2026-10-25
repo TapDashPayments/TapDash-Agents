@@ -204,3 +204,128 @@ def test_build_script_stops_when_the_sha_file_is_not_one_full_commit(tmp_path):
     result = _run_build(tun, env)
     assert result.returncode != 0
     assert "FAKE DOCKER" not in result.stdout
+
+
+# --- Task 3: Maverick settings file and the tunnel entry ---------------------------------------------------------
+
+TUNNEL_YAML = TUNNEL / "tunnel.yaml"
+ENTER_MAVERICK = TUNNEL / "enter-maverick-secrets.sh"
+ENTER_QBO = TUNNEL / "enter-secrets.sh"
+
+
+def test_tunnel_yaml_has_maverick_server():
+    text = TUNNEL_YAML.read_text()
+    assert "servers:\n  quickbooks:\n" in text  # QuickBooks stays
+    want = (
+        "  maverick:\n"
+        '    command: ["maverick-mcp-server"]\n'
+        "    env:\n"
+        "      MAVERICK_TOKEN: ${MAVERICK_TOKEN}\n"
+        "      MAVERICK_GATEWAY_URL: ${MAVERICK_GATEWAY_URL}\n"
+        "      MAVERICK_DASHBOARD_URL: ${MAVERICK_DASHBOARD_URL}\n"
+        "      MAVERICK_INBOX_DIR: /data/maverick-inbox\n"
+    )
+    assert want in text
+    # the QuickBooks server must not see the Maverick token, nor Maverick the QuickBooks keys
+    qbo_part, mav_part = text.split("  maverick:\n", 1)
+    assert "MAVERICK_" not in qbo_part.split("  quickbooks:\n", 1)[1]
+    assert "QUICKBOOKS_" not in mav_part and "WITHHUMAN_" not in mav_part
+
+
+def test_both_services_load_maverick_env():
+    want = ["env_file:", "- ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}",
+            "- ${MAVERICK_ENV_FILE:-/etc/durable-park/maverick.env}"]
+    for service in ("wh-tunnel", "check"):
+        block = _service_block(service)
+        i = block.index("env_file:")
+        assert block[i:i + 3] == want, service
+    assert not any(ln.startswith("env_file: ") for ln in _code(COMPOSE))  # the old one-file form is gone
+
+
+def test_enter_maverick_secrets_script():
+    subprocess.run(["bash", "-n", str(ENTER_MAVERICK)], check=True)
+    if _shellcheck() is not None:
+        result = subprocess.run([_shellcheck(), str(ENTER_MAVERICK)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+    text = ENTER_MAVERICK.read_text()
+    code = "\n".join(_code(ENTER_MAVERICK))
+    assert "names=(MAVERICK_TOKEN MAVERICK_GATEWAY_URL MAVERICK_DASHBOARD_URL)" in code
+    assert 'read -rs -p "${labels[$i]}: " val' in code
+    assert "set +x" in code and "umask 077" in code
+    assert 'FILE=$DIR/maverick.env' in code
+    # the same character rule as enter-secrets.sh, line for line
+    rule = next(ln.strip() for ln in ENTER_QBO.read_text().splitlines() if "[[:space:][:cntrl:]" in ln)
+    assert rule in code
+    assert "https://" in code and "_URL" in code
+    assert 'mktemp "$DIR/.maverick.env.XXXXXX"' in code
+    assert 'mv -f -- "$tmp" "$FILE"' in code
+    assert 'chmod 0600 "$tmp"' in code and 'chown root:root "$tmp"' in code
+    assert "Overwrite? [y/N]" in code
+    # never shows a value
+    for line in _code(ENTER_MAVERICK):
+        assert not re.search(r"\b(echo|printf)\b.*\$val", line) or line.startswith("printf '%s=%s\\n'"), line
+    assert "EUID" in text and "-t 0" in text
+
+
+def _enter_maverick(tmp_path, answers):
+    """Run the script on a pseudo-terminal, as if root, writing into tmp_path; returns (rc, output, file).
+
+    Each answer is typed only after the script shows a prompt (a line ending in ": "), as a person would."""
+    import os
+    import pty
+    import select
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    (fake_bin / "chown").write_text("#!/bin/sh\nexit 0\n")  # the test does not run as root
+    (fake_bin / "install").write_text('#!/bin/sh\nfor a; do last=$a; done\nmkdir -p "$last"\n')
+    for name in ("chown", "install"):
+        (fake_bin / name).chmod(0o755)
+    script = tmp_path / "enter.sh"
+    script.write_text(ENTER_MAVERICK.read_text().replace("${EUID}", "0", 1))
+    env = {"PATH": f"{fake_bin}:/usr/bin:/bin", "DURABLE_PARK_ETC_DIR": str(tmp_path / "etc"), "HOME": str(tmp_path)}
+    pid, fd = pty.fork()
+    if pid == 0:  # pragma: no cover - child
+        os.execve("/bin/bash", ["bash", str(script)], env)
+    out, pending = b"", list(answers)
+    while True:
+        ready, _, _ = select.select([fd], [], [], 10)
+        if not ready:
+            break
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        if pending and out.endswith(b": "):
+            os.write(fd, pending.pop(0).encode() + b"\n")
+    _, status = os.waitpid(pid, 0)
+    os.close(fd)
+    return os.waitstatus_to_exitcode(status), out.decode(errors="replace"), tmp_path / "etc" / "maverick.env"
+
+
+def test_enter_maverick_secrets_writes_three_values(tmp_path):
+    rc, out, file = _enter_maverick(tmp_path, ["pending", "https://maverick.invalid", "https://maverick.invalid"])
+    assert rc == 0, out
+    assert "saved 3 values" in out
+    assert file.read_text() == ("MAVERICK_TOKEN=pending\nMAVERICK_GATEWAY_URL=https://maverick.invalid\n"
+                                "MAVERICK_DASHBOARD_URL=https://maverick.invalid\n")
+    assert oct(file.stat().st_mode & 0o777) == "0o600"
+    assert "pending" not in out  # nothing typed is echoed
+
+
+def test_enter_maverick_secrets_refuses_a_url_that_is_not_https(tmp_path):
+    rc, out, file = _enter_maverick(tmp_path, ["pending", "http://maverick.invalid", "https://maverick.invalid",
+                                               "https://maverick.invalid"])
+    assert rc == 0, out
+    assert "must start with https://" in out
+    assert "MAVERICK_GATEWAY_URL=https://maverick.invalid\n" in file.read_text()
+
+
+def test_enter_maverick_secrets_refuses_characters_the_env_file_cannot_hold(tmp_path):
+    rc, out, file = _enter_maverick(tmp_path, ["a$b", "ok-token", "https://g.invalid", "https://d.invalid"])
+    assert rc == 0, out
+    assert "not allowed in the env file" in out
+    assert file.read_text().startswith("MAVERICK_TOKEN=ok-token\n")

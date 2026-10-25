@@ -87,9 +87,10 @@ How it was set up (2026-10-24), and how to redo it on a fresh VM:
 | `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman`. Stage `maverick`: builds the Maverick server into the venv `/opt/maverick-mcp` (see [The Maverick server in the image](#the-maverick-server-in-the-image)), launcher `/usr/local/bin/maverick-mcp-server`, creates `/data/maverick-inbox` (`withhuman`, 0700) |
 | `deploy/tunnel/build.sh` | the only way to build: checks the Maverick checkout (pinned commit, no local changes) and the image tag, then runs `docker compose build`. Never starts or stops the tunnel |
 | `deploy/tunnel/maverick-mcp.sha` | the pinned `maverick-mcp` commit (one line) |
-| `deploy/tunnel/tunnel.yaml` | one server `quickbooks`: `command: ["qbo-mcp-server"]` + env |
-| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build context `maverick-src` = `${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, `env_file: /etc/durable-park/tunnel.env`; profile service `check` |
+| `deploy/tunnel/tunnel.yaml` | two servers: `quickbooks` (`command: ["qbo-mcp-server"]` + env) and `maverick` (`command: ["maverick-mcp-server"]` + env) |
+| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build context `maverick-src` = `${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, two env files `/etc/durable-park/tunnel.env` and `/etc/durable-park/maverick.env` (paths overridable with `TUNNEL_ENV_FILE`, `MAVERICK_ENV_FILE`); profile service `check` (same two env files) |
 | `deploy/tunnel/enter-secrets.sh` | interactive script that writes `/etc/durable-park/tunnel.env` |
+| `deploy/tunnel/enter-maverick-secrets.sh` | interactive script that writes `/etc/durable-park/maverick.env` (3 values) |
 
 ## The Maverick server in the image
 
@@ -147,6 +148,32 @@ run), also wipe the volume: `sudo docker compose down && sudo docker volume rm d
 Refresh tokens expire after roughly 100 days of no use (Intuit; unverified for
 sandbox).
 
+### Maverick settings: `/etc/durable-park/maverick.env`
+
+A second file (0600 root:root, never committed), written only by `sudo bash deploy/tunnel/enter-maverick-secrets.sh`.
+Both compose services load it next to `tunnel.env`, and `tunnel.yaml` passes the values to the `maverick` server only
+(the QuickBooks server never sees them, and the Maverick server never sees the QuickBooks keys or the tunnel token):
+
+| Variable | Meaning |
+| --- | --- |
+| `MAVERICK_TOKEN` | Maverick API token (`pending` until sandbox access arrives) |
+| `MAVERICK_GATEWAY_URL` | Maverick gateway API base address; must start with `https://` (`https://maverick.invalid` until then) |
+| `MAVERICK_DASHBOARD_URL` | Maverick dashboard API base address; must start with `https://` (`https://maverick.invalid` until then) |
+
+Fixed in `tunnel.yaml` (not a secret): `MAVERICK_INBOX_DIR=/data/maverick-inbox` (the named volume
+`durable-park-maverick-inbox`, where the server keeps files it downloads).
+
+The script asks for each value with `read -rs` (nothing is shown), refuses an empty value, a value with whitespace,
+quotes, `$`, `#`, a backslash, a backtick or a control character (the same rule as `enter-secrets.sh`), and a URL
+that does not start with `https://`; it asks before overwriting, writes through a temporary file and `mv -f`, and
+prints `saved 3 values`.
+
+**No file, no tunnel.** If `maverick.env` is missing, `docker compose up` and `run` stop at once with
+`env file /etc/durable-park/maverick.env not found`. If the file is there but a value is missing, the tunnel refuses to
+start: `withhuman-tunnel: the configuration refers to variables that are not set: MAVERICK_...`. Either way the
+tunnel does not quietly run QuickBooks alone. Both were seen on 2026-10-24 with dummy files (no real secrets, a
+separate compose project, the running tunnel untouched).
+
 ## Build, check, run (Task 2 Step 3, after the human step below)
 
 All commands from `/home/hermes/durable-park/deploy/tunnel`, with `sudo`:
@@ -168,11 +195,13 @@ credentials.
 
 Verified result (dummy credentials, 2026-10-19): `quickbooks: ok, 142 tools`
 (the server's README claims 145; `tools/list` over MCP returns 142).
+With the Maverick server (image `...-mav-bf99b44`, dummy QuickBooks values and the Maverick placeholders,
+2026-10-24): `maverick: ok, 42 tools` and `quickbooks: ok, 142 tools`.
 
 ## Never run these (they print the secrets)
 
-`wh-tunnel` gets all five values from `/etc/durable-park/tunnel.env`, and these
-commands print them in plain text. Do not run them, and do not paste their output
+`wh-tunnel` gets all five values from `/etc/durable-park/tunnel.env` and three more from
+`/etc/durable-park/maverick.env`, and these commands print them in plain text. Do not run them, and do not paste their output
 anywhere:
 
 - `docker compose config` (prints the resolved `env_file` values)
@@ -180,7 +209,7 @@ anywhere:
   (the container's `Env` lists every value)
 - `docker exec wh-tunnel env` / `printenv` / `cat /proc/1/environ`
 - `docker compose run ... env`, `docker run --env-file ... env`
-- `sudo cat /etc/durable-park/tunnel.env`
+- `sudo cat /etc/durable-park/tunnel.env` or `sudo cat /etc/durable-park/maverick.env`
 - `docker logs wh-tunnel` is probably safe, but nobody has checked its output for
   secrets: skim it yourself before sharing it.
 

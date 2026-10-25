@@ -727,6 +727,7 @@ the repo) and never printed by any script.
 | `wake_secret` | 0640 root:dpwake | receiver, sweep, Hermes (via the secrets helper) | signs the local wake to Hermes |
 | `bridge_secret` | 0600 root:root | bridge (systemd reads it as root and hands the bridge a private copy: `LoadCredential`) | verifies withHuman's pipeline webhook signature. The bot cannot read it |
 | `tunnel.env` | 0600 root | `wh-tunnel` container | QuickBooks app keys + refresh token, withHuman tunnel token |
+| `maverick.env` | 0600 root | `wh-tunnel` container (passed to the `maverick` server only) | Maverick API token and the two Maverick API addresses; placeholders (`pending`, `https://maverick.invalid`) until sandbox access. Written by `enter-maverick-secrets.sh`; the tunnel will not start without it |
 | `provisioner_token` | 0600 root | `provision.py` (once) | creating the withHuman instance; delete afterwards |
 | `audit_key` | 0640 root:hermes | bridge (every gateway call; systemd copies it when the bridge starts: `LoadCredential`), plugin (optional; reads the file) | withHuman org API key with `audit.read`, `request.read`, `request.read.unrouted` and nothing else (it must not read rules or members, and it cannot decide): the bridge lists requests with it; the plugin names who decided in the chat message. Without it the bridge answers `human` to every gateway call |
 

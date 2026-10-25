@@ -1673,6 +1673,31 @@ restarts the gateway ([health check](#health-check)).
 - The "Read traces" and "Find everything about one approval" scripts under [Tracing (Langfuse)](#tracing-langfuse)
   were written when the Langfuse keys were in `.env`. They were not re-run after the move.
 
+## Maverick
+
+In plain English: Maverick is the payments system TapDash boards merchants on. Its MCP server runs inside the same
+tunnel container as QuickBooks, so the agent reaches it only through withHuman, like QuickBooks. Setup details:
+[gateway setup](gateway-setup.md#maverick-server-source).
+
+### Maverick settings (placeholders until sandbox access)
+
+Until Maverick gives us sandbox access, the tunnel still needs `/etc/durable-park/maverick.env`, because the tunnel
+refuses to start without it. Yaakov runs, in a terminal on the VM (not screen-shared):
+
+```sh
+sudo bash /home/hermes/tapdash-agents/durable-park/deploy/tunnel/enter-maverick-secrets.sh
+```
+
+and types the placeholders: `pending` for the token and `https://maverick.invalid` for both URLs. It prints
+`saved 3 values`. The `.invalid` name never resolves, so every Maverick call fails with a clear error from the
+server ("Maverick did not answer in 30 s."), never silently. A lookup says nothing changed; a write tool says
+it cannot tell whether Maverick acted (the server cannot know that the address is a placeholder), but with this
+address nothing can have left the VM. When the real values arrive, run the script again (it asks before
+overwriting) and recreate the tunnel (no ledger row `parked`, `approved` or `executing`, then
+from `deploy/tunnel`: `sudo docker compose up -d wh-tunnel`).
+
+Never `cat` the file or run `docker compose config`, `docker inspect` or `docker exec ... env`: they print it.
+
 ## Rotate secrets before production
 
 Several secrets were pasted into chat during testing (approved for testing only). Before any real books:
@@ -1682,6 +1707,8 @@ Several secrets were pasted into chat during testing (approved for testing only)
 - [ ] Rotate the Intuit app client secret and refresh token; re-run OAuth; wipe the `durable-park-qbo-data`
       volume: [gateway-setup.md](gateway-setup.md#environment-variables)
 - [ ] Issue a new withHuman tunnel token
+- [ ] Replace the Maverick placeholders (or any Maverick token that was ever shared) with real values:
+      [Maverick settings](#maverick-settings-placeholders-until-sandbox-access)
 - [ ] Rotate the `durable-park-bridge` webhook endpoint secret and re-store `bridge_secret` (`root:root 0600`), then
       `sudo systemctl restart durable-park-bridge` ([how](#store-or-rotate-the-bridges-keys))
 - [ ] Regenerate `wake_secret`

@@ -1,9 +1,10 @@
-# WARNING: this stack's env_file holds real secrets. NEVER run
-# `docker compose config`, `docker inspect wh-tunnel`, `docker exec wh-tunnel env`
-# or `cat /etc/durable-park/tunnel.env`: they print every secret in plain text.
+# WARNING: this stack's env files hold real secrets. NEVER run
+# `docker compose config`, `docker inspect wh-tunnel`, `docker exec wh-tunnel env`,
+# `cat /etc/durable-park/tunnel.env` or `cat /etc/durable-park/maverick.env`:
+# they print every secret in plain text.
 # Run from this directory (as root / via sudo):
 #   bash build.sh                           # checks the pinned Maverick checkout, then `docker compose build`
-#   docker compose up -d wh-tunnel          # needs /etc/durable-park/tunnel.env (5 values)
+#   docker compose up -d wh-tunnel          # needs /etc/durable-park/tunnel.env (5 values) + maverick.env (3)
 #   docker compose run --rm check           # list tools; does not connect to withHuman
 name: durable-park-tunnel
 
@@ -18,7 +19,9 @@ services:
       additional_contexts:
         maverick-src: ${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}
     restart: unless-stopped
-    env_file: ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
+    env_file:
+      - ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
+      - ${MAVERICK_ENV_FILE:-/etc/durable-park/maverick.env}
     volumes:
       - ./tunnel.yaml:/etc/withhuman/tunnel.yaml:ro
       - qbo-data:/data
@@ -28,13 +31,15 @@ services:
 
   # `docker compose run --rm check` -> `withhuman-tunnel check`: starts every
   # configured server once and lists its tools. Never connects to withHuman, so
-  # WITHHUMAN_TUNNEL_TOKEN is not needed (the QUICKBOOKS_* vars still are,
-  # because tunnel.yaml references them). No data volume: nothing is persisted.
+  # WITHHUMAN_TUNNEL_TOKEN is not needed (the QUICKBOOKS_* and MAVERICK_* vars
+  # still are, because tunnel.yaml references them). No data volume: nothing is persisted.
   check:
     profiles: ["check"]
     image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44
     command: ["check"]
-    env_file: ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
+    env_file:
+      - ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}
+      - ${MAVERICK_ENV_FILE:-/etc/durable-park/maverick.env}
     volumes:
       - ./tunnel.yaml:/etc/withhuman/tunnel.yaml:ro
 
