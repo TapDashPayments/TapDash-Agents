@@ -35,42 +35,44 @@ safety items needs finishing: [what is left](durable-park/docs/backlog.md#before
 
 ## Project map
 
-**In plain English:** These are the big pieces and how they talk to each other. A person must say yes before anything risky runs.
+**In plain English:** the agent never touches money or outside systems by itself. Every risky tool call is
+saved, a person says yes or no in the withHuman app, and only then does the saved call run, once. This is the
+short map; the full one (every part, port and file) is in [architecture section 1](durable-park/docs/architecture.md#1-system-map).
 
 ```mermaid
 flowchart TD
-  U[User in chat<br/>Telegram or Teams] --> H[Hermes Agent<br/>Runs the chat bot]
-  H --> P[durable-park plugin<br/>Stops risky calls and asks for approval]
-  P --> L[(Ledger SQLite<br/>Saves calls so they run once)]
-  P --> AAP[AAP / withHuman<br/>Opens approval request]
-  AAP --> AP[Approver in withHuman app<br/>Says yes or no]
-  AP --> WH[withHuman webhook<br/>Sends decision]
-  WH --> R[Receiver<br/>Wakes the plugin]
-  R --> P
-  P --> B[Bridge<br/>Checks the approved call is exactly right]
-  B --> GW[withHuman gateway<br/>Routes to tools]
-  GW --> T[Tunnel container<br/>Runs QuickBooks and Maverick tools]
-  T --> QBO[QuickBooks Online<br/>Fake books in sandbox]
-  T --> MAV[Maverick Payments<br/>Placeholder settings for now]
-  H --> LF[Langfuse Cloud<br/>Records traces for review]
+  U(["User in Teams or Telegram"]) -->|"asks for something"| A["Hermes agent<br/>(on the test VM)"]
+  A -->|"every tool call"| P["durable-park plugin<br/>(park hook)"]
+  P -->|"saves the exact call"| L[("Ledger<br/>(each call runs once)")]
+  P -->|"asks: may this run?"| W["withHuman<br/>(approval rules)"]
+  W -->|"risky: asks a person"| AP(["Approver in the withHuman app"])
+  AP -->|"yes or no"| W
+  W -->|"decision, signed"| R["Receiver<br/>(wakes the plugin)"]
+  R -->|"wake"| P
+  P -->|"approved: run the saved call"| G["withHuman MCP gateway"]
+  G -->|"checks the call matches<br/>an approved one"| B["Bridge"]
+  B -->|"approve or ask a person"| G
+  G -->|"through the tunnel"| T["Tunnel container<br/>(QuickBooks and Maverick servers)"]
+  T -->|"QuickBooks API"| Q[("QuickBooks Online<br/>sandbox")]
+  T -->|"Maverick API<br/>(placeholder until sandbox)"| M[("Maverick Payments")]
+  G -->|"with withHuman's sign-in"| S[("Supabase CRM dev, monday,<br/>DocuSign demo")]
+  A -->|"copies of every turn"| F[("Langfuse<br/>traces, 30 days")]
 ```
 
 | Part | What it does | Where it lives |
 |---|---|---|
-| **User in chat (Telegram/Teams)** | Talks to the bot and sees answers. | Outside this repo (services) |
-| **Hermes Agent** | Runs the bots and calls tools. | Installed on VM (v0.22.3) |
-| **durable-park plugin** | Stops risky calls, checks them, saves to ledger, opens approval, wakes on decision, runs once. | [`durable-park/plugin/`](durable-park/plugin/) |
-| **Ledger (SQLite)** | Remembers parked calls so they can't run twice or be lost. | On VM (used by plugin) |
-| **AAP / withHuman** | Approval protocol and app that asks a person to say yes or no. | Hosted ([app.withhuman.ai](https://app.withhuman.ai)) |
-| **Approver (person)** | The only one who can say yes to risky actions. | Person using withHuman app |
-| **Receiver** | Gets the decision webhook from withHuman and wakes the plugin. | [`durable-park/receiver/`](durable-park/receiver/) |
-| **Bridge** | Double-checks the call matches exactly what was approved; answers once. | [`durable-park/bridge/`](durable-park/bridge/) |
-| **withHuman gateway** | Routes approved tool calls to the right servers. | Hosted |
-| **Tunnel container** | Runs QuickBooks and Maverick tools inside the gateway. | [`durable-park/deploy/tunnel/`](durable-park/deploy/tunnel/) |
-| **QuickBooks Online (sandbox)** | Fake books used for testing. | Intuit sandbox |
-| **Maverick Payments** | Payments tools (placeholder settings until sandbox access). | Maverick MCP server |
-| **Langfuse Cloud** | Records traces of chats and tool calls for review (30 days). | Hosted ([us.cloud.langfuse.com](https://us.cloud.langfuse.com)) |
-
+| **Hermes agent** | The chat bot. It reads messages and calls tools. | Installed on the test VM (v0.22.3) |
+| **durable-park plugin** | Catches every tool call, saves it, asks withHuman, and runs an approved call once. | [`durable-park/plugin/`](durable-park/plugin/) |
+| **Ledger** | Remembers every saved call so nothing runs twice or gets lost. | A file on the VM |
+| **withHuman** | Holds the approval rules and asks a person when a rule says so. | Hosted ([app.withhuman.ai](https://app.withhuman.ai)); rules in [`entry-pipeline.json`](durable-park/deploy/withhuman/entry-pipeline.json) |
+| **Approver** | The only one who can say yes to a risky action. | A person in the withHuman app |
+| **Receiver** | Gets withHuman's signed decision and wakes the plugin. | [`durable-park/receiver/`](durable-park/receiver/) |
+| **withHuman MCP gateway** | Passes tool calls on to the right server, after the rules say yes. | Hosted |
+| **Bridge** | When the gateway asks, says yes only for a call that matches an approved one. | [`durable-park/bridge/`](durable-park/bridge/) |
+| **Tunnel container** | Runs the QuickBooks and Maverick servers on the VM and connects them to the gateway. | [`durable-park/deploy/tunnel/`](durable-park/deploy/tunnel/) |
+| **QuickBooks, Maverick** | The payment and accounting systems (sandbox; Maverick has placeholder settings for now). | Intuit, Maverick |
+| **Supabase, monday, DocuSign** | Their own official servers on the internet; withHuman holds the sign-in. | Hosted by each company |
+| **Langfuse** | Keeps a copy of every chat and tool call for review (30 days). | Hosted ([us.cloud.langfuse.com](https://us.cloud.langfuse.com)) |
 
 **Admins start here:** [runbook](durable-park/docs/runbook.md) (health check, deploy, alerts, troubleshooting,
 secrets, rollback) and [architecture](durable-park/docs/architecture.md) (what runs where).
