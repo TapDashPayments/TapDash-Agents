@@ -301,7 +301,7 @@ The tested Hermes version is v0.22.3 (`SUPPORTED_HERMES_VERSION` in `compat.py`;
 `compat.py` were read on v0.22.2 and have not been re-read.
 
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
-configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 UTC; rev 8 is the rollback for the old code only, and rev 10 was a temporary test deny, now deactivated). Every rule for agent
+configured in the withHuman app; live revision 12, active since 2026-10-25 01:37 UTC (adds the Maverick rules, blocks 8 to 14); revision 11 is the rollback (the same rules without Maverick).
 `proto-agents` also requires that agent; blocks run in order and the first to decide ends the pipeline.
 
 | Order | Block | When | Then |
@@ -313,14 +313,21 @@ configured in the withHuman app; live revision 9, active since 2026-10-21 07:30 
 | 5 | `pa-park-quickbooks-read` | server `park:quickbooks`, a read tool (same verbs) | Approve |
 | 6 | `pa-hermes-read` | server `hermes`, one of 12 read-only tools (for example `web_search`, `memory`) | Approve |
 | 7 | `pa-hermes-local-deny` | server `hermes`, one of 12 local machine tools (for example `terminal`, `write_file`) | Deny, until Clean Setup Phase 2 |
-| 8 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
-| 9 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
-| 10 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
-| 11 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
-| 12 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
+| 8 | `pa-park-maverick-auto` | server `park:maverick`, tool is one of the 13 Maverick lookups and drafts (`mcp__wh__maverick__maverick_` + `search_lookups`, `describe_lookup`, `read`, `create_boarding_application`, `update_boarding_application`, `save_boarding_principal`, `update_boarding_fees`, `update_boarding_equipment`, `save_vault_customer`, `save_ach_customer`, `upload_dispute_evidence`, `create_dispute_draft`, `update_ticket`; anchored, so `maverick_read_all` does not match) | Approve |
+| 9 | `pa-park-maverick-note` | server `park:maverick`, tool `maverick_add_boarding_note`, argument `notify_staff` is JSON `false` (missing, `null` or the text `"false"` does not match) | Approve |
+| 10 | `pa-park-maverick-ticket` | server `park:maverick`, tool `maverick_create_ticket` or `maverick_reply_to_ticket`, arguments `notify_merchant` and `attention_merchant` both JSON `false` | Approve |
+| 11 | `pa-gateway-maverick-auto` | server `maverick` (the gateway replay; tool name with or without `maverick__`), the same 13 tools | Approve |
+| 12 | `pa-gateway-maverick-note` | server `maverick`, the same note rule | Approve |
+| 13 | `pa-gateway-maverick-ticket` | server `maverick`, the same ticket rule | Approve |
+| 14 | `mav-gateway-write-bridge` | server `maverick`, any other tool | Webhook block `durable-park-bridge`, same settings as block 2: approve only the replay of an approved park |
+| 15 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
+| 16 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
+| 17 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
+| 18 | `hermes` | other agents, tool name contains `Stripe` | Ask an approver |
+| 19 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
 
 Rev 8 and the earlier approve-all behaviour end when the revision above is activated; activate it before this park
-hook goes live. A tool name missing from rules 6 and 7 falls through to rule 10 (proto-agents) or rule 12, so a person decides. QuickBooks writes that are not money types (TAP2-115) now ask a person at park time and go through the bridge at the gateway.
+hook goes live. A tool name missing from rules 6 and 7 falls through to rule 17 (proto-agents) or rule 19, so a person decides. Every Maverick tool not in rules 8 to 13 (refunds, charges, signatures, deletes, anything that tells someone outside) reaches rule 15 at park time (a person) and rule 14 at the gateway (the bridge). QuickBooks writes that are not money types (TAP2-115) now ask a person at park time and go through the bridge at the gateway.
 
 **Who approves:** the people on the approvers' escalation path in withHuman (today `notify-yaakov-yehuda`, one
 approver). Adding or changing approvers is a change to that path, not to code. **Telling the two asks apart** in the withHuman app: a park
