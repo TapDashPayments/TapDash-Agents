@@ -566,10 +566,42 @@ The park hook answers a blocked call with one of these (the model sees them and 
 | `durable-park: P-... is already waiting for approval in this chat` | Another call of this chat waits for a person or is running; this call's request was cancelled. | Decide the waiting one ([below](#a-chat-says-already-waiting-but-nothing-is-pending-in-withhuman)) |
 | `durable-park: P-... is already <status>; this call was not run again` | The model replayed a call id that was already decided (`allowed`, `refused`, `denied`, ...). | Nothing |
 | `durable-park: another plugin hook could change tool arguments after approval (<names>)` | Something other than durable-park registered a `pre_tool_call` callback (a plugin's hook, a `config.yaml` `hooks:` shell hook or an outbound webhook) or `tool_request` / `tool_execution` middleware (or a registry could not be read: `<hook registry unavailable>`); every call except the exempt ones is refused. | An admin removes it, or lists it in `observer_hooks` after reading its code ([procedure](#allow-another-hook-observer_hooks)) |
-| `durable-park: no chat session; the tool call was refused` | The call came from outside a chat (e.g. `hermes chat -q`). | Use a chat |
+| `durable-park: no chat session; the tool call was refused` | Hermes gave this turn no session id at all. A fail-closed fallback, not a rule about surfaces: Teams, Telegram, the CLI (`hermes chat -q`), the TUI and desktop all get a session id, so all of them go through the park hook and withHuman. | Check the Hermes version (`compat.py`); this message should not appear in normal use |
 | `durable-park: no tool call id; the tool call was refused` | Hermes passed no session id or call id. | Check the Hermes version (`compat.py`) |
 | `durable-park: "tool_call" was NOT run: it reached the approval check still wrapped` | Tool Search is on and the model sent a `tool_call` Hermes could not unwrap: a batch of two or more entries, unparsable `calls`, a core tool such as `clarify`, a `connectors__` name. Nothing ran, no row, nobody asked. | Nothing; the message tells the model to send exactly one entry for a tool `tool_search` lists |
 | `durable-park: could not open an approval request` | An error in the hook (token file unreadable, arguments that are not strict JSON, ledger error; logged as `park hook failed for tool=...`), or durable-park could not load and refuses every call (a setting of the wrong type, logged as `durable-park setting <name> must be a list of strings`, or `durable-park failed to load`). | Read `~/.hermes/logs/agent.log` |
+
+### A CLI turn needs approval (known gap)
+
+**In plain words.** Every surface (Teams, Telegram, the CLI, the TUI, desktop) can use tools, and every call goes
+through withHuman. If withHuman decides at once (an auto-approved read), nothing more is needed: the call runs and
+the ledger row is `allowed` (for example `P-336DFFBB`, a one-shot `hermes chat -q` QuickBooks read). The gap is a call
+that needs a **person**, from a turn that has already ended, like a one-shot `hermes chat -q`:
+
+1. The park hook parks the call (row `parked`) and the CLI turn ends with `PARKED`. The `hermes` process exits.
+2. A person approves in withHuman. The wake reaches the **gateway**, which records `approved` and asks Hermes to tell
+   the CLI session (`wake.py` `_process`: `inject(..., session_key=row.session_key)`, then `mark_notified` if it said yes).
+3. Telling the session is what makes a model call `parked_action_execute`. The executor only runs for the **same**
+   session key (`executor.py:177-178`) and only from an `approved` row (`executor.py:179`). A finished one-shot has no
+   turn left to do that.
+
+What the code says (Hermes files are under `/home/hermes/.hermes/hermes-agent/`; nothing was run, no real park was made):
+
+| Question | Answer from the code |
+|---|---|
+| Does `inject` return False? | **It depends on the key being known to the running gateway.** Messaging gateway path: `hermes_cli/plugins_injection.py:52-67` hands `{session_key, plugin_home}` to the gateway, and `gateway/run_plugin_injection.py:70` first calls `_plugin_session_key_admissible`. |
+| Key unknown to the gateway (the CLI wrote its routing row to `state.db` after the gateway started; the gateway loads that table once, `gateway/session_persistence.py:352-359`) | `_plugin_session_key_admissible` returns True for an unknown key (`run_plugin_injection.py:145-146`, "an unknown key is decided at dispatch"), so the schedule call returns **True** (`:109-110`). Dispatch then finds no entry and returns False (`:195-196`), which is only logged: "Plugin message injection was not routed" (`:107`). `wake.py:240-241` took the True as sent and calls `mark_notified`. The row stays `approved`, announced, never run. The sweep skips it (`durable_park_sweep.py:377` lists only unannounced `approved` rows). |
+| Key known to the gateway (for example after a gateway restart, because `state.db` holds the CLI session with platform `local`) | The entry's platform is `local`, so `_plugin_local_session` (`run_plugin_injection.py:172-186`) needs a **live** session under that key in the gateway's session authority. A finished one-shot has none, so it returns None, `_plugin_session_key_admissible` is False and `inject` returns **False** (`:70-71`). `wake.py:243` logs "left unnotified". The row stays `approved` and unannounced, and the 5-minute sweep re-posts the wake **forever** (`durable_park_sweep.py:377`, no limit or age check in the code I read). |
+| Does the approved action ever run? | Not by anything in the code: only `parked_action_execute` moves `approved` to `executing`, and it needs a model turn in the same session key. A later `hermes chat --resume` of that very session might do it; the code does not say. |
+| Does this block gateway restarts? | Yes, in both cases: `approved` is one of the three statuses the [health check](#health-check) says must be empty before a restart (`ledger.py:22`, `ACTIVE_STATUSES`). Nothing in the code expires an `approved` row: the sweep deletes only `allowed`, `refused` and `cancelled` rows (`ledger.py:273-282`), and the 168 h expiry applies to withHuman requests nobody answered, not to an approved row waiting to run. |
+
+Not settled by the code: which of the two cases a given CLI row hits (the state of the gateway's in-memory session list
+at that moment), and whether `PluginContext._gateway_injection_allowed` and the TUI injector (`plugins_injection.py:36-51`)
+change the result in the gateway process. Nobody has watched this live, so treat the table as a reading of the code.
+
+**The owner has not decided how to handle it.** Do not add a rule that refuses CLI calls: every surface goes
+through withHuman (a closed PR tried that and was wrong). Until a fix is chosen, a one-shot CLI call that withHuman
+sends to a person will leave an `approved` row that blocks restarts.
 
 ### A chat says "already waiting" but nothing is pending in withHuman
 
