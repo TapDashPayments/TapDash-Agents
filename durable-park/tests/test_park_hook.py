@@ -2390,3 +2390,14 @@ def test_maverick_tools_are_form_checked():
     # index 0 stays the QuickBooks money regex (the pipeline's money rule is pinned to it), Maverick is last
     assert DEFAULT_FORM_CHECKED_TOOLS[0].startswith(r"mcp__wh__quickbooks__")
     assert DEFAULT_FORM_CHECKED_TOOLS[-1] == r"mcp__wh__maverick__maverick_[a-z0-9_]+"
+
+
+def test_docusign_demo_writes_are_form_checked():
+    def checked(name):
+        return any(r.fullmatch(name) for r in RISKY)
+
+    for slug in ("docusign", "docusign_demo"):
+        assert checked(f"mcp__wh__{slug}__createEnvelope")
+        assert checked(f"mcp__wh__{slug}__updateEnvelope")
+        assert not checked(f"mcp__wh__{slug}__getEnvelope")
+    assert not checked("mcp__wh__docusign_demoX__createEnvelope")

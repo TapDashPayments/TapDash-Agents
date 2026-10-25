@@ -18,7 +18,7 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel digest | `sha256:dad0c8b52d653b4969161a8ec589cf37048da6eec5747e098969e6a281f0c3e0` (this is also what `:latest` pointed to when pinned; published 2026-10-16) |
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
-| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44` (2026-10-24: QuickBooks + Maverick; built with `build.sh`, not running yet). The running `wh-tunnel` still uses `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` until the Maverick switch-on ([plan, Task 7](../../docs/plans/2026-10-23-maverick-tunnel-integration.md)) |
+| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10` (2026-10-25: QuickBooks + Maverick at e4a2b10; built with `build.sh`, not running yet). The running `wh-tunnel` still uses `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` until the Maverick switch-on ([plan, Task 7](../../docs/plans/2026-10-23-maverick-tunnel-integration.md)) |
 | Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
@@ -36,7 +36,7 @@ the agent's user (`hermes`) can read it (the agent reads the Maverick skills fro
 | Thing | Value |
 | --- | --- |
 | Repo | `TapDashPayments/maverick-mcp` (private) |
-| Pinned commit | the one line in [`deploy/tunnel/maverick-mcp.sha`](../deploy/tunnel/maverick-mcp.sha) (`bf99b4464380564a479e90bc2a3a7135f39ba8d2`, `main` after PR #2) |
+| Pinned commit | the one line in [`deploy/tunnel/maverick-mcp.sha`](../deploy/tunnel/maverick-mcp.sha) (`e4a2b10036a260808c2c18c6a75fdbeaed16b8b2`, `main` after PR #3: notify_staff must be a real true or false) |
 | Checkout on the VM | `/opt/maverick-mcp-src` (owner `root`, mode 0755, files 0644, detached at the pinned commit) |
 | Access | deploy key `proto-agents-root-read` (**read-only**), private key `/root/.ssh/maverick_mcp_deploy` |
 | Skills the agent reads | `/opt/maverick-mcp-src/skills` (`skills.external_dirs`, set by `hermes_mcp.sh`) |
@@ -85,6 +85,31 @@ How it was set up (2026-10-25), and how to redo it on a fresh VM (as `ubuntu`, w
    `__pycache__`), or when the image tag does not end in `-mav-<first 7>`. Then check `--list-approvals`, and update
    the approval rules if a tool was added or changed its approval level.
 
+## Remote gateway servers (Supabase CRM dev, monday, DocuSign demo)
+
+In plain English: three services run their own official MCP servers on the internet. withHuman connects to them with
+a sign-in (OAuth) that Yaakov did once in the withHuman app, so no key for them is on the VM. The agent reaches them
+through the same `wh` gateway as QuickBooks, and every call goes through the same approval rules.
+
+| Slug | URL | Scope (sign-in) | Granted to `proto-agents` | Agent's names |
+| --- | --- | --- | --- | --- |
+| `supabase-crm-dev` | `https://mcp.supabase.com/mcp?project_ref=jtwkxbagxuxjzlurgnim&read_only=true&features=database,docs,debugging` (only the `tapdash-crm-dev` project, read-only) | `crm_dev_readonly` | all 7 tools (`execute_sql` always asks a person) | `mcp__wh__supabase_crm_dev__*` |
+| `monday` | `https://mcp.monday.com/mcp` | `tapdash_agents` (tapdashagents@gmail.com on tapdash.monday.com) | the 33 read tools only | `mcp__wh__monday__*` |
+| `docusign-demo` | `https://mcp-d.docusign.com/mcp` (DocuSign developer/demo) | `demo_user` (integration key `7b89fd67-...`, redirect `https://app.withhuman.ai/auth/gateway/oauth/callback`) | the 22 read tools only | `mcp__wh__docusign_demo__*` |
+
+```mermaid
+flowchart LR
+  agent["Hermes agent<br/>(proto-agents)"] -->|"tool call, parked and asked first"| wh["withHuman gateway<br/>(approval rules, revision 14)"]
+  wh -->|"read: approved; anything else: bridge or a person"| sb["Supabase MCP<br/>(tapdash-crm-dev, read-only)"]
+  wh -->|"same rules"| mo["monday MCP<br/>(tapdash.monday.com)"]
+  wh -->|"same rules"| ds["DocuSign MCP<br/>(demo account)"]
+```
+
+Hermes turns the `-` in a slug into `_` (`supabase-crm-dev` becomes `mcp__wh__supabase_crm_dev__...`); the park server is
+then `park:supabase_crm_dev`, and the bridge pairs a gateway call with its park the same way
+(`bridge/verify.py: hermes_tool_name`). To give the agent a write tool later: grant it in withHuman
+(`set_agent_tool_access`); it then asks a person at park time and goes through the bridge at the gateway, with no rule change.
+
 ## Files
 
 | File | Purpose |
@@ -99,7 +124,7 @@ How it was set up (2026-10-25), and how to redo it on a fresh VM (as `ubuntu`, w
 
 ## The Maverick server in the image
 
-The `maverick` stage of the `Dockerfile` (verified 2026-10-24, image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44`):
+The `maverick` stage of the `Dockerfile` (verified 2026-10-24, image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10`):
 
 1. It uses the pinned tunnel image as the builder too, so the venv's Python is the image's own (`/usr/bin/python3`,
    Python 3.14.8 in tunnel 0.0.369).
@@ -117,7 +142,7 @@ The `maverick` stage of the `Dockerfile` (verified 2026-10-24, image `durable-pa
 Check a built image (no secrets needed, does not touch the running tunnel):
 
 ```bash
-sudo docker run --rm --entrypoint maverick-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44 --list-approvals
+sudo docker run --rm --entrypoint maverick-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10 --list-approvals
 ```
 
 Verified 2026-10-24: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you` (a person approves).
@@ -200,7 +225,7 @@ credentials.
 
 Verified result (dummy credentials, 2026-10-19): `quickbooks: ok, 142 tools`
 (the server's README claims 145; `tools/list` over MCP returns 142).
-With the Maverick server (image `...-mav-bf99b44`, dummy QuickBooks values and the Maverick placeholders,
+With the Maverick server (image `...-mav-e4a2b10`, dummy QuickBooks values and the Maverick placeholders,
 2026-10-24): `maverick: ok, 42 tools` and `quickbooks: ok, 142 tools`.
 
 ## Never run these (they print the secrets)
@@ -471,8 +496,8 @@ is **unverified** on the live tenant.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline)**
 
-The live entry pipeline is **revision 12** (active since 2026-10-25 01:37 UTC; it adds the seven Maverick blocks). Its source of truth is the reviewed
-file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (19 blocks), and
+The live entry pipeline is **revision 14** (active since 2026-10-25 02:06 UTC; revision 12 added the Maverick blocks, 13 and 14 the three remote servers). Its source of truth is the reviewed
+file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (25 blocks), and
 [architecture section 1](architecture.md#1-system-map) has the same list as a table. Do not rebuild it from this
 page: save the file's blocks as a new entry revision in withHuman and activate it (a save activates at once). Blocks
 run in order and the first one that decides ends the pipeline. Every block for `proto-agents` also tests the agent
@@ -514,7 +539,7 @@ holds when withHuman's own API is slow or down while the bridge asks it: the bri
 ### Known risks / unverified
 
 - Settled live: argument rewrites by the gateway (`withhuman_scope` added, `2.0` sent as `2`) are absorbed by
-  `ledger.normalize_args`; park requests are matched by block 1 of revision 12 (the money regex on the Hermes tool name).
+  `ledger.normalize_args`; park requests are matched by block 1 of revision 14 (the money regex on the Hermes tool name).
 - The bridge relies on withHuman's request list (`GET /api/v1/requests`: `q` is a substring of the tool name, newest
   first, `limit` up to 200) and on the consumption record (`consumption.consumed_at`); both were read in withHuman's
   docs and source and verified live on 2026-10-22 ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).
@@ -560,7 +585,8 @@ then restarts `hermes-gateway` and waits until `mcp__wh__quickbooks__get_company
 
 The `include` filter also keeps the gateway's built-in `withhuman__*` management tools away from the model.
 Hermes tool names are `mcp__wh__<slug>__<tool>`, so they match the plugin's risky patterns and the bridge's
-`mcp__wh__<server>__<tool>`. The agent tool policy only admits `mcp__wh__quickbooks__*`, and `hermes_mcp.sh`
+`mcp__wh__<server>__<tool>`. The agent tool policy admits `mcp__wh__quickbooks__*`, `mcp__wh__maverick__*`,
+`mcp__wh__supabase_crm_dev__*`, `mcp__wh__monday__*` and `mcp__wh__docusign_demo__*`, and `hermes_mcp.sh`
 fails (stopping the gateway) if any other `mcp__wh__` tool registers.
 
 Live check (manual): `DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py`. The pipeline

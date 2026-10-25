@@ -12,7 +12,8 @@
 #       headers:
 #         Authorization: Bearer ${DURABLE_PARK_WH_TOKEN}
 #       trust: full                 # `untrusted` would block the plugin's dispatch_tool replay (probe report)
-#       tools: {include: ["quickbooks__*", "maverick__*"], resources: false, prompts: false}   # QuickBooks + Maverick
+#       tools: {include: ["quickbooks__*", "maverick__*", "supabase-crm-dev__*", "monday__*", "docusign-demo__*"],
+#               resources: false, prompts: false}
 #       enabled: true
 #
 # The token is never written to config.yaml or .env: Hermes's `command` secret source
@@ -32,11 +33,12 @@ SECRETS_HELPER=/opt/durable-park/libexec/hermes-secrets
 TOKEN_VAR=DURABLE_PARK_WH_TOKEN
 SERVER=wh
 GATEWAY_URL=https://app.withhuman.ai/gateway/mcp
-TOOL_INCLUDE='["quickbooks__*", "maverick__*"]'
+# Gateway tool names as withHuman lists them (Hermes folds "-" into "_" when it registers them)
+TOOL_INCLUDE='["quickbooks__*", "maverick__*", "supabase-crm-dev__*", "monday__*", "docusign-demo__*"]'
 EXPECTED_TOOL=mcp__wh__quickbooks__get_company_info
 EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read
 # Only QuickBooks and Maverick tools (also ALLOWED_TOOL_PREFIXES in deploy/hermes_tool_policy.py)
-ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick)__'
+ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick|supabase_crm_dev|monday|docusign_demo)__'
 # The Maverick skills (how-to notes the agent reads with skill_view) come from the pinned read-only checkout.
 MAVERICK_SKILLS_DIR=/opt/maverick-mcp-src/skills
 

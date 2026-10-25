@@ -792,6 +792,624 @@
       }
     },
     {
+      "id": "pa-park-supabase-read",
+      "name": "Park: supabase-crm-dev read-only tools",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "6024a60a-4a2a-4244-9218-4e8f2ecc69e5",
+          "all": [
+            {
+              "id": "59f7be66-4b51-4dd4-b1fd-95ad914dd362",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "7953e846-c19a-4cfc-b397-2911e626921d",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:supabase_crm_dev"
+            },
+            {
+              "id": "022acc7e-ed37-4212-bb31-3162cfced29e",
+              "field": "/request/tool",
+              "operator": "in",
+              "value": [
+                "mcp__wh__supabase_crm_dev__list_tables",
+                "mcp__wh__supabase_crm_dev__list_migrations",
+                "mcp__wh__supabase_crm_dev__list_extensions",
+                "mcp__wh__supabase_crm_dev__get_advisors",
+                "mcp__wh__supabase_crm_dev__query_logs",
+                "mcp__wh__supabase_crm_dev__search_docs"
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-supabase-read-outcome",
+            "name": "Park: supabase-crm-dev read-only tools",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Read-only supabase-crm-dev tool on the allowlist; the gateway decides the real call again."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-park-monday-read",
+      "name": "Park: monday read-only tools",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "d4cb5a5b-101f-482f-8ebf-c4e39a7aca28",
+          "all": [
+            {
+              "id": "ed442308-3e03-4656-99fa-b79f55a711ec",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "da9b3cba-84f5-4c36-bcb3-f52cedb28c64",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:monday"
+            },
+            {
+              "id": "7f1ffef3-9ab2-42ac-bbf9-8c4f700dd1de",
+              "field": "/request/tool",
+              "operator": "in",
+              "value": [
+                "mcp__wh__monday__agent_catalog",
+                "mcp__wh__monday__all_widgets_schema",
+                "mcp__wh__monday__board_insights",
+                "mcp__wh__monday__explore_meetings",
+                "mcp__wh__monday__get_action",
+                "mcp__wh__monday__get_activity_logs",
+                "mcp__wh__monday__get_assets",
+                "mcp__wh__monday__get_automation_runs",
+                "mcp__wh__monday__get_automation_statistics",
+                "mcp__wh__monday__get_board_activity",
+                "mcp__wh__monday__get_board_info",
+                "mcp__wh__monday__get_board_items_page",
+                "mcp__wh__monday__get_column_type_info",
+                "mcp__wh__monday__get_form",
+                "mcp__wh__monday__get_graphql_schema",
+                "mcp__wh__monday__get_meetings_content",
+                "mcp__wh__monday__get_monday_dev_sprints_boards",
+                "mcp__wh__monday__get_monday_knowledge",
+                "mcp__wh__monday__get_run_once_trigger_entities",
+                "mcp__wh__monday__get_sprint_summary",
+                "mcp__wh__monday__get_sprints_metadata",
+                "mcp__wh__monday__get_type_details",
+                "mcp__wh__monday__get_updates",
+                "mcp__wh__monday__get_user_context",
+                "mcp__wh__monday__get_workflow_run_once_status",
+                "mcp__wh__monday__list_actions",
+                "mcp__wh__monday__list_automations",
+                "mcp__wh__monday__list_users_and_teams",
+                "mcp__wh__monday__list_workspaces",
+                "mcp__wh__monday__read_docs",
+                "mcp__wh__monday__search",
+                "mcp__wh__monday__search_meetings_content",
+                "mcp__wh__monday__workspace_info"
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-monday-read-outcome",
+            "name": "Park: monday read-only tools",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Read-only monday tool on the allowlist; the gateway decides the real call again."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "pa-park-docusign-read",
+      "name": "Park: docusign-demo read-only tools",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "36e4fd9c-32c5-49f8-9a13-e68ff3cc1d59",
+          "all": [
+            {
+              "id": "6be11b58-aaa5-4a18-a4a6-844833b55c2d",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "637af87d-98b8-4f3f-be98-490f0efaa76b",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "park:docusign_demo"
+            },
+            {
+              "id": "fe6637ba-0711-49d9-84a0-a72a82b7250a",
+              "field": "/request/tool",
+              "operator": "in",
+              "value": [
+                "mcp__wh__docusign_demo__getAccount",
+                "mcp__wh__docusign_demo__getAgreementDetails",
+                "mcp__wh__docusign_demo__getAllAgreements",
+                "mcp__wh__docusign_demo__getBillingPlan",
+                "mcp__wh__docusign_demo__getBrand",
+                "mcp__wh__docusign_demo__getBrands",
+                "mcp__wh__docusign_demo__getClmWorkflowDefinitions",
+                "mcp__wh__docusign_demo__getEnvelope",
+                "mcp__wh__docusign_demo__getEnvelopes",
+                "mcp__wh__docusign_demo__getTabGroups",
+                "mcp__wh__docusign_demo__getTemplates",
+                "mcp__wh__docusign_demo__getUser",
+                "mcp__wh__docusign_demo__getUserInfo",
+                "mcp__wh__docusign_demo__getUsers",
+                "mcp__wh__docusign_demo__getWorkflowInstance",
+                "mcp__wh__docusign_demo__getWorkflowInstancesList",
+                "mcp__wh__docusign_demo__getWorkflowTriggerRequirements",
+                "mcp__wh__docusign_demo__getWorkflowsList",
+                "mcp__wh__docusign_demo__listBillingPlans",
+                "mcp__wh__docusign_demo__listEnvelopeDocuments",
+                "mcp__wh__docusign_demo__listRecipients",
+                "mcp__wh__docusign_demo__searchDocusignDocs"
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "pa-park-docusign-read-outcome",
+            "name": "Park: docusign-demo read-only tools",
+            "type": "outcome",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "outcome": "approve",
+              "reason": "Read-only docusign-demo tool on the allowlist; the gateway decides the real call again."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "gw-supabase",
+      "name": "proto-agents supabase-crm-dev",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "38c0af41-a924-4840-bfe5-426752035983",
+          "all": [
+            {
+              "id": "7adafafd-f5b1-4456-86a6-24b3f304d132",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "d78ee69f-5910-451e-8f89-43dea6578be5",
+              "any": [
+                {
+                  "id": "a5e156a7-c5b1-4990-b2d5-d3b9e8d0f7bb",
+                  "field": "/request/server",
+                  "operator": "equals",
+                  "value": "supabase-crm-dev"
+                },
+                {
+                  "id": "3b84c1a7-ad07-4e91-91ce-56214cdccc18",
+                  "field": "/request/tool",
+                  "operator": "starts_with",
+                  "value": [
+                    "supabase-crm-dev__"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "gw-supabase-read",
+            "name": "Gateway supabase-crm-dev: read-only tools",
+            "type": "branch",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "when": {
+                "id": "a4e9cbe3-e97a-4e4c-9925-d9676ff2bb47",
+                "field": "/request/tool",
+                "operator": "in",
+                "value": [
+                  "list_tables",
+                  "list_migrations",
+                  "list_extensions",
+                  "get_advisors",
+                  "query_logs",
+                  "search_docs",
+                  "supabase-crm-dev__list_tables",
+                  "supabase-crm-dev__list_migrations",
+                  "supabase-crm-dev__list_extensions",
+                  "supabase-crm-dev__get_advisors",
+                  "supabase-crm-dev__query_logs",
+                  "supabase-crm-dev__search_docs"
+                ]
+              },
+              "blocks": [
+                {
+                  "id": "gw-supabase-read-outcome",
+                  "name": "Gateway supabase-crm-dev: read-only tools",
+                  "type": "outcome",
+                  "enabled": true,
+                  "timeout": "50ms",
+                  "max_attempts": 1,
+                  "config": {
+                    "outcome": "approve",
+                    "reason": "Read-only supabase-crm-dev tool on the allowlist; nothing is written or sent."
+                  }
+                }
+              ],
+              "reason": ""
+            }
+          },
+          {
+            "id": "gw-supabase-bridge-webhook",
+            "name": "durable-park-bridge",
+            "type": "webhook",
+            "enabled": true,
+            "timeout": "5s",
+            "max_attempts": 3,
+            "config": {
+              "endpoint_key": "durable-park-bridge",
+              "allowed_outcomes": [
+                "human",
+                "approve"
+              ],
+              "include": {
+                "agent_reasoning": false,
+                "context": false,
+                "previous_metadata": false
+              },
+              "reason": "durable-park bridge: approves only a call matching an approved park; anything else goes to Yaakov.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ],
+        "reason": ""
+      }
+    },
+    {
+      "id": "gw-monday",
+      "name": "proto-agents monday",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "8dbe68b4-6a2e-4986-b287-ce97bf1f9f39",
+          "all": [
+            {
+              "id": "43772c85-4615-445d-a6df-7d0719df8ea3",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "d05ca7e0-9567-4d0c-a3da-b9a82af8a942",
+              "any": [
+                {
+                  "id": "e6e306fb-9ed8-420d-a97b-ae45d452b80e",
+                  "field": "/request/server",
+                  "operator": "equals",
+                  "value": "monday"
+                },
+                {
+                  "id": "d8afe6f2-f896-4bc9-a29d-dbe19db7062e",
+                  "field": "/request/tool",
+                  "operator": "starts_with",
+                  "value": [
+                    "monday__"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "gw-monday-read",
+            "name": "Gateway monday: read-only tools",
+            "type": "branch",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "when": {
+                "id": "efefcb5b-1894-4c3c-af6d-3b245ce869d0",
+                "field": "/request/tool",
+                "operator": "in",
+                "value": [
+                  "agent_catalog",
+                  "all_widgets_schema",
+                  "board_insights",
+                  "explore_meetings",
+                  "get_action",
+                  "get_activity_logs",
+                  "get_assets",
+                  "get_automation_runs",
+                  "get_automation_statistics",
+                  "get_board_activity",
+                  "get_board_info",
+                  "get_board_items_page",
+                  "get_column_type_info",
+                  "get_form",
+                  "get_graphql_schema",
+                  "get_meetings_content",
+                  "get_monday_dev_sprints_boards",
+                  "get_monday_knowledge",
+                  "get_run_once_trigger_entities",
+                  "get_sprint_summary",
+                  "get_sprints_metadata",
+                  "get_type_details",
+                  "get_updates",
+                  "get_user_context",
+                  "get_workflow_run_once_status",
+                  "list_actions",
+                  "list_automations",
+                  "list_users_and_teams",
+                  "list_workspaces",
+                  "read_docs",
+                  "search",
+                  "search_meetings_content",
+                  "workspace_info",
+                  "monday__agent_catalog",
+                  "monday__all_widgets_schema",
+                  "monday__board_insights",
+                  "monday__explore_meetings",
+                  "monday__get_action",
+                  "monday__get_activity_logs",
+                  "monday__get_assets",
+                  "monday__get_automation_runs",
+                  "monday__get_automation_statistics",
+                  "monday__get_board_activity",
+                  "monday__get_board_info",
+                  "monday__get_board_items_page",
+                  "monday__get_column_type_info",
+                  "monday__get_form",
+                  "monday__get_graphql_schema",
+                  "monday__get_meetings_content",
+                  "monday__get_monday_dev_sprints_boards",
+                  "monday__get_monday_knowledge",
+                  "monday__get_run_once_trigger_entities",
+                  "monday__get_sprint_summary",
+                  "monday__get_sprints_metadata",
+                  "monday__get_type_details",
+                  "monday__get_updates",
+                  "monday__get_user_context",
+                  "monday__get_workflow_run_once_status",
+                  "monday__list_actions",
+                  "monday__list_automations",
+                  "monday__list_users_and_teams",
+                  "monday__list_workspaces",
+                  "monday__read_docs",
+                  "monday__search",
+                  "monday__search_meetings_content",
+                  "monday__workspace_info"
+                ]
+              },
+              "blocks": [
+                {
+                  "id": "gw-monday-read-outcome",
+                  "name": "Gateway monday: read-only tools",
+                  "type": "outcome",
+                  "enabled": true,
+                  "timeout": "50ms",
+                  "max_attempts": 1,
+                  "config": {
+                    "outcome": "approve",
+                    "reason": "Read-only monday tool on the allowlist; nothing is written or sent."
+                  }
+                }
+              ],
+              "reason": ""
+            }
+          },
+          {
+            "id": "gw-monday-bridge-webhook",
+            "name": "durable-park-bridge",
+            "type": "webhook",
+            "enabled": true,
+            "timeout": "5s",
+            "max_attempts": 3,
+            "config": {
+              "endpoint_key": "durable-park-bridge",
+              "allowed_outcomes": [
+                "human",
+                "approve"
+              ],
+              "include": {
+                "agent_reasoning": false,
+                "context": false,
+                "previous_metadata": false
+              },
+              "reason": "durable-park bridge: approves only a call matching an approved park; anything else goes to Yaakov.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ],
+        "reason": ""
+      }
+    },
+    {
+      "id": "gw-docusign",
+      "name": "proto-agents docusign-demo",
+      "type": "branch",
+      "enabled": true,
+      "timeout": "50ms",
+      "max_attempts": 1,
+      "config": {
+        "when": {
+          "id": "730213f6-c077-4a0e-a223-a7256f1d9b71",
+          "all": [
+            {
+              "id": "ef6ebfae-4080-4332-94b3-6f3942f8aa24",
+              "field": "/agent/slug",
+              "operator": "equals",
+              "value": "proto-agents"
+            },
+            {
+              "id": "2d151148-abae-41d9-af11-a4ae9bbe950b",
+              "any": [
+                {
+                  "id": "6246d039-9516-489a-ae69-905d23ea5f25",
+                  "field": "/request/server",
+                  "operator": "equals",
+                  "value": "docusign-demo"
+                },
+                {
+                  "id": "22aa3019-7347-477a-916e-0f0da1fbcdae",
+                  "field": "/request/tool",
+                  "operator": "starts_with",
+                  "value": [
+                    "docusign-demo__"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "blocks": [
+          {
+            "id": "gw-docusign-read",
+            "name": "Gateway docusign-demo: read-only tools",
+            "type": "branch",
+            "enabled": true,
+            "timeout": "50ms",
+            "max_attempts": 1,
+            "config": {
+              "when": {
+                "id": "041e282f-fc7c-40e6-9c6d-e7623f0a4242",
+                "field": "/request/tool",
+                "operator": "in",
+                "value": [
+                  "getAccount",
+                  "getAgreementDetails",
+                  "getAllAgreements",
+                  "getBillingPlan",
+                  "getBrand",
+                  "getBrands",
+                  "getClmWorkflowDefinitions",
+                  "getEnvelope",
+                  "getEnvelopes",
+                  "getTabGroups",
+                  "getTemplates",
+                  "getUser",
+                  "getUserInfo",
+                  "getUsers",
+                  "getWorkflowInstance",
+                  "getWorkflowInstancesList",
+                  "getWorkflowTriggerRequirements",
+                  "getWorkflowsList",
+                  "listBillingPlans",
+                  "listEnvelopeDocuments",
+                  "listRecipients",
+                  "searchDocusignDocs",
+                  "docusign-demo__getAccount",
+                  "docusign-demo__getAgreementDetails",
+                  "docusign-demo__getAllAgreements",
+                  "docusign-demo__getBillingPlan",
+                  "docusign-demo__getBrand",
+                  "docusign-demo__getBrands",
+                  "docusign-demo__getClmWorkflowDefinitions",
+                  "docusign-demo__getEnvelope",
+                  "docusign-demo__getEnvelopes",
+                  "docusign-demo__getTabGroups",
+                  "docusign-demo__getTemplates",
+                  "docusign-demo__getUser",
+                  "docusign-demo__getUserInfo",
+                  "docusign-demo__getUsers",
+                  "docusign-demo__getWorkflowInstance",
+                  "docusign-demo__getWorkflowInstancesList",
+                  "docusign-demo__getWorkflowTriggerRequirements",
+                  "docusign-demo__getWorkflowsList",
+                  "docusign-demo__listBillingPlans",
+                  "docusign-demo__listEnvelopeDocuments",
+                  "docusign-demo__listRecipients",
+                  "docusign-demo__searchDocusignDocs"
+                ]
+              },
+              "blocks": [
+                {
+                  "id": "gw-docusign-read-outcome",
+                  "name": "Gateway docusign-demo: read-only tools",
+                  "type": "outcome",
+                  "enabled": true,
+                  "timeout": "50ms",
+                  "max_attempts": 1,
+                  "config": {
+                    "outcome": "approve",
+                    "reason": "Read-only docusign-demo tool on the allowlist; nothing is written or sent."
+                  }
+                }
+              ],
+              "reason": ""
+            }
+          },
+          {
+            "id": "gw-docusign-bridge-webhook",
+            "name": "durable-park-bridge",
+            "type": "webhook",
+            "enabled": true,
+            "timeout": "5s",
+            "max_attempts": 3,
+            "config": {
+              "endpoint_key": "durable-park-bridge",
+              "allowed_outcomes": [
+                "human",
+                "approve"
+              ],
+              "include": {
+                "agent_reasoning": false,
+                "context": false,
+                "previous_metadata": false
+              },
+              "reason": "durable-park bridge: approves only a call matching an approved park; anything else goes to Yaakov.",
+              "escalation_path": "notify-yaakov-yehuda"
+            }
+          }
+        ],
+        "reason": ""
+      }
+    },
+    {
       "id": "pa-mcp-human",
       "name": "New MCP server",
       "type": "branch",
