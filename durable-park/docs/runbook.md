@@ -1570,8 +1570,12 @@ allowed toolsets live in one root-owned file, `/etc/durable-park/allowed_toolset
    PY
    ```
 2. As admin, add the toolset's name on its own line (for example `web`), save.
-   `terminal`, `file`, `code_execution`, `delegation`, `cronjob`, `skills` and `computer_use` are refused until
+   `terminal`, `file`, `code_execution`, `delegation`, `cronjob` and `computer_use` are refused until
    Clean Setup Phase 2; a typo is refused too (exit 2, message on stderr, nothing changed).
+   `skills` may be opened (the agent reads the Maverick how-to notes with `skills_list` and `skill_view`), but only
+   while the entry pipeline denies `skill_manage`, which writes skill files: `check` reads
+   `deploy/withhuman/entry-pipeline.json` and fails (`skills: LEAK ...`) if any block before the deny
+   (`pa-hermes-local-deny`) could approve or ask about a `skill_manage` call. Keep `skill_manage` in that block.
    Not Phase-2-gated but still risky: `desktop_ui`, `catalog`, `browser-cdp`, `a2a`, `connections`; open them
    through the file only after their pipeline rule exists ([spec section 4.4](../../docs/specs/2026-10-21-all-tools-withhuman-design.md)).
    An allow file the `hermes` user cannot read (for example a pre-existing one with mode 600 root:root) makes

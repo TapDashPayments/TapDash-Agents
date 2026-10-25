@@ -61,6 +61,7 @@ import datetime
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -101,10 +102,67 @@ FORBIDDEN_TOOLSETS = [
     "yuanbao",
 ]
 # Toolsets with local file / command / code / process access, agent spawning or scheduling: the ledger-bypass
-# set. Refused in the allow file until Clean Setup Phase 2. All seven are real Hermes v0.22.2 toolset names
-# (toolsets.py:96,102,103,117,122,155,156).
-PHASE2_TOOLSETS = frozenset({"terminal", "file", "code_execution", "delegation", "cronjob", "skills",
-                             "computer_use"})
+# set. Refused in the allow file until Clean Setup Phase 2. All six are real Hermes v0.22.2 toolset names
+# (toolsets.py:96,102,103,117,122,156). `skills` left this set for the Maverick skills (2026-10-25): it bundles
+# skills_list and skill_view (read the how-to notes) with skill_manage (writes skill files), so it may be opened
+# only while the withHuman entry pipeline denies skill_manage before anything could approve it
+# (`skill_manage_problem`, checked by `check`).
+PHASE2_TOOLSETS = frozenset({"terminal", "file", "code_execution", "delegation", "cronjob", "computer_use"})
+
+# The entry pipeline this repo deploys (withHuman), read to prove skill_manage is denied while `skills` is open.
+PIPELINE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "withhuman", "entry-pipeline.json")
+# What a skill_manage call looks like to the pipeline (the park hook's request for a Hermes local tool).
+SKILL_MANAGE_REQUEST = {"/agent/slug": "proto-agents", "/request/server": "hermes", "/request/tool": "skill_manage"}
+
+
+def _may_match(cond: dict, request: dict) -> bool:
+    """Whether a pipeline condition could match *request*. Anything not understood counts as a match (fail closed)."""
+    if "all" in cond:
+        return all(_may_match(c, request) for c in cond["all"])
+    if "any" in cond:
+        return any(_may_match(c, request) for c in cond["any"])
+    field, op, value = cond.get("field"), cond.get("operator"), cond.get("value")
+    if field not in request:
+        return True
+    actual = request[field]
+    if op == "equals":
+        return actual == value
+    if op == "in" and isinstance(value, list):
+        return actual in value
+    if op == "regex" and isinstance(value, str):
+        try:
+            return re.search(value, actual) is not None
+        except re.error:
+            return True
+    return True
+
+
+def skill_manage_problem(path: str | None = None) -> str | None:
+    """None when the pipeline file's first block that could take a skill_manage call denies it; else the problem."""
+    path = path or PIPELINE_FILE
+    try:
+        with open(path, encoding="utf-8") as handle:
+            blocks = json.load(handle)["blocks"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return f"cannot read the pipeline file {path}: {exc}"
+    for block in blocks:
+        if not block.get("enabled", True):
+            continue
+        kind, config = block.get("type"), block.get("config") or {}
+        if kind == "branch":
+            if not _may_match(config.get("when") or {}, SKILL_MANAGE_REQUEST):
+                continue
+            inner = [b for b in config.get("blocks") or [] if b.get("enabled", True)]
+            first = inner[0] if inner else {}
+            outcome = (first.get("config") or {}).get("outcome") if first.get("type") == "outcome" else first.get("type")
+        elif kind == "outcome":
+            outcome = config.get("outcome")
+        else:
+            outcome = kind
+        if outcome == "deny":
+            return None
+        return f"skill_manage would reach block {block.get('id')} ({outcome}) before any deny"
+    return "no block in the pipeline file denies skill_manage"
 
 
 def read_allowed(path: str) -> list[str]:
@@ -375,6 +433,11 @@ def check(allowed: list[str] | None = None, problems: list[str] | None = None) -
         behind = sorted(set(catalog) - set(visible))  # hidden from the model, reachable through tool_call
         hidden = f"  (behind the Tool Search bridge: {', '.join(behind)})" if behind else ""
         print(f"{platform}: {', '.join(visible) or '(none)'}{hidden}" + "".join(f"  {p}" for p in found))
+    if "skills" in allowed:
+        problem = skill_manage_problem()
+        if problem:
+            problems.append(f"skills: {problem} (skill_manage must stay denied while skills is open)")
+            print(f"skills: LEAK {problem}")
     for posture, enabled in POSTURES.items():
         for platform in ("cli", "tui", "desktop", "acp", "telegram"):
             found = tool_problems(effective_tools(platform, enabled, assemble=False),

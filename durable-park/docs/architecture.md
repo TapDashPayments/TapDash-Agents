@@ -58,7 +58,8 @@ State on 2026-10-22:
   read-only, so it lets a hijacked agent list requests, never approve one. `deploy/bridge_check.py` verifies all of
   this at every deploy, and the deploy stops if it fails.
 - **Tool lockdown (v1): a configuration guard.** The agent can reach only `clarify`, `parked_action_execute`,
-  `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*`, plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`)
+  `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*` (and, once `skills` is opened in the allow file, `skills_list` and
+  `skill_view`; `skill_manage` stays denied by the pipeline and `check` proves it), plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`)
   while Tool Search is on (it has been on since 2026-10-21 19:59 UTC). `deploy/hermes_tool_policy.py` applies it on
   every platform key (re-applied on proto-agents 2026-10-21 03:16 UTC as a stopgap; `hermes_tool_policy.py check`
   prints the key count and ends `ok`). The agent has no file, terminal or code tools, and Hermes's own approvals are
