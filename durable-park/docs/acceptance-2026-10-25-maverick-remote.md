@@ -31,9 +31,10 @@ Everything else asks Yaakov first. Money calls on any server always ask a person
 | 2 | 02:42 | List Supabase tables | P-525A9F56 (and 2 repeats) | Ran without asking (4111 characters back) |
 | 3 | 02:43 | List Monday workspaces | P-17847329 | Ran without asking |
 | 4 | 02:44 | DocuSign user, account, billing plans | P-9B5C2DA8, P-9799E1D4, P-F7550A3D | Ran without asking |
-| 5 | 02:45 | Read a Maverick record | P-946B2479 | Allowed; the call failed at once, as expected with the placeholder address (the next ledger row is 6 s later). The server's message said "Maverick did not answer in 30 s. Nothing changed.": it uses that wording for every network error, which is misleading here (fixed in `maverick-mcp`, see below). The agent then read its Maverick skill (`skills_list`, `skill_view`: allowed) and tried `skill_manage` (P-CEC69529: refused by withHuman, as designed) |
+| 5 | 02:46 | Read a Maverick record | P-946B2479 | Allowed. The call then failed at once, as expected with the placeholder address (the next ledger row is 6 s later). The message said "Maverick did not answer in 30 s. Nothing changed.", which is the wrong reason (see Still open) |
+| 5b | 02:46 | (the agent, on its own) read and then tried to edit its Maverick skill | P-89326D56, P-68064834, P-CEC69529 | Reading (`skills_list`, `skill_view`) was allowed. Editing (`skill_manage`) was refused by withHuman, as designed |
 | 6 | 02:47 | Refund Maverick transaction 1, $1.00 | P-4296295C | **Parked; asked Yaakov.** Nothing ran. Waiting for Yaakov to deny it in withHuman |
-| 7 | 02:54 | Revision 15 check: Monday workspaces, Supabase tables, DocuSign user | P-D9A3A465, P-C22078C8, P-AA4FB8B7 | Ran without asking under revision 15 |
+| 7 | 02:54:37 (after revision 15 went live at 02:54:06) | Revision 15 check: Monday workspaces, Supabase tables, DocuSign user | P-D9A3A465, P-C22078C8, P-AA4FB8B7 | Ran without asking under revision 15 |
 
 The Supabase project `tapdash-crm-dev` is a new, empty dev project (only Supabase's own `auth`, `storage`, `vault` and
 `realtime` tables). It is not the real CRM.
@@ -42,7 +43,7 @@ The Supabase project `tapdash-crm-dev` is a new, empty dev project (only Supabas
 
 Revision 15 (active 02:54 UTC) changes only blocks 19 to 21 (`gw-supabase`, `gw-monday`, `gw-docusign`): each now
 matches on the server name alone. Revision 14 also matched any tool name starting with `<server>__`, which a call on a
-different server could have used (PR 54 review finding M1). Test 7 shows the reads still run. Rollback: revision 14.
+different server could have used (a reviewer's finding on pull request 54). Test 7 shows the reads still run. Rollback: revision 14.
 
 ## Still open
 

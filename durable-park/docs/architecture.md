@@ -306,7 +306,7 @@ The tested Hermes version is v0.22.3 (`SUPPORTED_HERMES_VERSION` in `compat.py`;
 `compat.py` were read on v0.22.2 and have not been re-read.
 
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
-configured in the withHuman app; live revision 15, active since 2026-10-25 02:54 UTC. Revision 12 added the Maverick rules (blocks 8 to 14); revision 13 (made in the app on 2026-10-25) added the three remote servers' gateway rules with a direct ask for writes; revision 14 adds their park read rules (blocks 16 to 18) and sends their other gateway calls to the bridge (blocks 19 to 21); revision 15 makes blocks 19 to 21 match on the server name only (it drops a tool-name fallback, review finding M1 of PR 54). Rollback: revision 14, then 13, then 12.
+configured in the withHuman app; live revision 15, active since 2026-10-25 02:54 UTC. Revision 12 added the Maverick rules (blocks 8 to 14); revision 13 (made in the app on 2026-10-25) added the three remote servers' gateway rules with a direct ask for writes; revision 14 adds their park read rules (blocks 16 to 18) and sends their other gateway calls to the bridge (blocks 19 to 21); revision 15 makes blocks 19 to 21 match on the server name only (it drops a tool-name fallback; a reviewer's finding on pull request 54). Rollback: revision 14, then 13, then 12.
 `proto-agents` also requires that agent; blocks run in order and the first to decide ends the pipeline.
 
 | Order | Block | When | Then |

@@ -111,6 +111,9 @@ then `park:supabase_crm_dev`, and the bridge pairs a gateway call with its park 
 (`set_agent_tool_access`); it then asks a person at park time and goes through the bridge at the gateway, with no rule change.
 To give it another **read** tool: grant it and add it to both read lists for that server (park and gateway) in
 `deploy/withhuman/entry-pipeline.json` (the tests check the two lists agree), then save the file as a new revision.
+The gateway read lists name each tool twice, bare (`list_tables`) and with the server in front
+(`supabase-crm-dev__list_tables`), on purpose: like the QuickBooks rule (`^(quickbooks__)?`), they accept either form the
+gateway may send. The outer rule already checks the server, so the second form widens nothing.
 
 What the reads can show the agent (and the full Langfuse traces): monday holds live business data (items, people,
 meeting summaries and transcripts, file links); DocuSign agreement details can hold personal data; Supabase
