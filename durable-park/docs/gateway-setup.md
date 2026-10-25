@@ -18,7 +18,7 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel digest | `sha256:dad0c8b52d653b4969161a8ec589cf37048da6eec5747e098969e6a281f0c3e0` (this is also what `:latest` pointed to when pinned; published 2026-10-16) |
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
-| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` |
+| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44` (2026-10-24: QuickBooks + Maverick; built with `build.sh`, not running yet). The running `wh-tunnel` still uses `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` until the Maverick switch-on ([plan, Task 7](../../docs/plans/2026-10-23-maverick-tunnel-integration.md)) |
 | Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
@@ -75,16 +75,46 @@ How it was set up (2026-10-24), and how to redo it on a fresh VM:
 1. In a TapDash-Agents worktree, write the new commit into `maverick-mcp.sha` (one line, 40 characters), and change
    the `-mav-<first 7>` part of the image tag in `docker-compose.yml` (both services) and in the docs.
 2. As `hermes`: `git -C /home/hermes/maverick-mcp fetch origin && git -C /home/hermes/maverick-mcp checkout <new sha>`.
-3. Rebuild the tunnel image, and update the approval rules if a tool was added or changed its approval level.
+3. Rebuild with `sudo bash build.sh` (below). It refuses when the checkout's commit differs from the file, when the
+   checkout has any local change (also ignored files such as `__pycache__`), or when the image tag does not end in
+   `-mav-<first 7>`. Then check `--list-approvals`, and update the approval rules if a tool was added or changed its
+   approval level.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman` |
+| `deploy/tunnel/Dockerfile` | `FROM` the pinned tunnel image; builds the Intuit server (`npm ci` -> `tsc`) at the pinned SHA, installs it at `/opt/qbo-mcp`, symlinks `/usr/local/bin/qbo-mcp-server`, creates `/data` owned by `withhuman`. Stage `maverick`: builds the Maverick server into the venv `/opt/maverick-mcp` (see [The Maverick server in the image](#the-maverick-server-in-the-image)), launcher `/usr/local/bin/maverick-mcp-server`, creates `/data/maverick-inbox` (`withhuman`, 0700) |
+| `deploy/tunnel/build.sh` | the only way to build: checks the Maverick checkout (pinned commit, no local changes) and the image tag, then runs `docker compose build`. Never starts or stops the tunnel |
+| `deploy/tunnel/maverick-mcp.sha` | the pinned `maverick-mcp` commit (one line) |
 | `deploy/tunnel/tunnel.yaml` | one server `quickbooks`: `command: ["qbo-mcp-server"]` + env |
-| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), named volume `durable-park-qbo-data` at `/data`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, `env_file: /etc/durable-park/tunnel.env`; profile service `check` |
+| `deploy/tunnel/docker-compose.yml` | service/container `wh-tunnel` (`restart: unless-stopped`), build context `maverick-src` = `${MAVERICK_MCP_SRC:-/home/hermes/maverick-mcp}`, named volumes `durable-park-qbo-data` at `/data` and `durable-park-maverick-inbox` at `/data/maverick-inbox`, `tunnel.yaml` read-only at `/etc/withhuman/tunnel.yaml`, `env_file: /etc/durable-park/tunnel.env`; profile service `check` |
 | `deploy/tunnel/enter-secrets.sh` | interactive script that writes `/etc/durable-park/tunnel.env` |
+
+## The Maverick server in the image
+
+The `maverick` stage of the `Dockerfile` (verified 2026-10-24, image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44`):
+
+1. It uses the pinned tunnel image as the builder too, so the venv's Python is the image's own (`/usr/bin/python3`,
+   Python 3.14.8 in tunnel 0.0.369).
+2. It copies `requirements.lock`, `requirements-dev.lock`, `pyproject.toml` and `src/` from the build context
+   `maverick-src` (the checkout). Nothing is fetched from git inside the build.
+3. A throw-away build venv installs `requirements-dev.lock` with `--require-hashes --only-binary=:all:` (that gives the
+   pinned `setuptools`) and builds the package wheel with `--no-deps --no-build-isolation --check-build-dependencies`,
+   the same way the server's own CI installs it.
+4. The runtime venv `/opt/maverick-mcp` gets only `requirements.lock` (`--require-hashes --only-binary=:all:`: every
+   file's hash is checked, nothing is compiled), then the wheel with `--no-deps --no-index`. The build fails if
+   `python -m maverick_mcp --list-approvals` does not run.
+5. The runtime stage copies `/opt/maverick-mcp` (owner root, read-only for `withhuman`) and writes the launcher
+   `/usr/local/bin/maverick-mcp-server` (`exec /opt/maverick-mcp/bin/python -m maverick_mcp "$@"`).
+
+Check a built image (no secrets needed, does not touch the running tunnel):
+
+```bash
+sudo docker run --rm --entrypoint maverick-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-bf99b44 --list-approvals
+```
+
+Verified 2026-10-24: 42 tools, 13 `auto`, 3 `auto_unless_notify`, 26 `you` (a person approves).
 
 ## Environment variables
 
@@ -122,7 +152,7 @@ sandbox).
 All commands from `/home/hermes/durable-park/deploy/tunnel`, with `sudo`:
 
 ```bash
-sudo docker compose build                  # build the image (works without any secrets)
+sudo bash build.sh                         # check the Maverick checkout, then build the image (no secrets needed)
 sudo docker compose run --rm check         # starts the server once, lists tools; no tunnel token needed
 sudo docker compose up -d wh-tunnel        # long-running tunnel
 sudo docker logs -f wh-tunnel              # watch it connect
