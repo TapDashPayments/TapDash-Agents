@@ -76,7 +76,7 @@ ALLOWED_TOOL_NAMES = {"parked_action_execute", "clarify"}
 # plugin/durable_park/park_hook.py keeps the same three names (tests/test_tool_policy.py pins them together).
 BRIDGE_TOOL_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
 TOOL_SEARCH_SETTINGS = ("off", "on")
-ALLOWED_TOOL_PREFIXES = (f"mcp__{MCP_SERVER}__quickbooks__",)
+ALLOWED_TOOL_PREFIXES = (f"mcp__{MCP_SERVER}__quickbooks__", f"mcp__{MCP_SERVER}__maverick__")
 REQUIRED_TOOL = "parked_action_execute"
 
 # Toolsets that give local file / command / code / process access (or reach other machines/agents).
@@ -399,8 +399,8 @@ def check(allowed: list[str] | None = None, problems: list[str] | None = None) -
         return 1
     opened = f" plus the opened toolsets ({', '.join(allowed)})" if allowed else ""
     search = f"; Tool Search on: the bridge tools are visible on {bridged} of them" if bridged else ""
-    print(f"tool policy: ok on {len(_platforms())} platform keys (only durable_park, clarify and "
-          f"mcp__wh__quickbooks__* tools{opened}{search})")
+    print(f"tool policy: ok on {len(_platforms())} platform keys (only durable_park, clarify, "
+          f"mcp__wh__quickbooks__* and mcp__wh__maverick__* tools{opened}{search})")
     return 0
 
 

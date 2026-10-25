@@ -42,6 +42,8 @@ def test_no_toolset_is_both_allowed_and_forbidden():
     ("browser_navigate", False), ("memory", False), ("tool_call", False), ("tool_search", False),
     ("mcp__other__x", False), ("mcp__wh_evil__x", False), ("mcp__wh__withhuman__get_agent", False),
     ("mcp__wh__docusign__createEnvelope", False), ("mcp__wh__quickbooksX__create_invoice", False),
+    ("mcp__wh__maverick__maverick_read", True), ("mcp__wh__maverick__maverick_refund_transaction", True),
+    ("mcp__wh__maverickX__a", False), ("mcp__wh__maverick_x__a", False), ("mcp__wh__mav__maverick_read", False),
 ])
 def test_is_allowed(name, allowed):
     assert policy.is_allowed(name) is allowed
@@ -86,9 +88,24 @@ def test_hermes_mcp_checks_before_and_after_and_scopes_wh_tools():
     restart = text.index("as_hermes systemctl --user restart hermes-gateway")
     checks = _checks(text)
     assert len(checks) == 2 and text.index("tool_policy apply") < checks[0] < restart < checks[1]
-    assert "ALLOWED_PREFIX=mcp__wh__quickbooks__" in text
-    scope = text.index('other_tools=$(grep -v -- "^${ALLOWED_PREFIX}"')
+    assert "ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick)__'" in text
+    scope = text.index('other_tools=$(grep -vE -- "${ALLOWED_PREFIX_RE}"')
     assert restart < scope and "die" in text[scope:scope + 400]
+    assert "ALLOWED_PREFIX=" not in text  # the old QuickBooks-only prefix is gone
+
+
+def test_hermes_mcp_scope_regex_flags_every_other_wh_tool():
+    import re
+    import subprocess
+
+    text = (DEPLOY / "hermes_mcp.sh").read_text()
+    regex = re.search(r"^ALLOWED_PREFIX_RE='([^']+)'", text, re.M).group(1)
+    names = ["mcp__wh__quickbooks__get_company_info", "mcp__wh__maverick__maverick_read",
+             "mcp__wh__maverickX__a", "mcp__wh__withhuman__get_agent", "mcp__wh__quickbooks_maverick__x",
+             "mcp__wh__docusign__createEnvelope"]
+    other = subprocess.run(["grep", "-vE", "--", regex], input="\n".join(names) + "\n", capture_output=True,
+                           text=True).stdout.split()
+    assert other == names[2:]
 
 
 def test_platform_keys_come_from_every_hermes_source():

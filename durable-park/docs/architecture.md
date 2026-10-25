@@ -57,8 +57,8 @@ State on 2026-10-22:
   is `root:root 0600`. `audit_key` stays readable by `hermes` (the plugin names the decider with it); it is
   read-only, so it lets a hijacked agent list requests, never approve one. `deploy/bridge_check.py` verifies all of
   this at every deploy, and the deploy stops if it fails.
-- **Tool lockdown (v1): a configuration guard.** The agent can reach only `clarify`, `parked_action_execute` and
-  `mcp__wh__quickbooks__*`, plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`)
+- **Tool lockdown (v1): a configuration guard.** The agent can reach only `clarify`, `parked_action_execute`,
+  `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*`, plus the three Tool Search bridge tools (`tool_search`, `tool_describe`, `tool_call`)
   while Tool Search is on (it has been on since 2026-10-21 19:59 UTC). `deploy/hermes_tool_policy.py` applies it on
   every platform key (re-applied on proto-agents 2026-10-21 03:16 UTC as a stopgap; `hermes_tool_policy.py check`
   prints the key count and ends `ok`). The agent has no file, terminal or code tools, and Hermes's own approvals are
@@ -216,7 +216,7 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | Setting | Default | What it does |
 |---|---|---|
 | `exempt_tools` | `["parked_action_execute", "clarify", "tool_search", "tool_describe"]` | Tools that are never asked about: anything listed here runs with no approval and no ledger row. The list replaces the default, so keep `parked_action_execute` in it (a warning is logged if it is missing: approved parks could not run). Any other name is logged as an ERROR (`exempt_tools lists <name>: it runs with no approval and no ledger row`); an MCP tool (`mcp__...`), `tool_call` (Tool Search's tool runner: never exempt) or a name a `form_checked_tools` pattern matches is refused as a bad setting (every call refused, see below). Also used by the fail-closed hook when the ledger cannot open. |
-| `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
+| `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes, every Maverick tool `mcp__wh__maverick__maverick_*`) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. A hook with two names (Hermes Deck: `hermes_plugins.hermes_deck.hermes_deck_pre_tool_call` with its bridge, `hermes_plugins.hermes_deck.events.on_pre_tool_call` without) is accepted under both when either is listed (`OBSERVER_HOOK_ALIASES`, TAP2-129). |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
@@ -495,8 +495,8 @@ stateDiagram-v2
 ## 4. Tool call: form check, then one question to withHuman
 
 Every tool call goes through the park hook (`park_hook.make_pre_tool_call`) in this order. Every path except
-"tool runs" blocks the call. A form-checked tool (`DEFAULT_FORM_CHECKED_TOOLS`: the QuickBooks money moves and the
-DocuSign writes) is first checked against the rules Hermes registered for it (the same rules the model was shown),
+"tool runs" blocks the call. A form-checked tool (`DEFAULT_FORM_CHECKED_TOOLS`: the QuickBooks money moves, the
+DocuSign writes and every Maverick tool) is first checked against the rules Hermes registered for it (the same rules the model was shown),
 so no approver is asked about a call QuickBooks would reject. Details and safety choices:
 [form-check.md](form-check.md). Which calls need a person is a withHuman pipeline rule, not a list in the plugin.
 

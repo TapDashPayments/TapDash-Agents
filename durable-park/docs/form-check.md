@@ -13,7 +13,8 @@ It works for any tool and service: the rules are read from Hermes on every call,
 
 **Which tools.** Only the form-checked tools: names that fully match one of the form-checked patterns
 (`form_checked_tools`; default `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`: the
-QuickBooks create/update/delete of the 12 money types, and the six DocuSign writes), set in
+QuickBooks create/update/delete of the 12 money types, the six DocuSign writes, and every Maverick tool
+`mcp__wh__maverick__maverick_*`), set in
 `plugins.entries.durable-park.settings.form_checked_tools` ([settings](architecture.md#plugin-settings); the old
 name `risky_tools` is ignored with a warning). Every other tool call is not form-checked but is still asked about (see [architecture](architecture.md#4-tool-call-form-check-then-one-question-to-withhuman)).
 Being on this list does not make a call need a person: that is a withHuman pipeline rule.

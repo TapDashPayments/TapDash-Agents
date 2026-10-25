@@ -12,7 +12,7 @@
 #       headers:
 #         Authorization: Bearer ${DURABLE_PARK_WH_TOKEN}
 #       trust: full                 # `untrusted` would block the plugin's dispatch_tool replay (probe report)
-#       tools: {include: ["quickbooks__*"], resources: false, prompts: false}   # v1: QuickBooks only
+#       tools: {include: ["quickbooks__*", "maverick__*"], resources: false, prompts: false}   # QuickBooks + Maverick
 #       enabled: true
 #
 # The token is never written to config.yaml or .env: Hermes's `command` secret source
@@ -32,9 +32,13 @@ SECRETS_HELPER=/opt/durable-park/libexec/hermes-secrets
 TOKEN_VAR=DURABLE_PARK_WH_TOKEN
 SERVER=wh
 GATEWAY_URL=https://app.withhuman.ai/gateway/mcp
-TOOL_INCLUDE='["quickbooks__*"]'
+TOOL_INCLUDE='["quickbooks__*", "maverick__*"]'
 EXPECTED_TOOL=mcp__wh__quickbooks__get_company_info
-ALLOWED_PREFIX=mcp__wh__quickbooks__   # v1: QuickBooks only (also deploy/hermes_tool_policy.py)
+EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read
+# Only QuickBooks and Maverick tools (also ALLOWED_TOOL_PREFIXES in deploy/hermes_tool_policy.py)
+ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick)__'
+# The Maverick skills (how-to notes the agent reads with skill_view) come from the pinned read-only checkout.
+MAVERICK_SKILLS_DIR=/home/hermes/maverick-mcp/skills
 
 log() { printf 'hermes_mcp: %s\n' "$*"; }
 die() { printf 'hermes_mcp: ERROR: %s\n' "$*" >&2; exit 1; }
@@ -96,6 +100,8 @@ set_cfg "mcp_servers.$SERVER.tools.include" "$TOOL_INCLUDE"
 set_cfg "mcp_servers.$SERVER.tools.resources" false
 set_cfg "mcp_servers.$SERVER.tools.prompts" false
 set_cfg "mcp_servers.$SERVER.enabled" true
+[[ -d $MAVERICK_SKILLS_DIR ]] || die "$MAVERICK_SKILLS_DIR is missing: check out maverick-mcp first (gateway-setup.md, Maverick server source)"
+set_cfg skills.external_dirs '["/home/hermes/maverick-mcp/skills"]'
 # The agent tool policy now names `wh` in every platform list (an MCP allowlist) instead of `no_mcp`.
 tool_policy apply || die "could not apply the agent tool policy"
 policy_report=$(tool_policy check) \
@@ -126,20 +132,22 @@ done
 log "${registered#*INFO }"
 has "$registered" -F -- "$EXPECTED_TOOL" \
     || die "$EXPECTED_TOOL is not registered: is the QuickBooks server granted to agent proto-agents in withHuman?"
-# Every registered wh tool must be a QuickBooks tool ("registered N tool(s): a, b, ..."; Hermes v0.22.2
+has "$registered" -F -- "$EXPECTED_TOOL_MAVERICK" \
+    || die "$EXPECTED_TOOL_MAVERICK is not registered: is the Maverick server registered (slug maverick) and granted to agent proto-agents in withHuman?"
+# Every registered wh tool must be a QuickBooks or Maverick tool ("registered N tool(s): a, b, ..."; Hermes v0.22.2
 # tools/mcp_tool_discovery.py:354). Anything else (another gateway server, withhuman__*) fails the deploy.
 wh_tools=$(grep -oE 'mcp__wh__[A-Za-z0-9_]+' <<<"${registered#*tool(s):}" | sort -u || true)
 [[ -n "$wh_tools" ]] || die "could not read the registered tool names from: ${registered#*INFO }"
-other_tools=$(grep -v -- "^${ALLOWED_PREFIX}" <<<"$wh_tools" || true)
+other_tools=$(grep -vE -- "${ALLOWED_PREFIX_RE}" <<<"$wh_tools" || true)
 if [[ -n "$other_tools" ]]; then
     as_hermes systemctl --user stop hermes-gateway
-    die "MCP server '$SERVER' registered tools outside ${ALLOWED_PREFIX}*: $(tr '\n' ' ' <<<"$other_tools")" \
+    die "MCP server '$SERVER' registered tools outside ${ALLOWED_PREFIX_RE}: $(tr '\n' ' ' <<<"$other_tools")" \
         "(hermes-gateway STOPPED; narrow mcp_servers.$SERVER.tools.include or the withHuman grants, then re-run)"
 fi
-log "all $(wc -l <<<"$wh_tools") registered $SERVER tools match ${ALLOWED_PREFIX}*"
+log "all $(wc -l <<<"$wh_tools") registered $SERVER tools match ${ALLOWED_PREFIX_RE}"
 has "$(log_since "$since")" -F "durable-park loaded" || log "WARNING: no 'durable-park loaded' line yet after the restart"
 # The agent may still have only durable_park, clarify and mcp__wh__* tools (deploy/hermes_tool_policy.py).
 policy_report=$(tool_policy check) \
     || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed after adding $SERVER"; }
 log "tool policy ok: $(grep -E '^cli:' <<<"$policy_report")"
-log "done: $EXPECTED_TOOL available. Live check: DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py"
+log "done: $EXPECTED_TOOL and $EXPECTED_TOOL_MAVERICK available. Live check: DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py"

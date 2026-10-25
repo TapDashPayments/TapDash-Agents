@@ -49,7 +49,7 @@ Rules:
   Claude can run them. Keep the rule that the admin confirms risky actions first (anything destructive, hard to undo, or
   that touches secrets, sudoers, sshd, Tailscale or a running gateway). The agent (`hermes`) has no sudo and no terminal tool.
 - **One agent, one Hermes install, v1 tool lockdown.** The `hermes` install is the only agent on the VM. The agent can
-  reach only `clarify`, `parked_action_execute` and `mcp__wh__quickbooks__*`, plus the three Tool Search bridge tools
+  reach only `clarify`, `parked_action_execute`, `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*`, plus the three Tool Search bridge tools
   (`tool_search`, `tool_describe`, `tool_call`) while Tool Search is on. **This is not a full security boundary
   today.** How strong it is, what an agent could still do and where Clean Setup Phase 1 and Phase 2 stand:
   [architecture section 0](architecture.md#0-how-strong-is-it-today) (the one copy of that text). What is left before
@@ -320,7 +320,7 @@ then run `sqlite3 <ledger> 'VACUUM;'` as `hermes`.
 
 `durable-park ALERT: the form checker is not working - <reason>. Risky actions will be refused until it is fixed.`
 
-Form-checked calls (QuickBooks money moves, DocuSign writes) are blocked (fail closed) until it is fixed; other
+Form-checked calls (QuickBooks money moves, DocuSign writes, Maverick tools) are blocked (fail closed) until it is fixed; other
 tool calls are still asked about as usual. Read `formcheck_status.json` and the reason:
 
 | Reason | Likely cause | Fix |
@@ -1430,15 +1430,16 @@ that has to agree:
    gateway servers the agent needs (spec section 7, Q5) ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
    sends its `park:docusign` request to a person, and add it to pipeline **block 2** (`block-06ebcdd6`), so the bridge decides its
    replays (it asks withHuman for the matching park, by the Hermes name `mcp__wh__<slug>__<tool>`) ([block 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
-2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` tools in (`tools.include`), and fails if any
-   other `mcp__wh__` tool registers. Allow the new server there.
-3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` (plus `clarify`,
+2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*` and `maverick__*` tools in (`TOOL_INCLUDE`),
+   and fails if any other `mcp__wh__` tool registers (`ALLOWED_PREFIX_RE`). Allow the new server in both.
+3. **Tool lockdown**: `deploy/hermes_tool_policy.py` only allows `mcp__wh__quickbooks__*` and `mcp__wh__maverick__*`
+   (`ALLOWED_TOOL_PREFIXES`; plus `clarify`,
    `parked_action_execute` and, once Tool Search is on, the three bridge tools `tool_search`, `tool_describe`, `tool_call`); tools open only through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4 (the allowed
    list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
 4. **Form-checked list**: the plugin form-checks tools matching the form-checked patterns (setting
    `plugins.entries.durable-park.settings.form_checked_tools`, see [Plugin settings](#plugin-settings); default
-   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools are already in
-   the default. Leaving a tool off this list does **not** let it through: it is still asked about.
+   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools and every Maverick
+   tool are already in the default (Maverick last: index 0 stays the QuickBooks pattern the pipeline test pins). Leaving a tool off this list does **not** let it through: it is still asked about.
 5. **Docs**: the pipeline table and system map in [architecture.md](architecture.md), this runbook, the setup guide.
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
 
