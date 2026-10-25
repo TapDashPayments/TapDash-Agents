@@ -1014,23 +1014,10 @@
               "value": "proto-agents"
             },
             {
-              "id": "d78ee69f-5910-451e-8f89-43dea6578be5",
-              "any": [
-                {
-                  "id": "a5e156a7-c5b1-4990-b2d5-d3b9e8d0f7bb",
-                  "field": "/request/server",
-                  "operator": "equals",
-                  "value": "supabase-crm-dev"
-                },
-                {
-                  "id": "3b84c1a7-ad07-4e91-91ce-56214cdccc18",
-                  "field": "/request/tool",
-                  "operator": "starts_with",
-                  "value": [
-                    "supabase-crm-dev__"
-                  ]
-                }
-              ]
+              "id": "a5e156a7-c5b1-4990-b2d5-d3b9e8d0f7bb",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "supabase-crm-dev"
             }
           ]
         },
@@ -1123,23 +1110,10 @@
               "value": "proto-agents"
             },
             {
-              "id": "d05ca7e0-9567-4d0c-a3da-b9a82af8a942",
-              "any": [
-                {
-                  "id": "e6e306fb-9ed8-420d-a97b-ae45d452b80e",
-                  "field": "/request/server",
-                  "operator": "equals",
-                  "value": "monday"
-                },
-                {
-                  "id": "d8afe6f2-f896-4bc9-a29d-dbe19db7062e",
-                  "field": "/request/tool",
-                  "operator": "starts_with",
-                  "value": [
-                    "monday__"
-                  ]
-                }
-              ]
+              "id": "e6e306fb-9ed8-420d-a97b-ae45d452b80e",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "monday"
             }
           ]
         },
@@ -1286,23 +1260,10 @@
               "value": "proto-agents"
             },
             {
-              "id": "2d151148-abae-41d9-af11-a4ae9bbe950b",
-              "any": [
-                {
-                  "id": "6246d039-9516-489a-ae69-905d23ea5f25",
-                  "field": "/request/server",
-                  "operator": "equals",
-                  "value": "docusign-demo"
-                },
-                {
-                  "id": "22aa3019-7347-477a-916e-0f0da1fbcdae",
-                  "field": "/request/tool",
-                  "operator": "starts_with",
-                  "value": [
-                    "docusign-demo__"
-                  ]
-                }
-              ]
+              "id": "6246d039-9516-489a-ae69-905d23ea5f25",
+              "field": "/request/server",
+              "operator": "equals",
+              "value": "docusign-demo"
             }
           ]
         },

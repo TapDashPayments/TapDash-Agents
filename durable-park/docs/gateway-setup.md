@@ -18,7 +18,7 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel digest | `sha256:dad0c8b52d653b4969161a8ec589cf37048da6eec5747e098969e6a281f0c3e0` (this is also what `:latest` pointed to when pinned; published 2026-10-16) |
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
-| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10` (2026-10-25: QuickBooks + Maverick at e4a2b10; built with `build.sh`, not running yet). The running `wh-tunnel` still uses `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` until the Maverick switch-on ([plan, Task 7](../../docs/plans/2026-10-23-maverick-tunnel-integration.md)) |
+| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10` (2026-10-25: QuickBooks + Maverick at e4a2b10; built with `build.sh`). **Running** in `wh-tunnel` since 2026-10-25 02:38 UTC; rollback image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (QuickBooks only: also remove the `maverick` entry from `tunnel.yaml`) |
 | Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
@@ -99,7 +99,7 @@ through the same `wh` gateway as QuickBooks, and every call goes through the sam
 
 ```mermaid
 flowchart LR
-  agent["Hermes agent<br/>(proto-agents)"] -->|"tool call, parked and asked first"| wh["withHuman gateway<br/>(approval rules, revision 14)"]
+  agent["Hermes agent<br/>(proto-agents)"] -->|"tool call, parked and asked first"| wh["withHuman gateway<br/>(approval rules, revision 15)"]
   wh -->|"read: approved; anything else: bridge or a person"| sb["Supabase MCP<br/>(tapdash-crm-dev, read-only)"]
   wh -->|"same rules"| mo["monday MCP<br/>(tapdash.monday.com)"]
   wh -->|"same rules"| ds["DocuSign MCP<br/>(demo account)"]
@@ -109,6 +109,17 @@ Hermes turns the `-` in a slug into `_` (`supabase-crm-dev` becomes `mcp__wh__su
 then `park:supabase_crm_dev`, and the bridge pairs a gateway call with its park the same way
 (`bridge/verify.py: hermes_tool_name`). To give the agent a write tool later: grant it in withHuman
 (`set_agent_tool_access`); it then asks a person at park time and goes through the bridge at the gateway, with no rule change.
+To give it another **read** tool: grant it and add it to both read lists for that server (park and gateway) in
+`deploy/withhuman/entry-pipeline.json` (the tests check the two lists agree), then save the file as a new revision.
+
+What the reads can show the agent (and the full Langfuse traces): monday holds live business data (items, people,
+meeting summaries and transcripts, file links); DocuSign agreement details can hold personal data; Supabase
+`query_logs` can return SQL text from the logs. The dev project is empty today; the real CRM would hold merchant data.
+
+Who changed what: revision 13 (the three servers' first gateway rules) was made in the withHuman app by the member
+account "Yaakov Y Trout" (driven by another assistant, Grok), not from the file. After any revision that is not made
+from this file, read `get_pipeline entry` and compare it with the file before relying on either. That member can still
+activate pipeline revisions; removing that permission once setup is done is Yaakov's call.
 
 ## Files
 
@@ -496,7 +507,7 @@ is **unverified** on the live tenant.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline)**
 
-The live entry pipeline is **revision 14** (active since 2026-10-25 02:06 UTC; revision 12 added the Maverick blocks, 13 and 14 the three remote servers). Its source of truth is the reviewed
+The live entry pipeline is **revision 15** (active since 2026-10-25 02:54 UTC; revision 12 added the Maverick blocks, 13 and 14 the three remote servers, 15 made those servers' gateway rules match the server name only). Its source of truth is the reviewed
 file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (25 blocks), and
 [architecture section 1](architecture.md#1-system-map) has the same list as a table. Do not rebuild it from this
 page: save the file's blocks as a new entry revision in withHuman and activate it (a save activates at once). Blocks
@@ -539,7 +550,7 @@ holds when withHuman's own API is slow or down while the bridge asks it: the bri
 ### Known risks / unverified
 
 - Settled live: argument rewrites by the gateway (`withhuman_scope` added, `2.0` sent as `2`) are absorbed by
-  `ledger.normalize_args`; park requests are matched by block 1 of revision 14 (the money regex on the Hermes tool name).
+  `ledger.normalize_args`; park requests are matched by block 1 of revision 15 (the money regex on the Hermes tool name).
 - The bridge relies on withHuman's request list (`GET /api/v1/requests`: `q` is a substring of the tool name, newest
   first, `limit` up to 200) and on the consumption record (`consumption.consumed_at`); both were read in withHuman's
   docs and source and verified live on 2026-10-22 ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).
