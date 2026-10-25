@@ -581,3 +581,12 @@ def test_remote_bridges_match_the_quickbooks_bridge(blocks):
 def test_execute_sql_is_never_approved_by_a_rule(blocks):
     assert _decide(blocks, "proto-agents", "park:supabase_crm_dev", _hermes("supabase-crm-dev", "execute_sql"))[1] == "human"
     assert _decide(blocks, "proto-agents", "supabase-crm-dev", "execute_sql")[1] == "webhook"
+
+
+def test_remote_gateway_rules_match_on_the_server_only(blocks):
+    """PR 54 review M1: a gateway rule matches its server slug only, not a tool-name prefix."""
+    for slug, s in SHORT.items():
+        gw = next(b for b in blocks if b["id"] == f"gw-{s}")
+        assert {leaf["field"] for leaf in block_leaves(gw)} == {"/agent/slug", "/request/server"}
+        # A prefixed tool name on another (or no) server is not this server's call.
+        assert _decide(blocks, "proto-agents", "other-server", f"{slug}__list_things") == ("pa-default-human", "human")

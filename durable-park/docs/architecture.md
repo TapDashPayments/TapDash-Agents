@@ -117,7 +117,8 @@ flowchart LR
   chat(["User in Telegram or Teams"])
   approver(["Approver in the withHuman app"])
   qbo[("QuickBooks Online<br/>sandbox company")]
-  mav[("Maverick Payments API<br/>(not connected yet)")]
+  mav[("Maverick Payments API<br/>(placeholder address until sandbox access)")]
+  remote[("Supabase CRM dev, monday, DocuSign demo<br/>official MCP servers on the internet")]
   lf[("Langfuse Cloud US<br/>trace store, 30 days")]
   deckapp(["Deck app<br/>on your computer"])
 
@@ -147,7 +148,7 @@ flowchart LR
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
     bridge["bridge<br/>127.0.0.1:8791 (held by systemd) - user dpbridge<br/>keeps no state"]
     sweep["sweep<br/>cron every 5 min"]
-    tunnel["wh-tunnel container<br/>QuickBooks MCP server<br/>+ Maverick MCP server (built in, not switched on yet)"]
+    tunnel["wh-tunnel container<br/>QuickBooks MCP server<br/>+ Maverick MCP server"]
     funnelA{{"Funnel /aap/events"}}
     funnelB{{"Funnel /wh/bridge"}}
   end
@@ -184,7 +185,8 @@ flowchart LR
   bridge -->|"approve or human"| pipe
   gw -->|"forwards over the tunnel<br/>(tunnel dials out)"| tunnel
   tunnel -->|"QuickBooks API"| qbo
-  tunnel -.->|"Maverick API, once switched on"| mav
+  tunnel -.->|"Maverick API (placeholder address: every call fails at once)"| mav
+  gw -->|"forwards with the sign-in withHuman holds (OAuth)"| remote
   sweep -->|"reads, updates;<br/>deletes finished rows after 30 days"| ledger
   sweep -->|"re-wakes missed decisions"| route
   selfck -->|"writes"| fstatus
@@ -304,7 +306,7 @@ The tested Hermes version is v0.22.3 (`SUPPORTED_HERMES_VERSION` in `compat.py`;
 `compat.py` were read on v0.22.2 and have not been re-read.
 
 **The withHuman entry pipeline** (reviewed file: [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json);
-configured in the withHuman app; live revision 14, active since 2026-10-25 02:06 UTC. Revision 12 added the Maverick rules (blocks 8 to 14); revision 13 (made in the app on 2026-10-25) added the three remote servers' gateway rules with a direct ask for writes; revision 14 adds their park read rules (blocks 16 to 18) and sends their other gateway calls to the bridge (blocks 19 to 21). Rollback: revision 13, then 12.
+configured in the withHuman app; live revision 15, active since 2026-10-25 02:54 UTC. Revision 12 added the Maverick rules (blocks 8 to 14); revision 13 (made in the app on 2026-10-25) added the three remote servers' gateway rules with a direct ask for writes; revision 14 adds their park read rules (blocks 16 to 18) and sends their other gateway calls to the bridge (blocks 19 to 21); revision 15 makes blocks 19 to 21 match on the server name only (it drops a tool-name fallback; a reviewer's finding on pull request 54). Rollback: revision 14, then 13, then 12.
 `proto-agents` also requires that agent; blocks run in order and the first to decide ends the pipeline.
 
 | Order | Block | When | Then |
@@ -700,7 +702,7 @@ groups or at the permissions of `/etc/durable-park` itself, and a change to the 
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
 | bridge | `dpbridge` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` (the socket is held by systemd, not by the bridge process) | system units `durable-park-bridge.socket` (holds the port) and `durable-park-bridge` (`Restart=always`) |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
-| tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (live). Built and waiting for the Maverick switch-on: `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10`, which adds the Maverick server ([gateway setup](gateway-setup.md#the-maverick-server-in-the-image)) | outbound only | Docker, container `wh-tunnel` |
+| tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-e4a2b10` (live since 2026-10-25 02:38 UTC; the previous `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` is kept for rollback), QuickBooks and Maverick servers ([gateway setup](gateway-setup.md#the-maverick-server-in-the-image)) | outbound only | Docker, container `wh-tunnel` |
 | Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
 
 System users behind that table:

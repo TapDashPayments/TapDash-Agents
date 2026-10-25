@@ -1720,7 +1720,7 @@ Never `cat` the file or run `docker compose config`, `docker inspect` or `docker
 4. No ledger row `parked`, `approved` or `executing` ([health check](#health-check)); then from `deploy/tunnel`:
    `sudo docker compose run --rm check` (lists 42 `maverick_` tools) and `sudo docker compose up -d wh-tunnel`.
 5. In withHuman: register gateway server `maverick` through tunnel `proto-agents`, tunnel entry `maverick`, one scope
-   `default` (auth none); grant it to agent `proto-agents`. The approval rules are entry revision 14.
+   `default` (auth none); grant it to agent `proto-agents`. The approval rules are entry revision 15.
 6. Open `skills` in `/etc/durable-park/allowed_toolsets` ([Open a toolset](#open-a-toolset)).
 7. `sudo bash deploy/hermes_mcp.sh`: it restarts the gateway, checks the tool scope and policy, and only then
    checks that `mcp__wh__maverick__maverick_read` registered (so step 5 must come first).

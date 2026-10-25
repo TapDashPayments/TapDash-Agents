@@ -37,7 +37,7 @@ GATEWAY_URL=https://app.withhuman.ai/gateway/mcp
 TOOL_INCLUDE='["quickbooks__*", "maverick__*", "supabase-crm-dev__*", "monday__*", "docusign-demo__*"]'
 EXPECTED_TOOL=mcp__wh__quickbooks__get_company_info
 EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read
-# Only QuickBooks and Maverick tools (also ALLOWED_TOOL_PREFIXES in deploy/hermes_tool_policy.py)
+# Only the five allowed gateway servers' tools (also ALLOWED_TOOL_PREFIXES in deploy/hermes_tool_policy.py)
 ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick|supabase_crm_dev|monday|docusign_demo)__'
 # The Maverick skills (how-to notes the agent reads with skill_view) come from the pinned read-only checkout.
 MAVERICK_SKILLS_DIR=/opt/maverick-mcp-src/skills
