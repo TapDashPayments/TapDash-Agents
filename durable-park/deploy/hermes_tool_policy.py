@@ -78,7 +78,8 @@ ALLOWED_TOOL_NAMES = {"parked_action_execute", "clarify"}
 BRIDGE_TOOL_NAMES = frozenset({"tool_search", "tool_describe", "tool_call"})
 TOOL_SEARCH_SETTINGS = ("off", "on")
 ALLOWED_TOOL_PREFIXES = tuple(f"mcp__{MCP_SERVER}__{slug}__" for slug in
-                              ("quickbooks", "maverick", "supabase_crm_dev", "monday", "docusign_demo"))
+                              ("quickbooks", "maverick", "acceptblue", "authnet", "supabase_crm_dev", "monday",
+                               "docusign_demo"))
 REQUIRED_TOOL = "parked_action_execute"
 
 # Toolsets that give local file / command / code / process access (or reach other machines/agents).
@@ -464,7 +465,8 @@ def check(allowed: list[str] | None = None, problems: list[str] | None = None) -
     opened = f" plus the opened toolsets ({', '.join(allowed)})" if allowed else ""
     search = f"; Tool Search on: the bridge tools are visible on {bridged} of them" if bridged else ""
     print(f"tool policy: ok on {len(_platforms())} platform keys (only durable_park, clarify and "
-          f"mcp__wh__<quickbooks|maverick|supabase_crm_dev|monday|docusign_demo>__* tools{opened}{search})")
+          f"mcp__wh__<quickbooks|maverick|acceptblue|authnet|supabase_crm_dev|monday|docusign_demo>__* tools"
+          f"{opened}{search})")
     return 0
 
 

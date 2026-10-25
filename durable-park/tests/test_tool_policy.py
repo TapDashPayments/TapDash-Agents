@@ -47,6 +47,11 @@ def test_no_toolset_is_both_allowed_and_forbidden():
     ("mcp__wh__supabase_crm_dev__list_tables", True), ("mcp__wh__monday__get_board_info", True),
     ("mcp__wh__docusign_demo__getEnvelope", True), ("mcp__wh__supabase_crm__x", False),
     ("mcp__wh__docusign__getEnvelope", False), ("mcp__wh__mondayX__a", False),
+    ("mcp__wh__acceptblue__ablue_read", True), ("mcp__wh__acceptblue__ablue_refund_transaction", True),
+    ("mcp__wh__authnet__authnet_read", True), ("mcp__wh__authnet__authnet_refund_transaction", True),
+    ("mcp__wh__acceptblueX__ablue_read", False), ("mcp__wh__accept_blue__ablue_read", False),
+    ("mcp__wh__authnetX__authnet_read", False), ("mcp__wh__authorizenet__authnet_read", False),
+    ("mcp__wh__authorize_net__authnet_read", False), ("mcp__wh__ablue__ablue_read", False),
 ])
 def test_is_allowed(name, allowed):
     assert policy.is_allowed(name) is allowed
@@ -91,7 +96,7 @@ def test_hermes_mcp_checks_before_and_after_and_scopes_wh_tools():
     restart = text.index("as_hermes systemctl --user restart hermes-gateway")
     checks = _checks(text)
     assert len(checks) == 2 and text.index("tool_policy apply") < checks[0] < restart < checks[1]
-    assert "ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick|supabase_crm_dev|monday|docusign_demo)__'" in text
+    assert "ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick|acceptblue|authnet|supabase_crm_dev|monday|docusign_demo)__'" in text
     scope = text.index('other_tools=$(grep -vE -- "${ALLOWED_PREFIX_RE}"')
     assert restart < scope and "die" in text[scope:scope + 400]
     assert "ALLOWED_PREFIX=" not in text  # the old QuickBooks-only prefix is gone
@@ -105,12 +110,15 @@ def test_hermes_mcp_scope_regex_flags_every_other_wh_tool():
     regex = re.search(r"^ALLOWED_PREFIX_RE='([^']+)'", text, re.M).group(1)
     names = ["mcp__wh__quickbooks__get_company_info", "mcp__wh__maverick__maverick_read",
              "mcp__wh__supabase_crm_dev__list_tables", "mcp__wh__monday__get_board_info",
-             "mcp__wh__docusign_demo__getEnvelope",
+             "mcp__wh__docusign_demo__getEnvelope", "mcp__wh__acceptblue__ablue_read",
+             "mcp__wh__authnet__authnet_read",
              "mcp__wh__maverickX__a", "mcp__wh__withhuman__get_agent", "mcp__wh__quickbooks_maverick__x",
-             "mcp__wh__docusign__createEnvelope", "mcp__wh__monday_x__a"]
+             "mcp__wh__docusign__createEnvelope", "mcp__wh__monday_x__a", "mcp__wh__acceptblueX__ablue_read",
+             "mcp__wh__accept_blue__ablue_read", "mcp__wh__authorizenet__authnet_read",
+             "mcp__wh__authnetX__authnet_read"]
     other = subprocess.run(["grep", "-vE", "--", regex], input="\n".join(names) + "\n", capture_output=True,
                            text=True).stdout.split()
-    assert other == names[5:]
+    assert other == names[7:]
 
 
 def test_platform_keys_come_from_every_hermes_source():
@@ -637,3 +645,18 @@ def test_check_refuses_skills_without_the_deny(tmp_path, monkeypatch, capsys):
     assert policy.check(["skills"], []) == 0
     monkeypatch.setattr(policy, "PIPELINE_FILE", str(tmp_path / "missing.json"))
     assert policy.check([], []) == 0
+
+
+def test_every_allowed_server_is_in_the_include_list_the_scope_regex_and_the_policy():
+    """hermes_mcp.sh's include list, its scope regex and the policy's prefixes name the same servers."""
+    import re
+
+    text = (DEPLOY / "hermes_mcp.sh").read_text()
+    include = json.loads(re.search(r"^TOOL_INCLUDE='([^']+)'", text, re.M).group(1))
+    regex = re.search(r"^ALLOWED_PREFIX_RE='\^mcp__wh__\(([^)]+)\)__'", text, re.M).group(1)
+    assert all(pattern.endswith("__*") for pattern in include)
+    gateway_slugs = [pattern[:-3] for pattern in include]
+    hermes_slugs = [slug.replace("-", "_") for slug in gateway_slugs]
+    assert regex.split("|") == hermes_slugs
+    assert policy.ALLOWED_TOOL_PREFIXES == tuple(f"mcp__wh__{slug}__" for slug in hermes_slugs)
+    assert {"acceptblue", "authnet"} <= set(gateway_slugs)

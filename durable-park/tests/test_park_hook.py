@@ -2387,9 +2387,9 @@ def test_maverick_tools_are_form_checked():
     assert not checked("mcp__wh__maverick__x")
     assert not checked("mcp__wh__maverick__maverick_Read")
     assert not checked("mcp__wh__maverickX__maverick_read")
-    # index 0 stays the QuickBooks money regex (the pipeline's money rule is pinned to it), Maverick is last
+    # index 0 stays the QuickBooks money regex (the pipeline's money rule is pinned to it)
     assert DEFAULT_FORM_CHECKED_TOOLS[0].startswith(r"mcp__wh__quickbooks__")
-    assert DEFAULT_FORM_CHECKED_TOOLS[-1] == r"mcp__wh__maverick__maverick_[a-z0-9_]+"
+    assert r"mcp__wh__maverick__maverick_[a-z0-9_]+" in DEFAULT_FORM_CHECKED_TOOLS
 
 
 def test_docusign_demo_writes_are_form_checked():
@@ -2401,3 +2401,25 @@ def test_docusign_demo_writes_are_form_checked():
         assert checked(f"mcp__wh__{slug}__updateEnvelope")
         assert not checked(f"mcp__wh__{slug}__getEnvelope")
     assert not checked("mcp__wh__docusign_demoX__createEnvelope")
+
+
+def test_acceptblue_and_authnet_tools_are_form_checked():
+    from payments_servers import SERVERS
+
+    def checked(name):
+        return any(r.fullmatch(name) for r in RISKY)
+
+    for slug, (prefix, approvals) in SERVERS.items():
+        for tool in approvals:  # every tool of both servers, money or not, like Maverick
+            assert checked(f"mcp__wh__{slug}__{tool}"), tool
+        assert not checked(f"mcp__wh__{slug}__x")
+        assert not checked(f"mcp__wh__{slug}__{prefix}Read")
+        assert not checked(f"mcp__wh__{slug}X__{prefix}read")
+        assert not checked(f"mcp__wh__{slug}_x__{prefix}read")
+    # a tool of one server on the other server is not covered by a pattern that is not its own
+    assert not checked("mcp__wh__acceptblue__authnet_read")
+    assert not checked("mcp__wh__authnet__ablue_read")
+    # the QuickBooks money regex is still first (the pipeline's money rule is pinned to index 0)
+    assert DEFAULT_FORM_CHECKED_TOOLS[0].startswith(r"mcp__wh__quickbooks__")
+    assert DEFAULT_FORM_CHECKED_TOOLS[-2:] == (r"mcp__wh__acceptblue__ablue_[a-z0-9_]+",
+                                               r"mcp__wh__authnet__authnet_[a-z0-9_]+")

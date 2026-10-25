@@ -12,7 +12,8 @@
 #       headers:
 #         Authorization: Bearer ${DURABLE_PARK_WH_TOKEN}
 #       trust: full                 # `untrusted` would block the plugin's dispatch_tool replay (probe report)
-#       tools: {include: ["quickbooks__*", "maverick__*", "supabase-crm-dev__*", "monday__*", "docusign-demo__*"],
+#       tools: {include: ["quickbooks__*", "maverick__*", "acceptblue__*", "authnet__*", "supabase-crm-dev__*",
+#                         "monday__*", "docusign-demo__*"],
 #               resources: false, prompts: false}
 #       enabled: true
 #
@@ -34,13 +35,18 @@ TOKEN_VAR=DURABLE_PARK_WH_TOKEN
 SERVER=wh
 GATEWAY_URL=https://app.withhuman.ai/gateway/mcp
 # Gateway tool names as withHuman lists them (Hermes folds "-" into "_" when it registers them)
-TOOL_INCLUDE='["quickbooks__*", "maverick__*", "supabase-crm-dev__*", "monday__*", "docusign-demo__*"]'
+TOOL_INCLUDE='["quickbooks__*", "maverick__*", "acceptblue__*", "authnet__*", "supabase-crm-dev__*", "monday__*", "docusign-demo__*"]'
 EXPECTED_TOOL=mcp__wh__quickbooks__get_company_info
 EXPECTED_TOOL_MAVERICK=mcp__wh__maverick__maverick_read
-# Only the five allowed gateway servers' tools (also ALLOWED_TOOL_PREFIXES in deploy/hermes_tool_policy.py)
-ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick|supabase_crm_dev|monday|docusign_demo)__'
-# The Maverick skills (how-to notes the agent reads with skill_view) come from the pinned read-only checkout.
+EXPECTED_TOOL_ACCEPTBLUE=mcp__wh__acceptblue__ablue_read
+EXPECTED_TOOL_AUTHNET=mcp__wh__authnet__authnet_read
+# Only the seven allowed gateway servers' tools (also ALLOWED_TOOL_PREFIXES in deploy/hermes_tool_policy.py)
+ALLOWED_PREFIX_RE='^mcp__wh__(quickbooks|maverick|acceptblue|authnet|supabase_crm_dev|monday|docusign_demo)__'
+# The Maverick, accept.blue and Authorize.net skills (how-to notes the agent reads with skill_view) come from each
+# server's pinned read-only checkout.
 MAVERICK_SKILLS_DIR=/opt/maverick-mcp-src/skills
+ACCEPTBLUE_SKILLS_DIR=/opt/acceptblue-mcp-src/skills
+AUTHNET_SKILLS_DIR=/opt/authorizenet-mcp-src/skills
 
 log() { printf 'hermes_mcp: %s\n' "$*"; }
 die() { printf 'hermes_mcp: ERROR: %s\n' "$*" >&2; exit 1; }
@@ -91,8 +97,10 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 as_hermes cp -p "$HERMES_HOME/config.yaml" "$HERMES_HOME/config.yaml.bak-hermes-mcp-$stamp"
 log "backed up config.yaml to config.yaml.bak-hermes-mcp-$stamp"
 set_cfg() { hermes_cli config set "$1" "$2" >/dev/null; }
-# Before any write: the Maverick skills must exist (a missing checkout must not leave a half-written config).
+# Before any write: every skills folder must exist (a missing checkout must not leave a half-written config).
 [[ -d $MAVERICK_SKILLS_DIR ]] || die "$MAVERICK_SKILLS_DIR is missing: check out maverick-mcp first (gateway-setup.md, Maverick server source)"
+[[ -d $ACCEPTBLUE_SKILLS_DIR ]] || die "$ACCEPTBLUE_SKILLS_DIR is missing: check out acceptblue-mcp first (gateway-setup.md, Payment server sources)"
+[[ -d $AUTHNET_SKILLS_DIR ]] || die "$AUTHNET_SKILLS_DIR is missing: check out authorizenet-mcp first (gateway-setup.md, Payment server sources)"
 set_cfg "mcp_servers.$SERVER.url" "$GATEWAY_URL"
 # Bare ${VAR}, not the env:-prefixed form: same resolution at connect time, but no "Config ref ... is not set" warning in
 # every Hermes process (the config loads before the secrets.command helper runs). An unset variable still fails
@@ -104,7 +112,7 @@ set_cfg "mcp_servers.$SERVER.tools.include" "$TOOL_INCLUDE"
 set_cfg "mcp_servers.$SERVER.tools.resources" false
 set_cfg "mcp_servers.$SERVER.tools.prompts" false
 set_cfg "mcp_servers.$SERVER.enabled" true
-set_cfg skills.external_dirs "[\"$MAVERICK_SKILLS_DIR\"]"
+set_cfg skills.external_dirs "[\"$MAVERICK_SKILLS_DIR\", \"$ACCEPTBLUE_SKILLS_DIR\", \"$AUTHNET_SKILLS_DIR\"]"
 # The agent tool policy now names `wh` in every platform list (an MCP allowlist) instead of `no_mcp`.
 tool_policy apply || die "could not apply the agent tool policy"
 policy_report=$(tool_policy check) \
@@ -135,7 +143,7 @@ done
 log "${registered#*INFO }"
 has "$registered" -F -- "$EXPECTED_TOOL" \
     || die "$EXPECTED_TOOL is not registered: is the QuickBooks server granted to agent proto-agents in withHuman?"
-# Every registered wh tool must be a QuickBooks or Maverick tool ("registered N tool(s): a, b, ..."; Hermes v0.22.2
+# Every registered wh tool must belong to one of the allowed servers ("registered N tool(s): a, b, ..."; Hermes v0.22.2
 # tools/mcp_tool_discovery.py:354). Anything else (another gateway server, withhuman__*) fails the deploy.
 wh_tools=$(grep -oE 'mcp__wh__[A-Za-z0-9_]+' <<<"${registered#*tool(s):}" | sort -u || true)
 [[ -n "$wh_tools" ]] || die "could not read the registered tool names from: ${registered#*INFO }"
@@ -151,8 +159,13 @@ has "$(log_since "$since")" -F "durable-park loaded" || log "WARNING: no 'durabl
 policy_report=$(tool_policy check) \
     || { printf '%s\n' "$policy_report" >&2; die "agent tool policy check failed after adding $SERVER"; }
 log "tool policy ok: $(grep -E '^cli:' <<<"$policy_report")"
-# Last, after the scope and policy checks ran: the Maverick server must be registered and granted (register it first,
-# runbook "Maverick switch-on"; until then this fails here, with every safety check above already done).
+# Last, after the scope and policy checks ran: the Maverick, accept.blue and Authorize.net servers must be registered
+# and granted (register them first, runbook "Maverick switch-on" and "accept.blue and Authorize.net switch-on"; until
+# then this fails here, with every safety check above already done).
 has "$registered" -F -- "$EXPECTED_TOOL_MAVERICK" \
     || die "$EXPECTED_TOOL_MAVERICK is not registered: is the Maverick server registered (slug maverick) and granted to agent proto-agents in withHuman?"
-log "done: $EXPECTED_TOOL and $EXPECTED_TOOL_MAVERICK available. Live check: DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py"
+has "$registered" -F -- "$EXPECTED_TOOL_ACCEPTBLUE" \
+    || die "$EXPECTED_TOOL_ACCEPTBLUE is not registered: is the accept.blue server registered (slug acceptblue) and granted to agent proto-agents in withHuman?"
+has "$registered" -F -- "$EXPECTED_TOOL_AUTHNET" \
+    || die "$EXPECTED_TOOL_AUTHNET is not registered: is the Authorize.net server registered (slug authnet) and granted to agent proto-agents in withHuman?"
+log "done: $EXPECTED_TOOL, $EXPECTED_TOOL_MAVERICK, $EXPECTED_TOOL_ACCEPTBLUE and $EXPECTED_TOOL_AUTHNET available. Live check: DURABLE_PARK_LIVE=1 .venv/bin/pytest -q tests/live/test_gateway_smoke.py"
