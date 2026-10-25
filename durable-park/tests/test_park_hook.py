@@ -2434,16 +2434,42 @@ HERMES_NON_MESSAGING = frozenset({"", "api_server", "cli", "codex", "desktop", "
                                   "msgraph_webhook", "tool", "tui", "webhook"})
 
 
-def fake_hermes_turn(monkeypatch, *, platform="", source="", key=SESSION_KEY):
-    """Stand in for Hermes's ``gateway.session_context`` for one turn (same rule as Hermes, see above)."""
+UNBOUND = object()
+
+
+def fake_hermes_turn(monkeypatch, *, platform=UNBOUND, source="", hermes_platform="", env_platform="",
+                     key=SESSION_KEY):
+    """Stand in for Hermes's ``gateway.session_context`` for one turn. Same rules as Hermes:
+
+    - ``platform``: what the gateway binds as the turn's ``HERMES_SESSION_PLATFORM`` (a ContextVar, ``_SESSION_PLATFORM``;
+      ``UNBOUND`` = never bound, as in a one-shot CLI turn);
+    - ``env_platform``: ``HERMES_SESSION_PLATFORM`` in the process environment (``get_session_env`` falls back to it
+      when nothing is bound);
+    - ``hermes_platform``: ``HERMES_PLATFORM`` in the process environment (Hermes reads it first);
+    - ``source``: ``HERMES_SESSION_SOURCE`` (``hermes chat --source <tag>`` exports any text).
+    Hermes's ``session_is_messaging_surface`` is default-ALLOW: any name outside its list counts as a chat.
+    """
     module = types.ModuleType("gateway.session_context")
+    module._UNSET = _UNSET = object()
+    module._SESSION_PLATFORM = types.SimpleNamespace(get=lambda: _UNSET if platform is UNBOUND else platform)
+
+    def get_session_env(name, default=""):
+        if name == "HERMES_SESSION_KEY":
+            return key
+        if name == "HERMES_SESSION_SOURCE":
+            return source
+        if name == "HERMES_SESSION_PLATFORM":
+            return env_platform or default if platform is UNBOUND else platform
+        return default
 
     def session_is_messaging_surface():
-        idents = (str(v or "").strip().lower() for v in (platform, source))
+        idents = (hermes_platform or get_session_env("HERMES_SESSION_PLATFORM", ""),
+                  get_session_env("HERMES_SESSION_SOURCE", ""))
+        idents = (str(v or "").strip().lower() for v in idents)
         return any(ident and ident not in HERMES_NON_MESSAGING for ident in idents)
 
+    module.get_session_env = get_session_env
     module.session_is_messaging_surface = session_is_messaging_surface
-    module.get_session_env = lambda name, default="": {"HERMES_SESSION_KEY": key}.get(name, default)
     monkeypatch.setitem(sys.modules, "gateway", types.ModuleType("gateway"))
     monkeypatch.setitem(sys.modules, "gateway.session_context", module)
 
@@ -2459,6 +2485,16 @@ def real_defaults_hook(env, monkeypatch):
 NOT_A_CHAT = [
     {"source": "cli"}, {"source": "tui"}, {"source": "desktop"}, {"platform": "local"}, {"platform": "webhook"},
     {"platform": "api_server"}, {},  # {}: nothing names a surface at all (the one-shot ``hermes chat -q`` case)
+    # Hermes's own check says "chat" for each of these (it is default-allow); durable-park's list of chat platforms
+    # it can wake says no:
+    {"source": "foo"},  # ``hermes chat -q --source foo``: any unlisted tag
+    {"source": "teams"},  # ``--source teams``: a tag, not the gateway's platform
+    {"hermes_platform": "teams"},  # HERMES_PLATFORM=teams alone, no session platform
+    {"env_platform": "teams"},  # HERMES_SESSION_PLATFORM=teams typed in a shell: the environment is not the gateway
+    {"env_platform": "telegram", "source": "foo"},
+    {"platform": "slack"}, {"platform": "discord"}, {"platform": "foo"},  # a platform durable-park cannot wake
+    {"platform": ""},  # bound, but empty
+    {"platform": "teams", "hermes_platform": "cli"},  # Hermes itself says no (HERMES_PLATFORM wins)
 ]
 
 
@@ -2514,11 +2550,31 @@ def test_a_chat_check_that_raises_fails_closed(env):
     assert env.ledger.get_by_call("sess-1", "call-1") is None and env.provider.requests == {}
 
 
-def test_default_is_chat_follows_hermes(monkeypatch):
-    fake_hermes_turn(monkeypatch, platform="teams")
+@pytest.mark.parametrize("platform", ["teams", "telegram"])
+def test_default_is_chat_passes_the_chat_platforms_durable_park_can_wake(monkeypatch, platform):
+    fake_hermes_turn(monkeypatch, platform=platform)
     assert REAL_DEFAULT_IS_CHAT() is True
-    fake_hermes_turn(monkeypatch, source="cli")
+
+
+@pytest.mark.parametrize("where", NOT_A_CHAT)
+def test_default_is_chat_refuses_everything_else(monkeypatch, where):
+    fake_hermes_turn(monkeypatch, **where)
     assert REAL_DEFAULT_IS_CHAT() is False
+
+
+def test_the_chat_platforms_are_an_explicit_list():
+    from durable_park.park_hook import CHAT_PLATFORMS
+    assert CHAT_PLATFORMS == frozenset({"teams", "telegram"})
+
+
+def test_default_is_chat_needs_the_gateways_own_binding_not_the_environment(monkeypatch):
+    # With a platform in the environment only, Hermes's get_session_env and its own check both say "teams".
+    fake_hermes_turn(monkeypatch, env_platform="teams")
+    module = sys.modules["gateway.session_context"]
+    assert module.get_session_env("HERMES_SESSION_PLATFORM", "") == "teams" and module.session_is_messaging_surface()
+    assert REAL_DEFAULT_IS_CHAT() is False
+    fake_hermes_turn(monkeypatch, platform="teams")  # the gateway's binding
+    assert REAL_DEFAULT_IS_CHAT() is True
 
 
 def test_default_is_chat_fails_closed_when_hermes_cannot_be_asked(monkeypatch):
@@ -2535,6 +2591,17 @@ def test_default_is_chat_fails_closed_when_hermes_cannot_be_asked(monkeypatch):
     module.session_is_messaging_surface = boom  # the check itself raises
     assert REAL_DEFAULT_IS_CHAT() is False
     module.session_is_messaging_surface = lambda: None  # not a real yes
+    assert REAL_DEFAULT_IS_CHAT() is False
+    # Hermes without the session platform variable (renamed or removed): cannot be asked, so not a chat.
+    fake_hermes_turn(monkeypatch, platform="teams")
+    del sys.modules["gateway.session_context"]._SESSION_PLATFORM
+    assert REAL_DEFAULT_IS_CHAT() is False
+    # the platform lookup itself raises
+    fake_hermes_turn(monkeypatch, platform="teams")
+
+    def boom_get():
+        raise RuntimeError("cannot read")
+    sys.modules["gateway.session_context"]._SESSION_PLATFORM = types.SimpleNamespace(get=boom_get)
     assert REAL_DEFAULT_IS_CHAT() is False
 
 

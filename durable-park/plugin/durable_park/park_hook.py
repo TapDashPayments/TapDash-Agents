@@ -153,16 +153,34 @@ def default_session_key() -> str:
     return get_session_env("HERMES_SESSION_KEY", "") or ""
 
 
-def default_is_chat() -> bool:
-    """Is the running turn a human chat (Teams, Telegram, ...) that an approval can wake later?
+# The chat platforms durable-park can wake: a decision comes back as a message injected into the parked chat through that
+# platform's own adapter (``wake.py``). Teams and Telegram are the adapters that are connected and tested here. To add a
+# platform, test a full park -> approve -> wake -> execute round trip on it, then add its name (the value the gateway
+# binds as ``HERMES_SESSION_PLATFORM``, ``platform.value``) to this set. The default is "no".
+CHAT_PLATFORMS: frozenset[str] = frozenset({"teams", "telegram"})
 
-    This is Hermes's own check (``gateway.session_context.session_is_messaging_surface``): it is False for the
-    CLI, TUI, desktop, local, api_server and webhook surfaces. It fails closed: if Hermes cannot be asked (the
-    import fails, the check is missing in an older Hermes, or it raises) or it does not answer a plain ``True``,
-    the turn is NOT a chat.
+
+def default_is_chat() -> bool:
+    """Is the running turn a chat that durable-park can wake later? Both of these must hold:
+
+    1. The platform the GATEWAY bound for this turn (``gateway.session_context._SESSION_PLATFORM``, a context variable
+       that only the gateway's ``set_session_vars`` sets, never the process environment) is one of
+       ``CHAT_PLATFORMS``. Hermes's own check is default-allow (any name outside its short list of non-chat surfaces
+       counts as a chat, so ``hermes chat -q --source anything`` or ``HERMES_PLATFORM=x`` would pass it), and
+       ``get_session_env`` falls back to the environment, so typing ``HERMES_SESSION_PLATFORM=teams`` in a shell
+       would pass it too. Reading the bound value closes both for ordinary use. Someone with a shell as ``hermes``
+       is already trusted to run commands; this only stops the agent and ordinary CLI use from passing by accident.
+    2. Hermes's own check (``session_is_messaging_surface``) also says chat: it is False for the CLI, TUI, desktop,
+       local, api_server and webhook surfaces, and when ``HERMES_PLATFORM`` names one of them.
+
+    It fails closed: an import error, a missing name (an older or changed Hermes), an exception, an unbound or empty
+    or unknown platform, or any answer but a plain ``True`` means "not a chat".
     """
     try:
-        from gateway.session_context import session_is_messaging_surface
+        from gateway.session_context import _SESSION_PLATFORM, _UNSET, session_is_messaging_surface
+        bound = _SESSION_PLATFORM.get()
+        if bound is _UNSET or not isinstance(bound, str) or bound.strip().lower() not in CHAT_PLATFORMS:
+            return False
         return session_is_messaging_surface() is True
     except Exception:  # noqa: BLE001 - fail closed: not knowing means "not a chat"
         return False
