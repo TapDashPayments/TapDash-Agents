@@ -35,9 +35,10 @@ safety items needs finishing: [what is left](durable-park/docs/backlog.md#before
 
 ## Project map
 
-**In plain English:** the agent never touches money or outside systems by itself. Every risky tool call is
-saved, a person says yes or no in the withHuman app, and only then does the saved call run, once. This is the
-short map; the full one (every part, port and file) is in [architecture section 1](durable-park/docs/architecture.md#1-system-map).
+**In plain English:** the agent can never move money, or tell anyone outside, without a person. Every risky tool
+call is saved, a person says yes or no in the withHuman app, and only then does the saved call run, once. Lookups,
+and the calls a server itself marks `auto` (no money moves, nothing is sent to anyone outside), run on their own. This
+is the short map; the full one (every part, port and file) is in [architecture section 1](durable-park/docs/architecture.md#1-system-map).
 
 ```mermaid
 flowchart TD
@@ -55,8 +56,8 @@ flowchart TD
   G -->|"through the tunnel"| T["Tunnel container<br/>(QuickBooks, Maverick, accept.blue<br/>and Authorize.net servers)"]
   T -->|"QuickBooks API"| Q[("QuickBooks Online<br/>sandbox")]
   T -->|"Maverick API<br/>(placeholder until sandbox)"| M[("Maverick Payments")]
-  T -->|"accept.blue API<br/>(not switched on yet)"| AB[("accept.blue")]
-  T -->|"Authorize.net API<br/>(not switched on yet)"| AN[("Authorize.net")]
+  T -->|"accept.blue API<br/>(placeholder key until sandbox access)"| AB[("accept.blue")]
+  T -->|"Authorize.net API<br/>(placeholder login until sandbox access)"| AN[("Authorize.net")]
   G -->|"with withHuman's sign-in"| S[("Supabase CRM dev, monday,<br/>DocuSign demo")]
   A -->|"copies of every turn"| F[("Langfuse<br/>traces, 30 days")]
 ```
@@ -72,7 +73,7 @@ flowchart TD
 | **withHuman MCP gateway** | Passes tool calls on to the right server, after the rules say yes. | Hosted |
 | **Bridge** | When the gateway asks, says yes only for a call that matches an approved one. | [`durable-park/bridge/`](durable-park/bridge/) |
 | **Tunnel container** | Runs the QuickBooks, Maverick, accept.blue and Authorize.net servers on the VM and connects them to the gateway. | [`durable-park/deploy/tunnel/`](durable-park/deploy/tunnel/) |
-| **QuickBooks, Maverick, accept.blue, Authorize.net** | The payment and accounting systems (sandbox; Maverick has placeholder settings for now; accept.blue and Authorize.net are wired in the code but not switched on yet). | Intuit, Maverick, accept.blue, Authorize.net |
+| **QuickBooks, Maverick, accept.blue, Authorize.net** | The payment and accounting systems (sandbox; Maverick has placeholder settings for now; accept.blue and Authorize.net are switched on, since 2026-10-25, with placeholder logins). | Intuit, Maverick, accept.blue, Authorize.net |
 | **Supabase, monday, DocuSign** | Their own official servers on the internet; withHuman holds the sign-in. | Hosted by each company |
 | **Langfuse** | Keeps a copy of every chat and tool call for review (30 days). | Hosted ([us.cloud.langfuse.com](https://us.cloud.langfuse.com)) |
 
@@ -101,8 +102,8 @@ running on the test VM.
 | withHuman tunnel | Container that connects the QuickBooks, Maverick, accept.blue and Authorize.net servers on the VM to the withHuman gateway. `build.sh` builds the image and proves that every server in it lists the tool approvals the pipeline rules were written from | `quay.io/withhuman/tunnel:0.0.369` | withHuman's | [withHuman](https://withhuman.ai) |
 | QuickBooks Online MCP server (Intuit) | The QuickBooks tools (create bill, payment, ...). Built into the tunnel image | commit `31a1dd5` | Apache-2.0 | [github](https://github.com/intuit/quickbooks-online-mcp-server) |
 | Maverick MCP server (TapDash, `maverick-mcp`) | The 42 Maverick Payments tools (lookups, boarding, vault, ACH, disputes, tickets, refunds). Built into the tunnel image from root's read-only checkout `/opt/maverick-mcp-src`, pinned in [`maverick-mcp.sha`](durable-park/deploy/tunnel/maverick-mcp.sha); its Python packages come only from its hashed lock file. Live since 2026-10-25 with **placeholder settings** until Maverick gives sandbox access ([gateway setup](durable-park/docs/gateway-setup.md#maverick-server-source)) | commit `d6f43f922a9cf3416c6fdb536a07fd67caec17ac` (`d6f43f9`) | private (TapDash) | [github](https://github.com/TapDashPayments/maverick-mcp) (private) |
-| accept.blue MCP server (TapDash, `acceptblue-mcp`) | The 28 accept.blue tools (lookups, customers, invoices, charges, refunds, ...; 7 need no person, 21 always ask one). Built into the tunnel image from root's read-only checkout `/opt/acceptblue-mcp-src`, pinned in [`acceptblue-mcp.sha`](durable-park/deploy/tunnel/acceptblue-mcp.sha); its Python packages come only from its hashed lock file. **Reviewed in the repo, not built or switched on yet** ([gateway setup](durable-park/docs/gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)) | commit `9bb8d722a0d5fc9dce08437eedc8328d34005bcc` (`9bb8d72`) | private (TapDash) | [github](https://github.com/TapDashPayments/acceptblue-mcp) (private) |
-| Authorize.net MCP server (TapDash, `authorizenet-mcp`) | The 24 Authorize.net tools (lookups, customer profiles, charges, refunds, subscriptions, ...; 5 need no person, 19 always ask one). Built into the tunnel image from root's read-only checkout `/opt/authorizenet-mcp-src`, pinned in [`authorizenet-mcp.sha`](durable-park/deploy/tunnel/authorizenet-mcp.sha); its Python packages come only from its hashed lock file; its webhook receiver is not run. **Reviewed in the repo, not built or switched on yet** ([gateway setup](durable-park/docs/gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)) | commit `6084f3693b135d8e3d4c237cc147ad963826d654` (`6084f36`) | private (TapDash) | [github](https://github.com/TapDashPayments/authorizenet-mcp) (private) |
+| accept.blue MCP server (TapDash, `acceptblue-mcp`) | The 28 accept.blue tools (lookups, customers, invoices, charges, refunds, ...; 7 need no person, 21 always ask one). Built into the tunnel image from root's read-only checkout `/opt/acceptblue-mcp-src`, pinned in [`acceptblue-mcp.sha`](durable-park/deploy/tunnel/acceptblue-mcp.sha); its Python packages come only from its hashed lock file. **Live in the tunnel since 2026-10-25 16:31 UTC, with placeholder settings** ([gateway setup](durable-park/docs/gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)) | commit `9bb8d722a0d5fc9dce08437eedc8328d34005bcc` (`9bb8d72`) | private (TapDash) | [github](https://github.com/TapDashPayments/acceptblue-mcp) (private) |
+| Authorize.net MCP server (TapDash, `authorizenet-mcp`) | The 24 Authorize.net tools (lookups, customer profiles, charges, refunds, subscriptions, ...; 5 need no person, 19 always ask one). Built into the tunnel image from root's read-only checkout `/opt/authorizenet-mcp-src`, pinned in [`authorizenet-mcp.sha`](durable-park/deploy/tunnel/authorizenet-mcp.sha); its Python packages come only from its hashed lock file; its webhook receiver is not run. **Live in the tunnel since 2026-10-25 16:31 UTC, with placeholder settings** ([gateway setup](durable-park/docs/gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)) | commit `6084f3693b135d8e3d4c237cc147ad963826d654` (`6084f36`) | private (TapDash) | [github](https://github.com/TapDashPayments/authorizenet-mcp) (private) |
 | MCP - Model Context Protocol | The standard the agent uses to call tools through the gateway | - | open standard | [site](https://modelcontextprotocol.io) |
 | Starlette + uvicorn | Web framework and server for the bridge and the receiver | 1.9.0 / 0.54.0 | BSD-3-Clause | [starlette](https://github.com/encode/starlette) · [uvicorn](https://github.com/encode/uvicorn) |
 | httpx | HTTP client used by one-time provisioning | 0.28.1 | BSD-3-Clause | [github](https://github.com/encode/httpx) |
@@ -143,8 +144,11 @@ running on the test VM.
 
 The map below shows who does what. Plain version: people chat with the agent in Telegram or Teams. The agent's
 durable-park plugin stops every risky request and asks withHuman. An approver says yes or no in the withHuman app.
-After a yes, the saved request runs once, through withHuman's gateway and a small tunnel container, into the
-QuickBooks sandbox.
+After a yes, the saved request runs once, through withHuman's gateway. QuickBooks, Maverick, accept.blue and
+Authorize.net are reached through a small tunnel container on the VM (QuickBooks is a sandbox; the other three run on
+placeholder settings until we get sandbox access). Supabase CRM dev, monday and DocuSign demo are remote servers that
+the gateway reaches over the internet. Lookups and each server's own `auto` calls (no money, nothing sent outside) are
+approved by the rules without asking a person.
 
 ```mermaid
 flowchart LR
@@ -165,12 +169,16 @@ flowchart LR
     bridge["Bridge<br/>(user dpbridge)"]
     sweep["Sweep<br/>every 5 minutes"]
     relay["Deck relay<br/>(user hermes, Tailscale only)"]
-    tun["wh-tunnel container<br/>(QuickBooks tool server)"]
+    tun["wh-tunnel container<br/>(QuickBooks, Maverick, accept.blue<br/>and Authorize.net tool servers)"]
   end
 
   deckapp(["Deck app<br/>on your computer"])
   wh["withHuman<br/>approvals + gateway"]
   qbo[("QuickBooks sandbox")]
+  mav[("Maverick<br/>(placeholder settings)")]
+  ab[("accept.blue<br/>(placeholder settings)")]
+  an[("Authorize.net<br/>(placeholder settings)")]
+  remote[("Supabase CRM dev, monday,<br/>DocuSign demo<br/>(remote servers)")]
   lf[("Langfuse cloud")]
 
   person -->|"messages"| tg
@@ -187,6 +195,10 @@ flowchart LR
   bridge -->|"checks withHuman, read-only"| wh
   wh -->|"approved call, over the tunnel"| tun
   tun -->|"QuickBooks API"| qbo
+  tun -.->|"Maverick API"| mav
+  tun -.->|"accept.blue API"| ab
+  tun -.->|"Authorize.net API"| an
+  wh -->|"approved call, with the sign-in withHuman holds"| remote
   agent -->|"every turn and tool call"| lfp
   lfp -->|"traces out, one way"| lf
   agent -->|"every tool call, watch only"| deckp

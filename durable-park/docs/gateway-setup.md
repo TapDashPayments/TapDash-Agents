@@ -18,8 +18,8 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel digest | `sha256:dad0c8b52d653b4969161a8ec589cf37048da6eec5747e098969e6a281f0c3e0` (this is also what `:latest` pointed to when pinned; published 2026-10-16) |
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
-| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` (2026-10-25: QuickBooks + Maverick at d6f43f9; built with `build.sh`). **Running** in `wh-tunnel` since 2026-10-25. Rollback images: `...-mav-e4a2b10` (the previous Maverick pin; also set it back in `maverick-mcp.sha`, `docker-compose.yml` and `/opt/maverick-mcp-src`) and `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (QuickBooks only: also remove the `maverick` entry from `tunnel.yaml`) |
-| Next image (reviewed, **not built or running yet**) | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36`: the same plus the accept.blue server at `9bb8d72` and the Authorize.net server at `6084f36`. The tag lists the commit of every server inside. Until an admin builds it, the running tunnel is the `-mav-d6f43f9` image and the new servers are not reachable. **To go back** after it is live: the previous image above, with the previous `docker-compose.yml`, `tunnel.yaml` and the two new `.env` files left unused (see [rollback](runbook.md#acceptblue-and-authorizenet)) |
+| Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` (2026-10-25: QuickBooks + Maverick at d6f43f9; built with `build.sh`). **Ran** in `wh-tunnel` from 2026-10-25 15:22 UTC to 16:31 UTC; it is the rollback image now (still on the VM). More rollback images: `...-mav-e4a2b10` (the previous Maverick pin; also set it back in `maverick-mcp.sha`, `docker-compose.yml` and `/opt/maverick-mcp-src`) and `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (QuickBooks only: also remove the `maverick` entry from `tunnel.yaml`) |
+| Current image (**live since 2026-10-25 16:31 UTC**) | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36`: the same plus the accept.blue server at `9bb8d72` and the Authorize.net server at `6084f36`. The tag lists the commit of every server inside. `build.sh` passed (all three approvals checks ok) and the check service listed maverick 42, quickbooks 142, acceptblue 28 and authnet 24 tools; the tunnel serves 4 servers. **To go back**: the previous image above, with the previous `docker-compose.yml`, `tunnel.yaml` and the two new `.env` files left unused (see [rollback](runbook.md#acceptblue-and-authorizenet)) |
 | Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
@@ -102,7 +102,7 @@ all three checkouts.
 | Repo | `TapDashPayments/acceptblue-mcp` (private) | `TapDashPayments/authorizenet-mcp` (private) |
 | Pinned commit | the one line in [`deploy/tunnel/acceptblue-mcp.sha`](../deploy/tunnel/acceptblue-mcp.sha) (`9bb8d722a0d5fc9dce08437eedc8328d34005bcc`) | the one line in [`deploy/tunnel/authorizenet-mcp.sha`](../deploy/tunnel/authorizenet-mcp.sha) (`6084f3693b135d8e3d4c237cc147ad963826d654`) |
 | Checkout on the VM | `/opt/acceptblue-mcp-src` (owner `root`, mode 0755, files 0644, detached at the pinned commit) | `/opt/authorizenet-mcp-src` (same) |
-| Access (to create) | deploy key `proto-agents-root-read` on that repo (**read-only**), private key `/root/.ssh/acceptblue_mcp_deploy` | deploy key `proto-agents-root-read` on that repo (**read-only**), private key `/root/.ssh/authorizenet_mcp_deploy` |
+| Access (made 2026-10-25) | deploy key `proto-agents-root-read` on that repo (**read-only**), private key `/root/.ssh/acceptblue_mcp_deploy` | deploy key `proto-agents-root-read` on that repo (**read-only**), private key `/root/.ssh/authorizenet_mcp_deploy` |
 | Skills the agent reads | `/opt/acceptblue-mcp-src/skills` | `/opt/authorizenet-mcp-src/skills` |
 | Python package, tool prefix | `acceptblue_mcp`, `ablue_` | `authorizenet_mcp`, `authnet_` |
 | Gateway server slug (the name in withHuman) | `acceptblue` | `authnet` |
@@ -123,7 +123,7 @@ flowchart LR
   coN -->|"skills folder, read only"| hermes
 ```
 
-How to set them up on the VM (as `ubuntu`, with sudo; **not done yet**, these are the admin steps). Do the whole list
+How to set them up on the VM (as `ubuntu`, with sudo; **done on 2026-10-25**, kept as the steps to repeat). Do the whole list
 once per server, with the names from the table (`acceptblue` and `acceptblue-mcp`, then `authorizenet` and `authorizenet-mcp`):
 
 1. **Key.** `sudo ssh-keygen -t ed25519 -N '' -C root@proto-agents-acceptblue-mcp-src -f /root/.ssh/acceptblue_mcp_deploy`.
@@ -170,7 +170,7 @@ through the same `wh` gateway as QuickBooks, and every call goes through the sam
 
 ```mermaid
 flowchart LR
-  agent["Hermes agent<br/>(proto-agents)"] -->|"tool call, parked and asked first"| wh["withHuman gateway<br/>(approval rules, revision 15)"]
+  agent["Hermes agent<br/>(proto-agents)"] -->|"tool call, parked and asked first"| wh["withHuman gateway<br/>(approval rules, revision 16)"]
   wh -->|"read: approved; anything else: bridge or a person"| sb["Supabase MCP<br/>(tapdash-crm-dev, read-only)"]
   wh -->|"same rules"| mo["monday MCP<br/>(tapdash.monday.com)"]
   wh -->|"same rules"| ds["DocuSign MCP<br/>(demo account)"]
@@ -240,7 +240,7 @@ byte-identical, same SHA-256), and `check` said `maverick: ok, 42 tools`.
 ## The accept.blue and Authorize.net servers in the image
 
 The `acceptblue` and `authnet` stages of the `Dockerfile` are the `maverick` stage again with other names (written and
-tested, **not built yet**: the build needs Docker and an admin, see [the admin steps](runbook.md#acceptblue-and-authorizenet)).
+tested, **built, live since 2026-10-25 16:31 UTC**; see [the admin steps](runbook.md#acceptblue-and-authorizenet)).
 For each server, in plain words:
 
 1. The builder is the pinned tunnel image, so the venv's Python is the image's own.
@@ -410,7 +410,7 @@ Verified result (dummy credentials, 2026-10-19): `quickbooks: ok, 142 tools`
 (the server's README claims 145; `tools/list` over MCP returns 142).
 With the Maverick server (image `...-mav-e4a2b10`, dummy QuickBooks values and the Maverick placeholders,
 2026-10-24): `maverick: ok, 42 tools` and `quickbooks: ok, 142 tools`.
-With the two payment servers added, `check` should also say `acceptblue: ok, 28 tools` and `authnet: ok, 24 tools` (expected from `--list-approvals`; **not run yet**, the image is not built).
+With the two payment servers added (image `...-ab-9bb8d72-an-6084f36`, 2026-10-25), `check` also said `acceptblue: ok, 28 tools` and `authnet: ok, 24 tools`, next to `maverick: ok, 42 tools` and `quickbooks: ok, 142 tools`.
 
 ## Never run these (they print the secrets)
 
@@ -537,6 +537,8 @@ the wizard layout is **unverified** on the live tenant.
    saved on this step. If the **Tools** list is empty, click **Reload tools**.
 
 ### HUMAN STEP B2: register the accept.blue and Authorize.net servers
+
+**Done 2026-10-25 16:32 UTC:** both servers are registered (tunnel `proto-agents`, scope `default`, auth none) and granted to agent `proto-agents`, mode all. The steps stay here for a rebuild.
 
 Only after the new image is built and running and the tunnel shows **online** (and `check` said `ok` for both).
 Do it once per server, the same way as step B, with these names (the slug is permanent):
@@ -699,11 +701,9 @@ is **unverified** on the live tenant.
 
 **C3. Pipeline rules (Approval pipelines -> the Entry pipeline)**
 
-The live entry pipeline is **revision 15** (active since 2026-10-25 02:54 UTC; revision 12 added the Maverick blocks, 13 and 14 the three remote servers, 15 made those servers' gateway rules match the server name only). Its source of truth is the reviewed
-file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (31 blocks, six more than the live 25: see the next paragraph), and
-[architecture section 1](architecture.md#1-system-map) has the same list as a table. **The file is ahead of the live revision:** it adds six blocks for the accept.blue and Authorize.net servers (a candidate
-revision 16, row 7a below), which are not live until an admin saves the file as a new revision and activates it. Until then
-every call to those two servers asks a person twice (block 8 names both servers). Do not rebuild it from this
+The live entry pipeline is **revision 16** (saved 2026-10-25 16:35:04 UTC, active since 16:35:07; revision 12 added the Maverick blocks, 13 and 14 the three remote servers, 15 made those servers' gateway rules match the server name only (active from 02:54 UTC), 16 added the accept.blue and Authorize.net blocks). Rollback: revision 15. Its source of truth is the reviewed
+file [`deploy/withhuman/entry-pipeline.json`](../deploy/withhuman/entry-pipeline.json) (31 blocks, the same as the live revision 16), and
+[architecture section 1](architecture.md#1-system-map) has the same list as a table. **Revision 16 added six blocks** for the accept.blue and Authorize.net servers (row 7a below). If an admin goes back to revision 15, every call to those two servers asks a person twice (block 8 names both servers). Do not rebuild it from this
 page: save the file's blocks as a new entry revision in withHuman and activate it (a save activates at once). Blocks
 run in order and the first one that decides ends the pipeline. Every block for `proto-agents` also tests the agent
 slug. Every "ask an approver" uses the escalation path `notify-yaakov-yehuda`.
@@ -717,7 +717,7 @@ slug. Every "ask an approver" uses the escalation path `notify-yaakov-yehuda`.
 | 5 | `pa-park-quickbooks-read` | server `park:quickbooks`, a read tool (same verbs) | Approve |
 | 6 | `pa-hermes-read` | server `hermes`, one of 12 read-only tools (for example `web_search`, `memory`) | Approve |
 | 7 | `pa-hermes-local-deny` | server `hermes`, one of 12 local machine tools (for example `terminal`, `write_file`) | Deny, until Clean Setup Phase 2 |
-| 7a | `pa-park-acceptblue-auto`, `pa-gateway-acceptblue-auto`, `acceptblue-gateway-write-bridge`, `pa-park-authnet-auto`, `pa-gateway-authnet-auto`, `authnet-gateway-write-bridge` (file only, candidate revision 16) | for each server: park and gateway rules that approve only the tools **the server itself marks `auto`** (accept.blue: `describe_lookup`, `read`, `search_lookups`, `create_customer`, `create_customer_from_transaction`, `update_customer`, `create_invoice` (a draft); Authorize.net: `describe_lookup`, `read`, `search_lookups`, `save_customer_profile`, `save_shipping_address`), then a gateway rule that sends every other call to webhook block `durable-park-bridge` (approve only the replay of an approved park) | Approve the listed tools; bridge for the rest. Everything else on these servers reaches block 8 at park time (a person) |
+| 7a | `pa-park-acceptblue-auto`, `pa-gateway-acceptblue-auto`, `acceptblue-gateway-write-bridge`, `pa-park-authnet-auto`, `pa-gateway-authnet-auto`, `authnet-gateway-write-bridge` (live since revision 16) | for each server: park and gateway rules that approve only the tools **the server itself marks `auto`** (accept.blue: `describe_lookup`, `read`, `search_lookups`, `create_customer`, `create_customer_from_transaction`, `update_customer`, `create_invoice` (a draft); Authorize.net: `describe_lookup`, `read`, `search_lookups`, `save_customer_profile`, `save_shipping_address`), then a gateway rule that sends every other call to webhook block `durable-park-bridge` (approve only the replay of an approved park) | Approve the listed tools; bridge for the rest. Everything else on these servers reaches block 8 at park time (a person) |
 | 8 | `money-server-human` | ANY agent: the server is a payments or accounting server (QuickBooks, Stripe, PayPal, Maverick, Accept Blue, Authorize.net, Plaid, any name containing `pay`, `bank`, `billing`, `treasury`, ...), or the tool's `<server>__` prefix is one, or (extra) the tool name has a money verb (`pay`, `transfer`, `wire`, `refund`, `charge`, `deposit`, `payout`, `send_money`, ...) | Ask an approver. Money never auto-approves |
 | 9 | `pa-mcp-human` | server starts with `mcp:` | Ask an approver |
 | 10 | `pa-default-human` | any other call of agent `proto-agents` | Ask an approver |
@@ -745,7 +745,7 @@ holds when withHuman's own API is slow or down while the bridge asks it: the bri
 ### Known risks / unverified
 
 - Settled live: argument rewrites by the gateway (`withhuman_scope` added, `2.0` sent as `2`) are absorbed by
-  `ledger.normalize_args`; park requests are matched by block 1 of revision 15 (the money regex on the Hermes tool name).
+  `ledger.normalize_args`; park requests are matched by block 1 of the entry pipeline (the same in revisions 15 and 16: the money regex on the Hermes tool name).
 - The bridge relies on withHuman's request list (`GET /api/v1/requests`: `q` is a substring of the tool name, newest
   first, `limit` up to 200) and on the consumption record (`consumption.consumed_at`); both were read in withHuman's
   docs and source and verified live on 2026-10-22 ([spec](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md)).
