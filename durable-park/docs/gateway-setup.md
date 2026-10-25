@@ -83,7 +83,7 @@ How it was set up (2026-10-25), and how to redo it on a fresh VM (as `ubuntu`, w
    /opt/maverick-mcp-src checkout -q <new sha>`, then the same `chown` and `chmod`.
 3. Rebuild with `sudo bash build.sh` (below). It refuses when the checkout is not root's or has a writable or foreign
    file, has grafts or replace refs, is at another commit, has any local change (also ignored files such as
-   `__pycache__`), or when the image tag does not end in `-mav-<first 7>`. After the build it compares each server's
+   `__pycache__`), or when the image tag does not end in `-mav-<first 7>-ab-<first 7>-an-<first 7>`. After the build it compares each server's
    `--list-approvals` in the new image with the committed `*-approvals.json` file and fails on any difference
    ([Proof against the built image](#proof-against-the-built-image)); if a tool was added or changed its approval level, update
    the approvals file, the approval rules and the tests together.
