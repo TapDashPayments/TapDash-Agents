@@ -33,6 +33,10 @@
                                                        -> print one alert line per marker (and one when the last
   marker is gone; state in ``lift_unwritable_alert_state.json``)
 
+* Hermes is not on the pinned commit in ``deploy/hermes-pin.json``, or the update block (the checkout's git
+  ``http.https://github.com/NousResearch/.proxy`` pointing at a dead address, GitHub #76) is off
+                                                       -> print one alert line (again when the problem changes or
+  after 24 hours, and one when it is fixed; state in ``hermes_pin_alert_state.json``)
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
 the plugin package, which needs the AAP SDK) and ``receiver/wake_post.py``, both found relative to this
@@ -111,6 +115,12 @@ LIFT_TEXTS = {
 }
 PLUGIN_LOAD = "plugin_load.json"  # the load proof the plugin writes in the gateway (pid of that process)
 PLUGIN_LOAD_STATE = "plugin_load_alert_state.json"
+HERMES_PIN_FILE = os.path.join(_REPO, "deploy", "hermes-pin.json")  # the one Hermes commit we run (GitHub #76)
+HERMES_PIN_STATE = "hermes_pin_alert_state.json"
+HERMES_BLOCK_KEY = "http.https://github.com/NousResearch/.proxy"  # set by deploy/hermes_pin.sh block
+HERMES_BLOCK_VALUE = "http://127.0.0.1:9"  # nothing listens there, so every fetch from GitHub fails
+HERMES_PIN_REALERT = timedelta(hours=24)
+GIT_TIMEOUT = 5  # seconds
 GATEWAY_UNIT = "hermes-gateway"
 SYSTEMCTL_TIMEOUT = 5  # seconds
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
@@ -854,6 +864,58 @@ def _load_proof_alert(ledger_path: str, now: datetime) -> None:
     _save_state(state_path, {"alerted": alerted})
 
 
+def _hermes_checkout() -> str:
+    """The Hermes source checkout (``HERMES_AGENT_DIR``, default ``~/.hermes/hermes-agent``)."""
+    return os.environ.get("HERMES_AGENT_DIR") or os.path.expanduser("~/.hermes/hermes-agent")
+
+
+def _git(checkout: str, *args: str) -> str | None:
+    """``git -C <checkout> <args>`` stdout, stripped; ``None`` on any failure (never raises)."""
+    try:
+        done = subprocess.run(["git", "-C", checkout, *args], capture_output=True, text=True,
+                              timeout=GIT_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def _pin_problems(pin_path: str, checkout: str) -> tuple[str | None, list[str]]:
+    """(pinned version, problems). No problems means Hermes runs the pinned commit and updates are blocked."""
+    pin = _load_state(pin_path)  # missing, unreadable or not a mapping -> {}
+    version, commit = pin.get("version"), pin.get("commit")
+    if not isinstance(version, str) or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None, [f"the pin file {pin_path} cannot be read"]
+    problems = []
+    head = _git(checkout, "rev-parse", "HEAD")
+    if head is None:
+        problems.append(f"could not read the Hermes checkout at {checkout}")
+    elif head != commit:
+        described = _git(checkout, "describe", "--tags", "--always", "HEAD") or "unknown"
+        problems.append(f"Hermes is at {head[:10]} ({_clean(described, 60)}), not the pinned {version} ({commit[:10]})")
+    if _git(checkout, "config", "--get", HERMES_BLOCK_KEY) != HERMES_BLOCK_VALUE:
+        problems.append("the update block is off (anyone could run hermes update or send /update in chat)")
+    return version, problems
+
+
+def _pin_alert(ledger_path: str, now: datetime) -> None:
+    """Alert when Hermes leaves the pinned commit or the update block is removed (GitHub #76): once per
+    problem, again after 24 hours while it lasts, and once when it is fixed."""
+    directory = os.path.dirname(os.path.abspath(ledger_path))
+    state_path = os.path.join(directory, HERMES_PIN_STATE)
+    state = _load_state(state_path)
+    version, problems = _pin_problems(HERMES_PIN_FILE, _hermes_checkout())
+    if problems:
+        key = "; ".join(problems)
+        last = _parse_stamp(state.get("alerted_at"))
+        if key != state.get("problem") or last is None or now - last >= HERMES_PIN_REALERT:
+            print(f"durable-park ALERT: Hermes is not as pinned \u2014 {_clean(key, 600)}. Updates are blocked on "
+                  "purpose until a new version is tested (GitHub #76); see the runbook: Upgrade Hermes.", flush=True)
+            _save_state(state_path, {"problem": key, "alerted_at": now.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    elif state.get("problem"):
+        print(f"durable-park: Hermes is back on the pinned {version} with updates blocked.", flush=True)
+        _save_state(state_path, {})
+
+
 def main(argv=None) -> int:
     """Run the sweep. With ``TEAMS_ALERT_WEBHOOK_URL`` set, what the sweep printed to stdout (its alert lines,
     which hold ids, tool names and reasons, never argument values) is also posted to Teams, even when the sweep
@@ -919,6 +981,11 @@ def _sweep(argv=None) -> int:
         _load_proof_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the load-proof alert must never stop the sweep
         _err(f"load proof alert failed ({type(exc).__name__})")
+    try:
+        _pin_alert(args.ledger, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - never stop the sweep, never hide the failure
+        print(f"durable-park ALERT: Hermes pin check failed ({type(exc).__name__}); "
+              "check the pin by hand: deploy/hermes_pin.sh check", flush=True)
     try:
         _outcome_giveup_alert(ledger, args.ledger)
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep

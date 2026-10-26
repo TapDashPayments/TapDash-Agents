@@ -80,7 +80,7 @@
     },
     {
       "name": "Sweep (cron)",
-      "code": ["durable-park/scripts/**", "durable-park/deploy/approvers.example.json"],
+      "code": ["durable-park/scripts/**", "durable-park/deploy/approvers.example.json", "durable-park/deploy/hermes-pin.json"],
       "docs": [
         "durable-park/docs/architecture.md",
         "durable-park/docs/runbook.md"
