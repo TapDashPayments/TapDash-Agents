@@ -280,17 +280,24 @@ token with the `repo`, `workflow`, `read:org` and `gist` scopes, which reaches e
 
 Alerts come from the sweep. They arrive in the Telegram DM with the bot (the cron job's delivery target) and, because `TEAMS_ALERT_WEBHOOK_URL` is set, also in Teams as an Adaptive Card.
 
-### Approval waiting for you
+### How you hear about an approval
 
-`durable-park: P-XXXX (<tool>) is waiting for your approval. Approve or deny it: https://app.withhuman.ai/queue/<request id>`
+A call that needs a person is announced by **withHuman itself**, the moment it needs you, on the channels set in your
+withHuman account (notification settings): the withHuman phone app, text message, WhatsApp, Slack, Discord and email.
+Every one links to the request's page, where you approve or deny.
 
-A call needs a person. The sweep says this once per park, within about 5 minutes of the park, in Telegram and in
-Teams (the Teams card has an **Open P-XXXX in withHuman** button). The bot's own reply in the chat where you asked
-carries the same link at once. Tap it, sign in to withHuman if asked, and approve or deny. The backup-approver line
-(below) carries the link too. Nothing to fix: this is the normal way to reach a waiting approval.
-
-withHuman's own alerts (text message, WhatsApp, Slack, Discord, the withHuman phone app) are set per person in the
-withHuman app (account notification settings), not here. They link to the same page.
+- **Teams:** withHuman has no Teams channel, so the approver's withHuman email alerts go to a Teams **channel's email
+  address** (channel menu, **Get email address**; the channel's advanced settings must accept mail from withHuman).
+  The alert then appears in that channel at once. Set up on 2026-10-26 for the admin.
+- **The chat where you asked:** the bot's reply ("waiting for approval") carries the same link at once
+  (`https://app.withhuman.ai/queue/<request id>`, built by `plugin/durable_park/links.py`).
+- **Telegram:** withHuman has no Telegram channel. Telegram gets the link only in the bot's reply above.
+- **Unanswered after the primary window:** the backup-approver alert ([below](#backup-approver-and-unanswered-approvals-tap2-121)) ends with the link too.
+- **Hermes Deck cannot approve yet:** withHuman refuses decisions made with a personal API key ("Session ID is
+  required."), a withHuman bug: [withHumanAI/withHuman#112](https://github.com/withHumanAI/withHuman/issues/112), fix
+  proposed in [#113](https://github.com/withHumanAI/withHuman/pull/113). Approve in the withHuman app until it ships.
+  Before it ships, the Deck relay must move to its own Linux user: today it runs as `hermes`, the agent's user, which
+  can read Deck's withHuman key ([backlog](backlog.md)).
 
 ### Outcome UNKNOWN
 
