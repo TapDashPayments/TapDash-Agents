@@ -35,7 +35,8 @@
         "durable-park/plugin/durable_park/breaker.py",
         "durable-park/plugin/durable_park/wake.py",
         "durable-park/plugin/durable_park/executor.py",
-        "durable-park/plugin/durable_park/links.py"
+        "durable-park/plugin/durable_park/links.py",
+        "durable-park/plugin/durable_park/outcome.py"
       ],
       "docs": ["durable-park/docs/architecture.md"]
     },
