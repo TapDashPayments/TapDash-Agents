@@ -13,7 +13,7 @@
 #      /opt/durable-park/libexec/hermes-secrets
 #   4. Hermes (as user hermes, through Hermes's own CLI): plugin symlink; `hermes plugins enable` (PM
 #      admission installs the plugin.yaml python_dependencies into Hermes's environment); plugin settings;
-#      plugins.hook_callback_timeout 60; the local webhook platform (127.0.0.1:8644, route durable-park-wake,
+#      plugins.hook_callback_timeout 60; agent.restart_drain_timeout 45; the local webhook platform (127.0.0.1:8644, route durable-park-wake,
 #      deliver log, rate_limit 120) whose secret is ${DURABLE_PARK_WAKE_SECRET}, supplied at startup by
 #      the `command` secret source (the helper above reads wake_secret, and instance_token once it exists, for
 #      deploy/hermes_mcp.sh); no copy of a secret in config.yaml/.env
@@ -228,6 +228,9 @@ fi
 
 set_cfg() { hermes_cli config set "$1" "$2" >/dev/null; }
 set_cfg plugins.hook_callback_timeout 60
+# GitHub #66: a stop or restart waits up to 45 s for a reply in progress (Hermes default 0 cuts it off).
+# Keep it at least 15 s under the gateway unit's TimeoutStopSec (70).
+set_cfg agent.restart_drain_timeout 45
 set_cfg "plugins.entries.$PLUGIN_ID.allow_gateway_injection" true
 set_cfg "plugins.entries.$PLUGIN_ID.settings.aap_base_url" "$AAP_BASE_URL"
 set_cfg "plugins.entries.$PLUGIN_ID.settings.token_file" "$ETC/instance_token"
