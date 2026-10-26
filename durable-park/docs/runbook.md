@@ -1859,7 +1859,7 @@ first (steps 1 and 2), then do steps 3 to 6 back to back, without stopping in be
 3. **Back to back from here** (no ledger row `parked`, `approved` or `executing`, [health check](#health-check)).
    Merge the reviewed change and fast-forward the live clone ([Deploy a change](#deploy-a-change)). Do not restart the
    gateway now: `hermes_mcp.sh` (step 8) does that.
-4. From `deploy/tunnel`: `sudo bash build.sh` builds the image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36` (it refuses a checkout that is not root's,
+4. From `deploy/tunnel`: `sudo bash build.sh` builds the image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-4dd4278` (it refuses a checkout that is not root's,
    another commit or not clean). **Then it proves the approvals**: it runs `--list-approvals` for the Maverick, accept.blue and
    Authorize.net launchers in the new image and compares each with the committed `*-approvals.json` file (28 and 24 tools,
    7 + 21 and 5 + 19 for the two new ones). Any difference stops it with an error and a diff: do not run that image

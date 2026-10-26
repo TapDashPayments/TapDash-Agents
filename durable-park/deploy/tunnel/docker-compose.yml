@@ -12,7 +12,7 @@ name: durable-park-tunnel
 services:
   wh-tunnel:
     container_name: wh-tunnel
-    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36
+    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-4dd4278
     build:
       context: .
       # The TapDash server sources: root's read-only checkouts at the commits in maverick-mcp.sha,
@@ -41,7 +41,7 @@ services:
   # still are, because tunnel.yaml references them). No data volume: nothing is persisted.
   check:
     profiles: ["check"]
-    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36
+    image: durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-4dd4278
     command: ["check"]
     env_file:
       - ${TUNNEL_ENV_FILE:-/etc/durable-park/tunnel.env}

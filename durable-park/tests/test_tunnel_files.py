@@ -48,12 +48,12 @@ def test_the_payment_server_pins_are_the_reviewed_commits():
     from payments_servers import ACCEPTBLUE_COMMIT, AUTHORIZENET_COMMIT
 
     assert _sha("acceptblue") == ACCEPTBLUE_COMMIT == "9bb8d722a0d5fc9dce08437eedc8328d34005bcc"
-    assert _sha("authnet") == AUTHORIZENET_COMMIT == "6084f3693b135d8e3d4c237cc147ad963826d654"
+    assert _sha("authnet") == AUTHORIZENET_COMMIT == "4dd427863d1103c788bfa03d3dfde46777bde3a0"
 
 
 def test_the_image_tag_names_all_four_servers_and_fits_docker():
     tag = _tag()
-    assert tag == (f"0.0.369-qbo-31a1dd5-mav-{_sha('maverick')[:7]}-ab-9bb8d72-an-6084f36")
+    assert tag == (f"0.0.369-qbo-31a1dd5-mav-{_sha('maverick')[:7]}-ab-9bb8d72-an-4dd4278")
     assert len(tag) <= 128 and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", tag)
 
 
