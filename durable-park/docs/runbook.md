@@ -296,7 +296,8 @@ Every one links to the request's page, where you approve or deny.
   may also be an approver, or the chat may be shared, and the asker must not be handed a way to approve their own
   request. Links go only to the approver, through withHuman's alerts.
 - **After an approved action runs:** durable-park posts one line into the chat where it was asked, for example
-  `[durable-park] P-XXXX ran: <tool>. Result: <first 200 characters>` (or "did NOT complete", or "outcome UNKNOWN"),
+  `[durable-park] P-XXXX ran: <tool>. Result: Payment created successfully (id 159, amount 5)` (or "did NOT complete",
+  or "outcome UNKNOWN"),
   straight away and with no AI in between, so a restart or crash cannot lose it. If that post did not work, the
   5-minute sweep re-sends it 2 minutes later at the earliest (GitHub #66). Restarts also wait up to 45 seconds for a
   reply in progress (`agent.restart_drain_timeout`).

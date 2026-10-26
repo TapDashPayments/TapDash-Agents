@@ -40,3 +40,21 @@ def test_outcome_text_is_one_line_and_capped(tmp_path):
 def test_outcome_text_without_a_result(tmp_path):
     row = _row(tmp_path, "executed", result_json=None)
     assert outcome_text(row) == f"[durable-park] {row.park_id} ran: mcp__wh__qb__pay."
+
+
+def test_mcp_result_with_json_body_becomes_a_short_summary(tmp_path):
+    body = ('Payment created successfully:\n{\n  "CustomerRef": {"value": "16", "name": "Kookies by Kathy"},\n'
+            '  "TotalAmt": 5,\n  "UnappliedAmt": 0,\n  "Id": "159",\n  "SyncToken": "0"\n}')
+    row = _row(tmp_path, "executed", result_json=json.dumps({"result": body}))
+    assert outcome_text(row) == (f"[durable-park] {row.park_id} ran: mcp__wh__qb__pay. "
+                                 "Result: Payment created successfully (id 159, amount 5)")
+
+
+def test_plain_json_result_uses_its_key_fields(tmp_path):
+    row = _row(tmp_path, "executed", result_json=json.dumps({"transactionId": "60231", "status": "voided", "x": [1]}))
+    assert outcome_text(row).endswith("Result: transaction 60231, status voided")
+
+
+def test_result_without_known_fields_falls_back_to_the_text(tmp_path):
+    row = _row(tmp_path, "executed", result_json=json.dumps({"result": "Done:\n{\"foo\": 1}"}))
+    assert outcome_text(row).endswith('Result: Done: {"foo": 1}')
