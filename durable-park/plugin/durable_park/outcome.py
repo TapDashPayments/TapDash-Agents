@@ -24,9 +24,47 @@ def _flat(text: Any, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 3] + "..."
 
 
+# Fields worth showing from a tool's JSON answer, in order, with the word shown for each (the rest is left out so
+# the line stays short; nothing here is an argument the agent sent, only what the server answered).
+_KEY_FIELDS = (("Id", "id"), ("id", "id"), ("DocNumber", "number"), ("transactionId", "transaction"),
+               ("transId", "transaction"), ("TotalAmt", "amount"), ("Amount", "amount"), ("amount", "amount"),
+               ("status", "status"))
+_MAX_KEY_FIELDS = 4
+
+
+def _key_fields(data: Any) -> str:
+    """``"id 159, amount 5"`` from the top level of a JSON object; empty when it has none of ``_KEY_FIELDS``."""
+    if not isinstance(data, dict):
+        return ""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for key, word in _KEY_FIELDS:
+        value = data.get(key)
+        if word in seen or value is None or isinstance(value, (dict, list)):
+            continue
+        parts.append(f"{word} {value}")
+        seen.add(word)
+        if len(parts) == _MAX_KEY_FIELDS:
+            break
+    return ", ".join(parts)
+
+
+def _summarise_text(text: str) -> str:
+    """An MCP answer like ``"Payment created successfully:\n{...json...}"`` becomes
+    ``"Payment created successfully (id 159, amount 5)"``; anything else stays the text itself."""
+    head, sep, rest = text.strip().partition("\n")
+    if sep:
+        try:
+            fields = _key_fields(json.loads(rest))
+        except ValueError:
+            fields = ""
+        if fields:
+            return f"{head.strip().rstrip(':').strip()} ({fields})"
+    return text
+
+
 def _result(result_json: str | None) -> str:
-    """The run's result as one short line: an MCP ``{"result": "..."}`` gives its text, other JSON its compact form,
-    anything else the text itself."""
+    """The run's result as one short line: the key fields of a JSON answer when it has them, else its text."""
     if not result_json:
         return ""
     try:
@@ -34,7 +72,10 @@ def _result(result_json: str | None) -> str:
     except ValueError:
         return _flat(result_json, MAX_RESULT_CHARS)
     if isinstance(data, dict) and isinstance(data.get("result"), str):
-        return _flat(data["result"], MAX_RESULT_CHARS)
+        return _flat(_summarise_text(data["result"]), MAX_RESULT_CHARS)
+    fields = _key_fields(data)
+    if fields:
+        return _flat(fields, MAX_RESULT_CHARS)
     return _flat(json.dumps(data, ensure_ascii=False, default=str), MAX_RESULT_CHARS)
 
 
