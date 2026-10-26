@@ -280,6 +280,18 @@ token with the `repo`, `workflow`, `read:org` and `gist` scopes, which reaches e
 
 Alerts come from the sweep. They arrive in the Telegram DM with the bot (the cron job's delivery target) and, because `TEAMS_ALERT_WEBHOOK_URL` is set, also in Teams as an Adaptive Card.
 
+### Approval waiting for you
+
+`durable-park: P-XXXX (<tool>) is waiting for your approval. Approve or deny it: https://app.withhuman.ai/queue/<request id>`
+
+A call needs a person. The sweep says this once per park, within about 5 minutes of the park, in Telegram and in
+Teams (the Teams card has an **Open P-XXXX in withHuman** button). The bot's own reply in the chat where you asked
+carries the same link at once. Tap it, sign in to withHuman if asked, and approve or deny. The backup-approver line
+(below) carries the link too. Nothing to fix: this is the normal way to reach a waiting approval.
+
+withHuman's own alerts (text message, WhatsApp, Slack, Discord, the withHuman phone app) are set per person in the
+withHuman app (account notification settings), not here. They link to the same page.
+
 ### Outcome UNKNOWN
 
 `durable-park: P-XXXXXXXX outcome UNKNOWN - check <tool> in the sandbox before retrying`
