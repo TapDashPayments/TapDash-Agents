@@ -1069,6 +1069,7 @@ def _card_text(body):
     assert card["type"] == "AdaptiveCard" and card["version"] == "1.4"
     assert card["$schema"] == "http://adaptivecards.io/schemas/adaptive-card.json"
     assert card.get("msteams") == {"width": "Full"}
+    assert card.get("summary") == card["body"][0]["text"]
     assert len(card["body"]) == 1 and card["body"][0]["type"] == "TextBlock" and card["body"][0]["wrap"] is True
     return card["body"][0]["text"]
 
