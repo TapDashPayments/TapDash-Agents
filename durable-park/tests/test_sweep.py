@@ -340,6 +340,19 @@ def test_sweep_runs_without_the_sdk_from_any_cwd_through_a_symlink(world, tmp_pa
     fake_systemctl = fake_bin / "systemctl"
     fake_systemctl.write_text("#!/bin/sh\nexit 1\n")
     fake_systemctl.chmod(0o755)
+    # Same for the Hermes pin check (CI has no Hermes checkout): a fake ``git`` answers as a pinned, blocked
+    # Hermes, so no pin alert is added.
+    pin = json.loads(Path(sweep.HERMES_PIN_FILE).read_text())
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        'case "$3" in\n'
+        f'  rev-parse) echo {pin["commit"]} ;;\n'
+        f'  config) echo {sweep.HERMES_BLOCK_VALUE} ;;\n'
+        f'  describe) echo {pin["version"]} ;;\n'
+        "  *) exit 1 ;;\n"
+        "esac\n")
+    fake_git.chmod(0o755)
     env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"}
     # Hermes's cron runs the script with its own interpreter: the SDK and httpx must not be needed
     code = ("import runpy, sys; sys.modules['agentapprovalprotocol'] = None; sys.modules['httpx'] = None; "
