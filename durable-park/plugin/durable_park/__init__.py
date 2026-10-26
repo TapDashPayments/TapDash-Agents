@@ -19,7 +19,6 @@ from .breaker import STATUS_FILENAME as BREAKER_STATUS_FILENAME, Breaker
 from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor, make_refusing_executor
 from .gatecall import LIFT_STATUS_FILENAME, GateHolder, LiftStatus
 from .ledger import Ledger
-from .links import app_origin
 from .park_hook import (BRIDGE_CALL_TOOL, DEFAULT_EXEMPT_TOOLS, DEFAULT_FORM_CHECKED_TOOLS, fail_closed_hook,
                         make_pre_tool_call)
 from .wake import drop_wake_hook, handle_wake, make_async_client_factory, make_audit_client_factory
@@ -432,7 +431,7 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
 
     register_hook("pre_tool_call", make_pre_tool_call(
         ledger, holder.get, form_checked, exempt=exempt, breaker=breaker, foreign_hooks_fn=foreign_hooks,
-        form_checker=checker, lift_status=lift_status, app_url=app_origin(base_url)))
+        form_checker=checker, lift_status=lift_status))
     # Background self-check (Hermes processes only): proves the form check can read and use every form-checked
     # tool's rules and writes the result next to the ledger, where the sweep raises an alert.
     formcheck.start_selfcheck(checker, form_checked, str(state_dir / formcheck.STATUS_FILENAME),

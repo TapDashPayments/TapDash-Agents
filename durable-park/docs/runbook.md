@@ -289,9 +289,10 @@ Every one links to the request's page, where you approve or deny.
 - **Teams:** withHuman has no Teams channel, so the approver's withHuman email alerts go to a Teams **channel's email
   address** (channel menu, **Get email address**; the channel's advanced settings must accept mail from withHuman).
   The alert then appears in that channel at once. Set up on 2026-10-26 for the admin.
-- **The chat where you asked:** the bot's reply ("waiting for approval") carries the same link at once
-  (`https://app.withhuman.ai/queue/<request id>`, built by `plugin/durable_park/links.py`).
-- **Telegram:** withHuman has no Telegram channel. Telegram gets the link only in the bot's reply above.
+- **Telegram:** withHuman has no Telegram channel. Use one of withHuman's channels instead.
+- **The chat where you asked never gets the link.** The bot only says the call is waiting for approval. Whoever asked
+  may also be an approver, or the chat may be shared, and the asker must not be handed a way to approve their own
+  request. Links go only to the approver, through withHuman's alerts.
 - **Unanswered after the primary window:** the backup-approver alert ([below](#backup-approver-and-unanswered-approvals-tap2-121)) ends with the link too.
 - **Hermes Deck cannot approve yet:** withHuman refuses decisions made with a personal API key ("Session ID is
   required."), a withHuman bug: [withHumanAI/withHuman#112](https://github.com/withHumanAI/withHuman/issues/112), fix

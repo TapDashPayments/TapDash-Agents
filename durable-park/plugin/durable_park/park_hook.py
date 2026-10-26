@@ -24,7 +24,6 @@ from .gatecall import (
     note_is_cut,
     lift_gateway_context, server_label, text_form_note_keys)
 from .ledger import Ledger, args_digest, call_key
-from .links import DEFAULT_APP_URL, approval_url
 from .wake import one_line
 
 log = logging.getLogger("durable_park")
@@ -65,8 +64,8 @@ DEFAULT_FORM_CHECKED_TOOLS: tuple[str, ...] = (
 
 PARK_MESSAGE = (
     'PARKED {park_id}: "{tool}" needs human approval in withHuman and has NOT run. '
-    "Do not retry it or try another way to do it. Tell the user it is waiting for approval and give them this "
-    "link, where they can approve or deny it:\n{link}\nYou will be told here when it is decided."
+    "Do not retry it or try another way to do it. Tell the user it is waiting for approval; "
+    "you will be told here when it is decided."
 )
 NO_SESSION_MESSAGE = "durable-park: no chat session; the tool call was refused"
 NO_CALL_ID_MESSAGE = "durable-park: no tool call id; the tool call was refused"
@@ -195,8 +194,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                        schema_fn: Callable[[str], dict | None] | None = None,
                        coerce_fn: Callable[[str, dict], dict] | None = None,
                        lift_status: LiftStatus | None = None,
-                       lift_status_path: str | None = None,
-                       app_url: str = DEFAULT_APP_URL) -> Callable[..., dict | None]:
+                       lift_status_path: str | None = None) -> Callable[..., dict | None]:
     """Build the hook. ``gate_factory`` is called per call (e.g. ``GateHolder.get``). ``form_checker``
     validates a form-checked call's arguments against the tool's rules before anything is recorded or asked
     (default: the rules Hermes registered for the tool). ``breaker`` (optional) stops asking withHuman while
@@ -210,7 +208,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
     run is reported to ``lift_status`` (a ``LiftStatus``, or one built for ``lift_status_path``:
     ``lift_status.json``; the sweep alerts on it) once the call has passed its form check (a refused call never
     reaches a server), and the call goes on: with the lifted arguments, or the original ones when the lift could not
-    run. ``app_url`` is the withHuman app's address: the park message links the request's page there."""
+    run."""
     checker = form_checker if form_checker is not None else FormChecker()
     exempt_names = frozenset(exempt) - {BRIDGE_CALL_TOOL}  # tool_call is never exempt, whatever the caller lists
 
@@ -378,8 +376,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 park_id = None
                 return _block(NOT_PARKED_MESSAGE.format(park_id=row.park_id, status=row.status))
             if row.request_id:
-                return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool,
-                                                  link=approval_url(row.request_id, app_url)))
+                return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool))
             if not isinstance(args, dict):
                 # Asking about a stand-in ({}) while the real value would run is not allowed: refuse it.
                 log.info("refused %s tool=%s: arguments are not an object", row.park_id, tool)
@@ -468,7 +465,7 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
             request_opened = True
             pending_rid = None
             log.info("parked %s tool=%s", row.park_id, tool)
-            return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool, link=approval_url(rid, app_url)))
+            return _block(PARK_MESSAGE.format(park_id=row.park_id, tool=tool))
         except Exception as exc:  # noqa: BLE001 - step 11: a bug must never let a call through
             log.error("park hook failed for tool=%s: %s", tool, type(exc).__name__)
             if pending_rid is not None and gate is not None:

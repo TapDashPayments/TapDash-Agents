@@ -60,13 +60,10 @@ def already_waiting(park_id):
             f"this call was not run. Do not retry it; wait until {park_id} is decided.")
 
 
-def park_message(row, tool):
-    assert row.request_id
-    return (f'PARKED {row.park_id}: "{tool}" needs human approval in withHuman and has NOT run. '
-            "Do not retry it or try another way to do it. Tell the user it is waiting for approval and give "
-            "them this link, where they can approve or deny it:\n"
-            f"https://app.withhuman.ai/queue/{row.request_id}\n"
-            "You will be told here when it is decided.")
+def park_message(park_id, tool):
+    return (f'PARKED {park_id}: "{tool}" needs human approval in withHuman and has NOT run. '
+            "Do not retry it or try another way to do it. Tell the user it is waiting for approval; "
+            "you will be told here when it is decided.")
 
 
 @pytest.fixture
@@ -107,7 +104,7 @@ def test_risky_call_parks_and_blocks(env):
     tool = "mcp__wh__quickbooks__create_payment"
     result = call(env.hook, tool)
     (row,) = env.ledger.list_by_status("parked")
-    assert result == {"action": "block", "message": park_message(row, tool)}
+    assert result == {"action": "block", "message": park_message(row.park_id, tool)}
     assert row.server == "park:quickbooks"
     assert row.request_id
     assert row.session_key == SESSION_KEY
@@ -752,7 +749,7 @@ def test_valid_args_park_as_before(env):
     tool = "mcp__wh__quickbooks__create_payment"
     result = call(hook, tool, args=GOOD_PAY)
     (row,) = env.ledger.list_by_status("parked")
-    assert result == {"action": "block", "message": park_message(row, tool)}
+    assert result == {"action": "block", "message": park_message(row.park_id, tool)}
     assert len(env.provider.requests) == 1
 
 
@@ -1686,7 +1683,7 @@ def test_parked_call_stores_the_lifted_args_and_shows_the_note_to_the_approver(e
     hook = lifting_hook(env)
     result = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
     (row,) = env.ledger.list_by_status("parked")
-    assert result == {"action": "block", "message": park_message(row, GW_TOOL)}
+    assert result == {"action": "block", "message": park_message(row.park_id, GW_TOOL)}
     stored_args = json.loads(row.args_json)
     assert stored_args == LIFTED and "withhuman_context" not in stored_args["params"]
     body = env.provider.only().body
@@ -1717,7 +1714,7 @@ def test_failing_schema_lookup_uses_the_original_args(env):
     hook = lifting_hook(env, schema_fn=broken)
     result = call(hook, GW_TOOL, args=copy.deepcopy(NESTED))
     (row,) = env.ledger.list_by_status("parked")
-    assert result == {"action": "block", "message": park_message(row, GW_TOOL)}
+    assert result == {"action": "block", "message": park_message(row.park_id, GW_TOOL)}
     assert json.loads(row.args_json) == NESTED
     assert env.provider.only().body["arguments"] == NESTED
 
@@ -1865,7 +1862,7 @@ def test_coercion_that_raises_is_recorded_and_the_original_args_are_used(env):
     hook = status_hook(env, coerce_fn=broken)
     result = call(hook, GW_TOOL, args=copy.deepcopy(TEXT_ARGS))
     (row,) = env.ledger.list_by_status("parked")
-    assert result == {"action": "block", "message": park_message(row, GW_TOOL)}
+    assert result == {"action": "block", "message": park_message(row.park_id, GW_TOOL)}
     assert json.loads(row.args_json) == TEXT_ARGS
     assert recorded(env) == {(GW_TOOL, "args_unreadable", "params"),
                              (GW_TOOL, "note_left_inside", "params.withhuman_context")}  # the text still holds it
@@ -2426,18 +2423,3 @@ def test_acceptblue_and_authnet_tools_are_form_checked():
     assert DEFAULT_FORM_CHECKED_TOOLS[0].startswith(r"mcp__wh__quickbooks__")
     assert DEFAULT_FORM_CHECKED_TOOLS[-2:] == (r"mcp__wh__acceptblue__ablue_[a-z0-9_]+",
                                                r"mcp__wh__authnet__authnet_[a-z0-9_]+")
-
-
-def test_park_message_link_uses_the_configured_withhuman_address(tmp_path):
-    ledger = Ledger(str(tmp_path / "ledger.db"))
-    provider = FakeProvider(auto=None)
-    hook = make_pre_tool_call(
-        ledger, lambda: make_gate(BASE_URL, TOKEN, client=provider.client(retry_budget=0.5)), RISKY,
-        session_key_fn=lambda: SESSION_KEY, app_url="https://withhuman.example.com")
-    tool = "mcp__wh__quickbooks__create_payment"
-    first = call(hook, tool)
-    (row,) = ledger.list_by_status("parked")
-    assert f"\nhttps://withhuman.example.com/queue/{row.request_id}\n" in first["message"]
-    again = call(hook, tool)  # the same call replayed: same park, same link, nothing new asked
-    assert again == first
-    assert len(provider.requests) == 1
