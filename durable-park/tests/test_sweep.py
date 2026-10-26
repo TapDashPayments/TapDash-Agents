@@ -16,6 +16,7 @@ TOOL = "mcp__wh__quickbooks__create_payment"
 SCRIPT = Path(sweep.__file__).resolve()
 REAL_MAINPID = sweep._gateway_mainpid if hasattr(sweep, "_gateway_mainpid") else None
 DEFAULT_URL = "http://127.0.0.1:8644/webhooks/durable-park-wake"
+REAL_GIT = sweep._git
 
 
 def stamp(minutes_ago):
@@ -98,6 +99,15 @@ def _no_gateway_pid(monkeypatch):
     """No real systemctl in tests: by default the gateway's MainPID is unknown, so the load-proof alert stays
     silent (the tests of that alert set a pid)."""
     monkeypatch.setattr(sweep, "_gateway_mainpid", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _hermes_pinned(monkeypatch):
+    """No real git in tests: by default Hermes is on the repo's pinned commit with updates blocked, so the pin
+    alert stays silent (the tests of that alert change it)."""
+    pin = json.loads(Path(sweep.HERMES_PIN_FILE).read_text())
+    answers = {"rev-parse": pin["commit"], "config": sweep.HERMES_BLOCK_VALUE, "describe": pin["version"]}
+    monkeypatch.setattr(sweep, "_git", lambda checkout, *args: answers[args[0]])
 
 
 def test_orphan_parked_row_is_cancelled_after_ten_minutes(world, monkeypatch, capsys):
@@ -1347,3 +1357,119 @@ def test_pending_fallback_state_forgets_decided_parks(world, monkeypatch, capsys
 def test_pending_fallback_rejects_a_negative_delay(world, monkeypatch):
     with pytest.raises(SystemExit):
         world.main(monkeypatch, "--pending-alert-minutes", "-1")
+
+
+# --- Hermes pin guard (GitHub #76): Hermes must stay on the pinned commit with the update block on ---
+
+PIN_COMMIT = "5b147ab036d6d19131bff8d20701b5001eab844a"
+
+
+def write_pin(tmp_path, commit=PIN_COMMIT, version="v0.22.3"):
+    path = tmp_path / "hermes-pin.json"
+    path.write_text(json.dumps({"version": version, "commit": commit}))
+    return path
+
+
+@pytest.fixture
+def pinned(world, monkeypatch, tmp_path):
+    """A pinned, blocked Hermes checkout; tests change ``facts`` to break it."""
+    facts = {"head": PIN_COMMIT, "block": sweep.HERMES_BLOCK_VALUE}
+    monkeypatch.setattr(sweep, "HERMES_PIN_FILE", str(write_pin(tmp_path)))
+
+    def fake_git(checkout, *args):
+        if args[:1] == ("rev-parse",):
+            return facts["head"]
+        if args[:2] == ("config", "--get"):
+            return facts["block"]
+        if args[:1] == ("describe",):
+            return "v0.22.5" if facts["head"] != PIN_COMMIT else "v0.22.3"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(sweep, "_git", fake_git)
+    return facts
+
+
+def test_pin_guard_silent_when_pinned_and_blocked(world, monkeypatch, capsys, pinned):
+    assert runs(world, monkeypatch, capsys, 3) == ["", "", ""]
+
+
+def test_pin_guard_alerts_once_when_hermes_moved_then_recovers(world, monkeypatch, capsys, pinned):
+    pinned["head"] = "a" * 40
+    first, second = runs(world, monkeypatch, capsys, 2)
+    assert first.startswith("durable-park ALERT: Hermes is not as pinned")
+    assert "Hermes is at aaaaaaaaaa (v0.22.5), not the pinned v0.22.3 (5b147ab036)" in first
+    assert "runbook: Upgrade Hermes" in first
+    assert second == ""
+    pinned["head"] = PIN_COMMIT
+    third, fourth = runs(world, monkeypatch, capsys, 2)
+    assert third.strip() == "durable-park: Hermes is back on the pinned v0.22.3 with updates blocked."
+    assert fourth == ""
+
+
+def test_pin_guard_alerts_when_the_update_block_is_removed(world, monkeypatch, capsys, pinned):
+    pinned["block"] = None
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "the update block is off" in out
+
+
+def test_pin_guard_alerts_again_when_the_problem_changes(world, monkeypatch, capsys, pinned):
+    pinned["block"] = None
+    first, = runs(world, monkeypatch, capsys, 1)
+    pinned["head"] = "b" * 40
+    second, = runs(world, monkeypatch, capsys, 1)
+    assert "the update block is off" in first and "Hermes is at bbbbbbbbbb" in second
+
+
+def test_pin_guard_realerts_after_24_hours(world, monkeypatch, capsys, pinned, tmp_path):
+    pinned["block"] = None
+    first, = runs(world, monkeypatch, capsys, 1)
+    state_path = tmp_path / "hermes_pin_alert_state.json"
+    state = json.loads(state_path.read_text())
+    state["alerted_at"] = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state_path.write_text(json.dumps(state))
+    second, third = runs(world, monkeypatch, capsys, 2)
+    assert first and second == first and third == ""
+
+
+@pytest.mark.parametrize("pin_text", ["{not json", "[]", '{"version": "v0.22.3"}'])
+def test_pin_guard_alerts_on_a_bad_pin_file(world, monkeypatch, capsys, pinned, tmp_path, pin_text):
+    (tmp_path / "hermes-pin.json").write_text(pin_text)
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "the pin file" in out and "cannot be read" in out
+
+
+def test_pin_guard_alerts_when_the_checkout_cannot_be_read(world, monkeypatch, capsys, pinned):
+    pinned["head"] = None
+    out, = runs(world, monkeypatch, capsys, 1)
+    assert "could not read the Hermes checkout" in out
+
+
+def test_pin_guard_failure_never_stops_the_sweep(world, monkeypatch, capsys):
+    def boom(*a, **k):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(sweep, "_pin_alert", boom)
+    assert world.main(monkeypatch) == 0
+    assert "Hermes pin check failed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("outcome,expected", [
+    (subprocess.CompletedProcess([], 0, stdout="abc\n"), "abc"),
+    (subprocess.CompletedProcess([], 1, stdout=""), None),
+    (FileNotFoundError("git"), None),
+    (subprocess.TimeoutExpired("git", 5), None),
+])
+def test_git_helper_fails_to_none(monkeypatch, outcome, expected):
+    def fake_run(cmd, **kw):
+        assert cmd[:3] == ["git", "-C", "/x"] and kw["timeout"] == sweep.GIT_TIMEOUT
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert REAL_GIT("/x", "rev-parse", "HEAD") == expected
+
+
+def test_repo_pin_file_matches_the_block_constants():
+    pin = json.loads(Path(sweep.HERMES_PIN_FILE).read_text())
+    assert pin["version"] == "v0.22.3" and len(pin["commit"]) == 40

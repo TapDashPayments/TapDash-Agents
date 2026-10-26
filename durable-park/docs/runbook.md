@@ -14,6 +14,7 @@ How to check, change and fix durable-park on the test VM. For how it works, see 
 - [Plugin settings](#plugin-settings)
 - [Tracing (Langfuse)](#tracing-langfuse)
 - [Add a form-checked tool](#add-a-form-checked-tool)
+- [Upgrade Hermes](#upgrade-hermes)
 - [Rotate secrets before production](#rotate-secrets-before-production)
 - [Rollback](#rollback)
 
@@ -129,6 +130,8 @@ or `~/.hermes/.env`: they hold secrets).
 | `TEAMS_ALERT_WEBHOOK_URL` (environment of the sweep's cron run, set in `~/.hermes/.env`; a secret, never print it) | **set** (verified with a test card on 2026-10-22 at 16:57 ET) | The URL of a Power Automate "Post card in a chat or channel" (Teams webhook) flow; the sweep sends an Adaptive Card with `"msteams": {"width": "Full"}` at its root so it fills the Teams chat width instead of wrapping in a narrow column (a plain `{"text": ...}` body is rejected with "Property 'type' must be 'AdaptiveCard'"). When set, the sweep also posts what it printed (its alert lines: ids, tool names and reasons, never argument values) to Teams once per run. When unset, nothing changes. A failed post (timeout 10 s, so an outage can delay the sweep's exit by about that long) adds one plain line to the chat alerts, `durable-park ALERT: Teams post failed (<ErrorType or HTTP code>).`, and `teams alert failed (...)` on stderr; the exit code stays 0, so the Telegram message is not wrapped in "Script exited with code 1". The URL is never printed. If the sweep itself crashes, what it printed is still posted and the crash is not hidden. |
 | Cron job `durable-park-sweep` (id `5982945c6071`) | `*/5 * * * *`; delivery is still Telegram | PR #28 changed the deploy script; the live job was edited to match. See [The sweep runs every 6 minutes](#the-sweep-runs-every-6-minutes-not-5). Alerts reach Teams through `TEAMS_ALERT_WEBHOOK_URL` (row above), so a Telegram copy is now optional; stopping the Telegram delivery is an open decision ([backlog](backlog.md#later)). |
 | Teams tunnel (`devtunnel-hermes`) | systemd **user unit of `hermes`**, enabled (moved from `ubuntu` on 2026-10-22). Program `/usr/local/bin/devtunnel` (root-owned). Login cache `/home/hermes/.local/share/DevTunnels` (mode 600), logged in as Yaakov@TapDash.co. Tunnel `proto-agents-bot` forwards to `127.0.0.1:3978` | The Teams bot's public address needs a tunnel to the gateway. Never print or copy the login cache. Manage it with `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user <status\|restart> devtunnel-hermes`. It no longer exists under `ubuntu`. |
+| `updates.check` | `false` (since 2026-10-26) | Hermes is pinned to v0.22.3 on purpose ([Upgrade Hermes](#upgrade-hermes)); the passive "update available" notice is off. |
+| Update block: git setting `http.https://github.com/NousResearch/.proxy` = `http://127.0.0.1:9` in `~/.hermes/hermes-agent/.git/config` (plus a note `tapdash.pinned`) | **on** (since 2026-10-26 22:45 UTC) | Every way Hermes updates itself on Linux (`hermes update`, the dashboard's Update button, the `/update` chat command) starts with a fetch from GitHub; this makes that fetch fail, so nothing changes. Proven live: `git fetch` and `hermes update --check` both failed and Hermes stayed on v0.22.3. Check it with `deploy/hermes_pin.sh check`. |
 | `hermes-dashboard` unit | `RestartPreventExitStatus=78` in the main unit file | See [Dashboard over HTTPS](#dashboard-over-https). |
 | Langfuse tracing: plugin `tapdash-langfuse` (TapDash's patched copy, a symlink `~/.hermes/plugins/tapdash-langfuse` into the live clone's `tracing/tapdash_langfuse`) enabled; the unpatched catalog `langfuse` is no longer enabled (its folder is still in `~/.hermes/plugins`). non-secret `HERMES_LANGFUSE_*` settings in `~/.hermes/.env` (not in `config.yaml`); the two Langfuse keys come from Bitwarden since 2026-10-22/23 ([Secrets: Bitwarden](#secrets-bitwarden)) | tracing on since 2026-10-22 04:37 UTC (unpatched); patched plugin enabled by 19:52 UTC the same day ([how it was switched](#switch-to-the-patched-plugin-deploy)) | Traces of every turn for debugging and review. Names, values and reasons for each setting: [Tracing (Langfuse)](#tracing-langfuse). Print `.env` names only, never values. |
 | Bitwarden Secrets Manager (`secrets.bitwarden` in `config.yaml`) | `enabled: true`, project "TapDash Agents", `encrypted_cache.max_stale_seconds: 604800`; applies 6 secrets at each start (changed live 2026-10-22/23) | The agent's Teams, Telegram and Langfuse keys come from Bitwarden, not from `.env`. `.env` keeps only `BWS_ACCESS_TOKEN`, `TEAMS_ALERT_WEBHOOK_URL` and settings that are not secret. See [Secrets: Bitwarden](#secrets-bitwarden). |
@@ -453,6 +456,24 @@ then restart the gateway (only when no row is `parked`, `approved` or `executing
 
 Known limit: the sweep is a Hermes cron job that runs inside the gateway, so a stopped gateway cannot alert. The
 bot going silent (Telegram, Teams) is the signal; look at `systemctl --user status hermes-gateway`.
+
+### Hermes is not as pinned
+
+`durable-park ALERT: Hermes is not as pinned — <what is wrong>. Updates are blocked on purpose until a new version is tested (GitHub #76); see the runbook: Upgrade Hermes.`
+
+The sweep checks two things every 5 minutes: Hermes is on the commit in `deploy/hermes-pin.json`, and the update
+block is on. `<what is wrong>` says which failed:
+
+| It says | What happened | What to do |
+|---|---|---|
+| `Hermes is at <commit> (<version>), not the pinned v0.22.3` | Someone updated Hermes, or checked out another version | If it was not a planned upgrade: put it back ([Upgrade Hermes](#upgrade-hermes), step "Roll back"). If it was: finish the upgrade steps, which update the pin. |
+| `the update block is off` | The git setting was removed (by hand, or `hermes_pin.sh unblock`) | `deploy/hermes_pin.sh block`, then `deploy/hermes_pin.sh check` |
+| `could not read the Hermes checkout` | Git failed or the folder moved | `git -C ~/.hermes/hermes-agent status` as `hermes` |
+| `the pin file ... cannot be read` | `deploy/hermes-pin.json` is broken in the live clone | Fix it in a pull request |
+
+The line is said again when the problem changes and every 24 hours while it lasts. `durable-park: Hermes is back on
+the pinned v0.22.3 with updates blocked.` follows when it is fixed. If the check itself crashes, the sweep says
+`durable-park ALERT: Hermes pin check failed (...)`; run `deploy/hermes_pin.sh check` by hand.
 
 ### Gateway will not start: the plugin did not load
 
@@ -1550,6 +1571,60 @@ that has to agree:
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
 
 The form check needs nothing: it reads each tool's rules from Hermes automatically.
+
+## Upgrade Hermes
+
+In plain English: Hermes is locked to one version (v0.22.3) so it cannot change under us. durable-park uses parts
+of Hermes that may change in any release, and a new Hermes ships almost daily. So we only move to a new version on
+purpose, after testing it. A proper side-by-side test setup is planned in
+[GitHub #76](https://github.com/TapDashPayments/TapDash-Agents/issues/76); until then, follow these steps.
+
+```mermaid
+flowchart LR
+  A[Pinned v0.22.3<br/>updates blocked] -->|you decide to upgrade| B[Read the release notes]
+  B --> C[Unblock, update]
+  C --> D[Run every check]
+  D -->|all pass| E[Update the pin file<br/>block again]
+  D -->|any fail| F[Roll back]
+  F --> A
+  E --> A
+```
+
+**What is blocked, and how.** `deploy/hermes_pin.sh` (run as `hermes`):
+
+| Command | What it does |
+|---|---|
+| `hermes_pin.sh check` | Says OK or FAIL for: on the pinned commit, update block on, passive update check off. Exit 0 = all OK. |
+| `hermes_pin.sh block` | Turns the update block on and `updates.check` off. |
+| `hermes_pin.sh unblock` | Turns the update block off (only during a planned upgrade; the sweep alerts until you block again). |
+
+The block works because Hermes on Linux updates only through `git fetch` from github.com/NousResearch (the ZIP
+download fallback is for Windows only). All three ways to update (`hermes update`, the dashboard's Update button and
+the `/update` chat command, which any allowed chat user can send) start with that fetch, so all three fail before
+anything changes. The pinned commit lives in `deploy/hermes-pin.json`; the sweep alerts if Hermes is on any other
+commit ([Hermes is not as pinned](#hermes-is-not-as-pinned)).
+
+**Steps for a planned upgrade** (as `hermes`, from a worktree, never the live clone's tree):
+
+1. Read the release notes for every version between ours and the target. Look for changes to plugins, hooks,
+   `pre_tool_call`, MCP, Tool Search, Teams or Telegram.
+2. Check the ledger: no row `parked`, `approved` or `executing` ([Health check](#health-check)). The update restarts
+   the gateway.
+3. `deploy/hermes_pin.sh unblock`, then `hermes update` (or `hermes update --branch <tag>` for one exact release).
+4. Run every check: [Check durable-park against the real Hermes](#check-durable-park-against-the-real-hermes) (no
+   skips), `deploy/tool_policy_check.sh` and `deploy/plugin_load_check.sh` pass at start, the
+   [Health check](#health-check), one approve → run-once test in the sandbox, and the form check shows
+   `ok: true`. Compare every item in `plugin/durable_park/compat.py` (`DEPENDS_ON`) with the new code.
+5. All pass: in a pull request, set `deploy/hermes-pin.json` to the new tag and commit
+   (`git -C ~/.hermes/hermes-agent rev-parse HEAD`), set `SUPPORTED_HERMES_VERSION` in `compat.py`, and set
+   `HERMES_LANGFUSE_RELEASE` ([Tracing](#when-the-plugin-changes)). After it is merged and pulled:
+   `deploy/hermes_pin.sh block` and `deploy/hermes_pin.sh check`.
+6. **Roll back** if anything fails: stop the gateway (ledger check first), then follow Hermes's own steps: check out
+   the old tag (`git -C ~/.hermes/hermes-agent checkout v0.22.3`) and run `python -m pm.cli install` from the Hermes
+   venv. Hermes refuses to go back to an older version once the new one wrote its database, so restore the
+   pre-update snapshot (`/snapshot restore <id>`) or the backup (`hermes import <backup.zip>`), as the official
+   [updating guide](https://hermes-agent.nousresearch.com/docs/getting-started/updating) says. Then
+   `deploy/hermes_pin.sh block`.
 
 ## Check durable-park against the real Hermes
 

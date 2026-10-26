@@ -1,0 +1,5 @@
+{
+  "version": "v0.22.3",
+  "commit": "5b147ab036d6d19131bff8d20701b5001eab844a",
+  "why": "Updates are blocked on purpose: a new Hermes is tested first (GitHub #76). See docs/runbook.md, Upgrade Hermes."
+}
