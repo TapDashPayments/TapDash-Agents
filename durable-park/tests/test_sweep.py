@@ -1167,7 +1167,7 @@ def test_backup_is_routed_once_then_denied_after_its_minutes(world, monkeypatch,
     out = capsys.readouterr().out
     assert (f"durable-park: approval for {park_id} ({TOOL}) unanswered for 60 min; routed to backup approver "
             "Backup Person (withHuman escalation path notify-backup). Decide it in withHuman within 30 min or it "
-            "is denied.") in out
+            f"is denied: https://app.withhuman.ai/queue/{world.ledger.get(park_id).request_id}") in out
     assert world.ledger.get(park_id).status == "parked"
     world.main(monkeypatch, "--approvers-file", path)
     assert "routed to backup" not in capsys.readouterr().out  # said once
@@ -1228,3 +1228,18 @@ def test_example_approvers_file_is_valid_and_has_no_person():
     example = Path(sweep.__file__).resolve().parent.parent / "deploy" / "approvers.example.json"
     config = sweep.load_approvers(str(example))
     assert config == {"primary_minutes": 60, "backup": None}
+
+
+def test_backup_routing_link_uses_the_given_withhuman_address(world, monkeypatch, capsys, tmp_path):
+    path = write_approvers(tmp_path, {"primary_minutes": 60, "backup_approver": BACKUP})
+    park_id = world.row("parked")
+    world.backdate(park_id, 61)
+    world.main(monkeypatch, "--approvers-file", path, "--withhuman-url", "https://withhuman.example.com/")
+    request_id = world.ledger.get(park_id).request_id
+    assert f"or it is denied: https://withhuman.example.com/queue/{request_id}" in capsys.readouterr().out
+
+
+def test_no_new_alert_lines_for_a_waiting_approval(world, monkeypatch, capsys):
+    world.row("parked")  # withHuman itself alerts the approver; the sweep stays silent
+    world.main(monkeypatch)
+    assert capsys.readouterr().out == ""

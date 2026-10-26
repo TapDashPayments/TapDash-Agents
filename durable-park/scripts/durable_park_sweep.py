@@ -22,7 +22,8 @@
   ``declared``, ``note_cut`` and ``note_not_text``, which are said once per tool), one when the report itself is unreadable (until it reads again), and one
   when the check itself fails (``lift_check_alert_state.json``; a recovery line follows)
 * a ``parked`` row with an approval request nobody answered (TAP2-121, only when ``--approvers-file`` exists):
-  after ``primary_minutes`` it is routed to the configured backup approver (one alert line naming them, also
+  after ``primary_minutes`` it is routed to the configured backup approver (one alert line naming them and ending
+  with the link to the request's page in withHuman (``--withhuman-url``), also
   posted to their own Teams webhook when one is configured); after the backup's ``minutes`` too, or at once
   when no backup approver is configured, it is DENIED with a note saying why (the chat is told by the usual wake)
 * the markers ``lift_status.unwritable.<pid>`` (one per process that could not write ``lift_status.json``)
@@ -120,6 +121,18 @@ def _load_ledger_module():
     return module
 
 
+def _load_links_module():
+    path = os.path.join(_REPO, "plugin", "durable_park", "links.py")
+    spec = importlib.util.spec_from_file_location("durable_park_links", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_links = _load_links_module()
+
+
 def _positive_int(text: str) -> int:
     try:
         value = int(text)
@@ -137,6 +150,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--wake-url", default=DEFAULT_WAKE_URL)
     parser.add_argument("--approvers-file", default=DEFAULT_APPROVERS_FILE,
                         help="backup approver / unanswered-approval timeout config (TAP2-121); absent = off")
+    parser.add_argument("--withhuman-url", default=_links.DEFAULT_APP_URL,
+                        help="the withHuman app's address, for links to a request's page")
     parser.add_argument("--retention-days", type=_positive_int, default=DEFAULT_RETENTION_DAYS,
                         help="delete allowed/refused/cancelled rows not updated for this many days (>= 1)")
     return parser.parse_args(argv)
@@ -286,7 +301,8 @@ def load_approvers(path: str) -> dict | None:
     return out
 
 
-def _route_unanswered(ledger, ledger_path: str, approvers_path: str, now: datetime) -> None:
+def _route_unanswered(ledger, ledger_path: str, approvers_path: str, now: datetime,
+                      app_url: str = _links.DEFAULT_APP_URL) -> None:
     """TAP2-121: a backup approver, or a clear denial, for approvals nobody answered.
 
     Only ``parked`` rows WITH a request id are waiting on a person (rows without one are the orphan check's).
@@ -343,7 +359,8 @@ def _route_unanswered(ledger, ledger_path: str, approvers_path: str, now: dateti
             where = f" (withHuman escalation path {backup['escalation_path']})" if backup["escalation_path"] else ""
             line = (f"durable-park: approval for {row.park_id} ({row.tool}) unanswered for "
                     f"{config['primary_minutes']} min; routed to backup approver {backup['name']}{where}. "
-                    f"Decide it in withHuman within {backup['minutes']} min or it is denied.")
+                    f"Decide it in withHuman within {backup['minutes']} min or it is denied: "
+                    f"{_links.approval_url(row.request_id, app_url)}")
             print(line, flush=True)
             routed[row.park_id] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
             webhook = os.environ.get(backup["teams_webhook_env"] or "", "").strip() if backup["teams_webhook_env"] else ""
@@ -791,7 +808,7 @@ def _sweep(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
         _err(f"orphan cancel failed ({type(exc).__name__})")
     try:
-        _route_unanswered(ledger, args.ledger, args.approvers_file, datetime.now(timezone.utc))
+        _route_unanswered(ledger, args.ledger, args.approvers_file, datetime.now(timezone.utc), args.withhuman_url)
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
         _err(f"backup approver step failed ({type(exc).__name__})")
     try:
