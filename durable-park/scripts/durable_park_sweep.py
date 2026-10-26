@@ -63,6 +63,8 @@ from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
 DEFAULT_SECRET_FILE = "/etc/durable-park/wake_secret"
 DEFAULT_APPROVERS_FILE = "/etc/durable-park/approvers.json"  # TAP2-121; absent = no timeout, parks wait as before
 APPROVER_STATE = "approver_alert_state.json"
+PENDING_STATE = "pending_alert_state.json"  # GitHub #73 / TAP2-170: which waiting approvals were already announced
+DEFAULT_PENDING_ALERT_MINUTES = 3  # 0 turns the fallback off
 STALE_EXECUTING = timedelta(minutes=10)
 ORPHAN_PARK = timedelta(minutes=10)  # a parked row with no request id this old will never get one attached
 DEFAULT_RETENTION_DAYS = 30
@@ -146,6 +148,16 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def _non_negative_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return value
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="durable-park sweep (Hermes cron --no-agent script)")
     parser.add_argument("--ledger", required=True, help="path of the ledger SQLite file")
@@ -155,6 +167,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="backup approver / unanswered-approval timeout config (TAP2-121); absent = off")
     parser.add_argument("--withhuman-url", default=_links.DEFAULT_APP_URL,
                         help="the withHuman app's address, for links to a request's page")
+    parser.add_argument("--pending-alert-minutes", type=_non_negative_int, default=DEFAULT_PENDING_ALERT_MINUTES,
+                        help="announce an approval still waiting after this many minutes, once, on the sweep's "
+                             "alert channels (Telegram + TEAMS_ALERT_WEBHOOK_URL); 0 = off (GitHub #73)")
     parser.add_argument("--retention-days", type=_positive_int, default=DEFAULT_RETENTION_DAYS,
                         help="delete allowed/refused/cancelled rows not updated for this many days (>= 1)")
     return parser.parse_args(argv)
@@ -384,6 +399,52 @@ def _route_unanswered(ledger, ledger_path: str, approvers_path: str, now: dateti
         if park_id not in waiting:
             del routed[park_id]
     _save_state(state_path, state)
+
+
+def _pending_fallback(ledger, ledger_path: str, minutes: int, now: datetime,
+                      app_url: str = _links.DEFAULT_APP_URL) -> None:
+    """GitHub #73 / TAP2-170: a fallback for withHuman's own instant alert, which once never reached Teams.
+
+    A ``parked`` row WITH a request id that is still waiting ``minutes`` after it was created gets one line on
+    stdout. ``main`` copies stdout to the Teams alert chat (``TEAMS_ALERT_WEBHOOK_URL``) and Hermes' cron delivers it
+    to the admin's Telegram DM. Those chats must stay approvers/admins only, because the line holds the approval link
+    (same rule as the TAP2-121 backup-approver alert). Said once per park (state in ``pending_alert_state.json``);
+    parks that stop waiting are forgotten. ``minutes`` 0 turns it off."""
+    state_path = os.path.join(os.path.dirname(os.path.abspath(ledger_path)), PENDING_STATE)
+    state = _load_state(state_path)
+    if minutes <= 0:
+        if state:
+            _save_state(state_path, {})
+        return
+    announced = state.setdefault("announced", {})
+    if not isinstance(announced, dict):
+        announced = state["announced"] = {}
+    waiting = set()
+    changed = False
+    for row in ledger.list_by_status("parked"):
+        if not row.request_id:
+            continue
+        waiting.add(row.park_id)
+        if row.park_id in announced:
+            continue
+        try:
+            created = datetime.strptime(row.created_at, _STAMP).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        age = now - created
+        if age < timedelta(minutes=minutes):
+            continue
+        waited = int(age.total_seconds() // 60)
+        print(f"durable-park: approval for {row.park_id} ({row.tool}) still waiting after {waited} min. "
+              f"Decide it in withHuman: {_links.approval_url(row.request_id, app_url)}", flush=True)
+        announced[row.park_id] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        changed = True
+    for park_id in list(announced):
+        if park_id not in waiting:
+            del announced[park_id]
+            changed = True
+    if changed:
+        _save_state(state_path, state)
 
 
 def _apply_retention(ledger, now: datetime, days: int) -> None:
@@ -833,6 +894,11 @@ def _sweep(argv=None) -> int:
         _route_unanswered(ledger, args.ledger, args.approvers_file, datetime.now(timezone.utc), args.withhuman_url)
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
         _err(f"backup approver step failed ({type(exc).__name__})")
+    try:
+        _pending_fallback(ledger, args.ledger, args.pending_alert_minutes, datetime.now(timezone.utc),
+                          args.withhuman_url)
+    except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+        _err(f"pending approval fallback failed ({type(exc).__name__})")
     try:
         _formcheck_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the self-check alert must never stop the sweep

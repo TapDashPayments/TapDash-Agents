@@ -290,6 +290,12 @@ Every one links to the request's page, where you approve or deny.
 - **Teams:** withHuman has no Teams channel, so the approver's withHuman email alerts go to a Teams **channel's email
   address** (channel menu, **Get email address**; the channel's advanced settings must accept mail from withHuman).
   The alert then appears in that channel at once. Set up on 2026-10-26 for the admin.
+- **Fallback (GitHub #73, TAP2-170):** withHuman's email to Teams once never arrived. So the sweep also posts one line
+  for any approval still waiting `--pending-alert-minutes` after it was parked (default 3; `0` turns it off), with the
+  request's link. It goes to the sweep's alert chats: the Teams chat at `TEAMS_ALERT_WEBHOOK_URL` and the admin's
+  Telegram DM. The sweep runs every 5 minutes, so the line arrives about 3 to 8 minutes after the park. It is said once
+  per park (`pending_alert_state.json` next to the ledger). **Those chats must stay limited to approvers and admins**,
+  because the link is in the line.
 - **Telegram:** withHuman has no Telegram channel. Telegram gets a link only in the backup-approver alert (next
   bullets), through the sweep's delivery to the admin's DM.
 - **The chat where you asked never gets the link.** The bot only says the call is waiting for approval. Whoever asked
