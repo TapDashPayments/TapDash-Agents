@@ -291,3 +291,13 @@ def test_plugin_and_service_check_the_same_things():
         {k: v.pattern for k, v in paylink_app.ALLOWED_FIELDS.items()}
     assert paylink.LINK_ID.pattern == paylink_app.LINK_ID.pattern
     assert paylink.file_name("x" * 32) == paylink_app.file_name("x" * 32)
+
+
+def test_stale_temp_files_are_removed_but_fresh_ones_kept(folder):
+    stale, fresh = folder / ".new-old.tmp", folder / ".new-now.tmp"
+    stale.write_text("x")
+    fresh.write_text("x")
+    os.utime(stale, (NOW - 7200, NOW - 7200))
+    os.utime(fresh, (NOW - 10, NOW - 10))
+    make_link(markdown(), folder=str(folder), origin=ORIGIN, now=NOW)
+    assert not stale.exists() and fresh.exists()

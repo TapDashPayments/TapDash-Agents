@@ -4,7 +4,7 @@ Authorize.net opens a hosted form only when a page POSTs the form key to it, so 
 page (``launcher_html``), not a link. A chat can't click a page. When an approved form tool has run, the executor
 calls ``make_link``: it reads the post address and the hidden fields out of that page, checks each one against a
 fixed list, and saves them in one small file in the pay-link folder. The pay-link service
-(``paylink/app.py``) serves ``<origin>/pay/<link id>`` from that file until the form expires.
+(``paylink/paylink_app.py``) serves ``<origin>/pay/<link id>`` from that file until the form expires.
 
 - The link id is 24 random bytes (URL-safe). The file is named by its SHA-256, so the folder never holds the link.
 - Nothing from the connector's page is served as it is: the service builds its own page from the checked fields.
@@ -38,14 +38,14 @@ ALLOWED_POST_URLS = frozenset(host + page for host in _HOSTS for page in _PAGES)
 FORM_ACTION_ORIGINS = _HOSTS
 
 # Hidden fields a form page may carry, and what each value may look like.
-_TOKEN = re.compile(r"[A-Za-z0-9+/=._-]{20,4096}")
+_TOKEN = re.compile(r"[A-Za-z0-9+/=._-]{20,8192}")
 _ID = re.compile(r"[0-9]{1,20}")
 ALLOWED_FIELDS = {"token": _TOKEN, "paymentProfileId": _ID, "shippingAddressId": _ID}
 
 LINK_ID = re.compile(r"[A-Za-z0-9_-]{32}")  # secrets.token_urlsafe(24) is exactly 32 characters
 DEFAULT_MINUTES = 15
 SAFETY_SECONDS = 60  # the link stops a minute before Authorize.net's form does
-MAX_FILE_BYTES = 16384
+MAX_FILE_BYTES = 32768
 
 _FORM_RE = re.compile(r'<form method="post" action="([^"]*)">')
 _INPUT_RE = re.compile(r'<input type="hidden" name="([^"]*)" value="([^"]*)">')
@@ -132,7 +132,17 @@ def parse_form(raw: str) -> tuple[str, dict[str, str], int]:
     return post_url, fields, minutes
 
 
+STALE_TMP_SECONDS = 3600
+
+
 def _remove_expired(folder: Path, now: float) -> None:
+    """Expired link files, and temp files a crash left behind more than an hour ago."""
+    for path in folder.glob(".new-*.tmp"):
+        try:
+            if path.stat().st_mtime < now - STALE_TMP_SECONDS:
+                path.unlink()
+        except OSError:
+            continue
     for path in folder.glob("*.json"):
         try:
             if json.loads(path.read_text()).get("expires_at", 0) <= now:

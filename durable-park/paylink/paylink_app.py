@@ -44,11 +44,11 @@ _HOSTS = ("https://test.authorize.net", "https://accept.authorize.net")
 _PAGES = ("/payment/payment", "/customer/manage", "/customer/addPayment", "/customer/editPayment",
           "/customer/addShipping", "/customer/editShipping")
 ALLOWED_POST_URLS = frozenset(host + page for host in _HOSTS for page in _PAGES)
-_TOKEN = re.compile(r"[A-Za-z0-9+/=._-]{20,4096}")
+_TOKEN = re.compile(r"[A-Za-z0-9+/=._-]{20,8192}")
 _ID = re.compile(r"[0-9]{1,20}")
 ALLOWED_FIELDS = {"token": _TOKEN, "paymentProfileId": _ID, "shippingAddressId": _ID}
 _AMOUNT = re.compile(r"[0-9]{1,9}(\.[0-9]{1,2})?")
-MAX_FILE_BYTES = 16384
+MAX_FILE_BYTES = 32768
 
 STYLE = ("body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:28rem;margin:4rem auto;"
          "padding:0 1rem;text-align:center;color:#1a1a1a;background:#fff}"
