@@ -21,6 +21,11 @@
 - Before any gateway restart: no row `parked`, `approved` or `executing` (runbook rule), and from Task 1 on, restarts drain in-flight replies.
 - Tests: `pytest -q -W error` from `durable-park/`; docs check and Mermaid check must pass; every changed code file updates its mapped doc.
 
+## Known limits (accepted, from review)
+
+- **Delivery is at least once, at most one duplicate:** a crash after a successful post but before `mark_outcome_notified` makes the sweep re-send once. Hermes `post_message` has no idempotency key, so transport-level de-duplication is not possible here.
+- **The recovery path trusts `inject` acceptance:** like the approval wake (backlog item 2), a re-send counts as told once the gateway accepts it; a crash before the agent relays it loses that re-send. The migration is atomic (ALTER and backfill in one `BEGIN IMMEDIATE` transaction), as implemented.
+
 ## Review Focus
 
 1. **Old rows at migration:** every row already `executed`, `failed` or `unknown` when the column is added must be marked as notified, or the first sweep would announce weeks of old actions. (Test in Task 2.)

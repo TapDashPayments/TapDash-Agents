@@ -300,6 +300,11 @@ Every one links to the request's page, where you approve or deny.
   straight away and with no AI in between, so a restart or crash cannot lose it. If that post did not work, the
   5-minute sweep re-sends it 2 minutes later at the earliest (GitHub #66). Restarts also wait up to 45 seconds for a
   reply in progress (`agent.restart_drain_timeout`).
+  Known limits (GitHub #66): (1) if the server dies in the instant after the line was posted but before the ledger
+  recorded it, the sweep posts it once more (at most one duplicate; Hermes posts have no delivery receipt or
+  de-duplication key). (2) The sweep's re-send goes through the agent: it counts as told once the gateway accepts
+  it, so a second crash before the agent relays it can still lose that one re-send. The run itself is always in
+  the ledger (`result_json`, `note`).
 - **Unanswered after the primary window:** the backup-approver alert ([below](#backup-approver-and-unanswered-approvals-tap2-121)) ends with the link too.
   Like every sweep alert, it goes to the admin's Telegram DM and to the Teams alert chat (`TEAMS_ALERT_WEBHOOK_URL`),
   and to the backup approver's own Teams webhook when one is set. **Keep those alert chats to approvers and admins**:
