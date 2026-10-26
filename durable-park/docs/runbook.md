@@ -289,11 +289,15 @@ Every one links to the request's page, where you approve or deny.
 - **Teams:** withHuman has no Teams channel, so the approver's withHuman email alerts go to a Teams **channel's email
   address** (channel menu, **Get email address**; the channel's advanced settings must accept mail from withHuman).
   The alert then appears in that channel at once. Set up on 2026-10-26 for the admin.
-- **Telegram:** withHuman has no Telegram channel. Use one of withHuman's channels instead.
+- **Telegram:** withHuman has no Telegram channel. Telegram gets a link only in the backup-approver alert (next
+  bullets), through the sweep's delivery to the admin's DM.
 - **The chat where you asked never gets the link.** The bot only says the call is waiting for approval. Whoever asked
   may also be an approver, or the chat may be shared, and the asker must not be handed a way to approve their own
   request. Links go only to the approver, through withHuman's alerts.
 - **Unanswered after the primary window:** the backup-approver alert ([below](#backup-approver-and-unanswered-approvals-tap2-121)) ends with the link too.
+  Like every sweep alert, it goes to the admin's Telegram DM and to the Teams alert chat (`TEAMS_ALERT_WEBHOOK_URL`),
+  and to the backup approver's own Teams webhook when one is set. **Keep those alert chats to approvers and admins**:
+  anyone in them gets the link.
 - **Hermes Deck cannot approve yet:** withHuman refuses decisions made with a personal API key ("Session ID is
   required."), a withHuman bug: [withHumanAI/withHuman#112](https://github.com/withHumanAI/withHuman/issues/112), fix
   proposed in [#113](https://github.com/withHumanAI/withHuman/pull/113). Approve in the withHuman app until it ships.
