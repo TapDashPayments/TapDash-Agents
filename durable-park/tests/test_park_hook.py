@@ -57,13 +57,21 @@ FOREIGN = ("durable-park: another plugin hook could change tool arguments after 
 
 def already_waiting(park_id):
     return (f"durable-park: {park_id} is already waiting for approval in this chat; "
-            f"this call was not run. Do not retry it; wait until {park_id} is decided.")
+            f"this call was NOT run and nothing was recorded. Do not retry it; tell the user it is waiting for "
+            f"approval and wait until {park_id} is decided.")
 
 
 def park_message(park_id, tool):
     return (f'PARKED {park_id}: "{tool}" needs human approval in withHuman and has NOT run. '
-            "Do not retry it or try another way to do it. Tell the user it is waiting for approval; "
-            "you will be told here when it is decided.")
+            "Nothing was recorded, sent, charged or created. Do not retry it or try another way to do it. "
+            "Tell the user plainly that it is waiting for their approval and has NOT run yet; do not describe it "
+            "as done, recorded or created. You will be told here when it is decided.")
+
+
+def test_park_message_says_not_run_and_not_recorded():
+    from durable_park.park_hook import PARK_MESSAGE
+    msg = PARK_MESSAGE.format(park_id="P-1", tool="authnet_create_payment").lower()
+    assert "has not run" in msg and "nothing was recorded" in msg and "waiting for their approval" in msg
 
 
 @pytest.fixture

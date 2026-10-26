@@ -64,8 +64,9 @@ DEFAULT_FORM_CHECKED_TOOLS: tuple[str, ...] = (
 
 PARK_MESSAGE = (
     'PARKED {park_id}: "{tool}" needs human approval in withHuman and has NOT run. '
-    "Do not retry it or try another way to do it. Tell the user it is waiting for approval; "
-    "you will be told here when it is decided."
+    "Nothing was recorded, sent, charged or created. Do not retry it or try another way to do it. "
+    "Tell the user plainly that it is waiting for their approval and has NOT run yet; do not describe it "
+    "as done, recorded or created. You will be told here when it is decided."
 )
 NO_SESSION_MESSAGE = "durable-park: no chat session; the tool call was refused"
 NO_CALL_ID_MESSAGE = "durable-park: no tool call id; the tool call was refused"
@@ -86,7 +87,8 @@ BRIDGE_CALL_MESSAGE = (
 )
 ALREADY_WAITING_MESSAGE = (
     "durable-park: {park_id} is already waiting for approval in this chat; "
-    "this call was not run. Do not retry it; wait until {park_id} is decided."
+    "this call was NOT run and nothing was recorded. Do not retry it; tell the user it is waiting for "
+    "approval and wait until {park_id} is decided."
 )
 ID_REUSED_MESSAGE = (
     "durable-park: this tool call id was already used for a different call; the call was not run"
