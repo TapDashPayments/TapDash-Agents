@@ -99,17 +99,23 @@ def _loosen(node: Any) -> Any:
     if isinstance(node, list):
         return [_loosen(item) for item in node]
     if not isinstance(node, dict):
+        if node is not None and not isinstance(node, (str, int, float, bool)):
+            raise TypeError("not plain JSON")
         return node
     out: dict = {}
     for key, value in node.items():
         if key in _LEFT_TO_SERVER or key == "patternProperties":
             continue
         if key in _SCHEMA_MAPS and isinstance(value, dict):
-            out[key] = {name: _loosen(sub) for name, sub in value.items()}
+            # ⚡ Optimization: Filter out gateway fields during traversal to avoid mutating or re-serializing dicts.
+            out[key] = {name: _loosen(sub) for name, sub in value.items()
+                        if not (key == "properties" and _is_gateway_field(name))}
         elif key in _SCHEMA_VALUES:
             out[key] = _loosen(value)
+        elif key == "required" and isinstance(value, list):
+            out[key] = [r for r in value if not _is_gateway_field(r)]
         else:
-            out[key] = value
+            out[key] = _loosen(value)
     if "patternProperties" in node:
         out["additionalProperties"] = True
     if node.get("nullable") is True:
@@ -124,20 +130,13 @@ def _loosen(node: Any) -> Any:
 
 
 def _prepare_rules(schema: dict) -> dict:
+    if not isinstance(schema, dict):
+        raise FormCheckUnavailable("no rules found for this tool")
     try:
-        rules = json.loads(json.dumps(schema))  # plain JSON data only
+        # ⚡ Optimization: Single recursive walk validates plain JSON and strips gateway args without json roundtrip.
+        return _loosen(schema)
     except (TypeError, ValueError) as exc:
         raise FormCheckUnavailable("rules are not plain JSON") from exc
-    if not isinstance(rules, dict):
-        raise FormCheckUnavailable("no rules found for this tool")
-    props = rules.get("properties")
-    if isinstance(props, dict):
-        for name in [n for n in props if _is_gateway_field(n)]:
-            del props[name]
-    required = rules.get("required")
-    if isinstance(required, list):
-        rules["required"] = [r for r in required if not _is_gateway_field(r)]
-    return _loosen(rules)
 
 
 def _describe(exc: Exception) -> str:
@@ -207,10 +206,14 @@ class FormChecker:
     def check(self, tool: str, args: dict) -> str | None:
         """``None`` when ``args`` follow the rules, else a short description of the first problem."""
         validate = self.prepare(tool)
-        raw = copy.deepcopy(args if isinstance(args, dict) else {})
-        try:
-            fixed = (self._coerce_fn or hermes_coerce)(tool, copy.deepcopy(raw))
-        except Exception:  # noqa: BLE001 - without type fixing, check the arguments as sent
+        raw = args if isinstance(args, dict) else {}
+        if raw:
+            try:
+                # ⚡ Optimization: Deepcopy raw only once when passing to coerce_fn (saves duplicate deepcopy).
+                fixed = (self._coerce_fn or hermes_coerce)(tool, copy.deepcopy(raw))
+            except Exception:  # noqa: BLE001 - without type fixing, check the arguments as sent
+                fixed = raw
+        else:
             fixed = raw
         data = strip_gateway_args(fixed if isinstance(fixed, dict) else raw)
         try:
