@@ -58,6 +58,9 @@ flowchart TD
   T -->|"Maverick API<br/>(placeholder until sandbox)"| M[("Maverick Payments")]
   T -->|"accept.blue API<br/>(placeholder key until sandbox access)"| AB[("accept.blue")]
   T -->|"Authorize.net API<br/>(placeholder login until sandbox access)"| AN[("Authorize.net")]
+  G -->|"an Authorize.net form was made"| PL["pay-link service<br/>one short link, 14 minutes"]
+  PL -->|"posts the form key"| AN
+  U -->|"opens the link, then types<br/>the card on Authorize.net"| PL
   G -->|"with withHuman's sign-in"| S[("Supabase CRM dev, monday,<br/>DocuSign demo")]
   A -->|"copies of every turn"| F[("Langfuse<br/>traces, 30 days")]
 ```
@@ -73,6 +76,7 @@ flowchart TD
 | **withHuman MCP gateway** | Passes tool calls on to the right server, after the rules say yes. | Hosted |
 | **Bridge** | When the gateway asks, says yes only for a call that matches an approved one. | [`durable-park/bridge/`](durable-park/bridge/) |
 | **Tunnel container** | Runs the QuickBooks, Maverick, accept.blue and Authorize.net servers on the VM and connects them to the gateway. | [`durable-park/deploy/tunnel/`](durable-park/deploy/tunnel/) |
+| **Pay-link service** | Turns an Authorize.net form the agent made into a short link a customer can click. The link opens one button that posts the form key to Authorize.net; no script runs, so link previews and mail scanners send nothing on. It works for 14 minutes, then says "This payment link has expired". | [`durable-park/paylink/`](durable-park/paylink/) |
 | **QuickBooks, Maverick, accept.blue, Authorize.net** | The payment and accounting systems (sandbox; Maverick has placeholder settings for now; accept.blue and Authorize.net are switched on, since 2026-10-25, with placeholder logins). | Intuit, Maverick, accept.blue, Authorize.net |
 | **Supabase, monday, DocuSign** | Their own official servers on the internet; withHuman holds the sign-in. | Hosted by each company |
 | **Langfuse** | Keeps a copy of every chat and tool call for review (30 days). | Hosted ([us.cloud.langfuse.com](https://us.cloud.langfuse.com)) |
