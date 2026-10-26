@@ -2,6 +2,9 @@
 """durable-park sweep: a Hermes cron ``--no-agent`` script (every 5 minutes).
 
 * a ``parked`` row with an approval request          -> post a wake (a decision may have been missed)
+* an ``executed``/``failed``/``unknown`` row whose outcome the chat was not told, ended 2 minutes to 24 hours ago
+                                                       -> post a wake (the wake handler tells the chat; GitHub #66)
+* the same, ended more than 24 hours ago               -> one alert line per park (``outcome_giveup_state.json``)
 * an ``approved`` row the chat was not told about    -> post a wake (the first injection failed)
 * a denied/expired/cancelled row with a request that the chat was not told about -> post a wake
 * a ``parked`` row with no request id attached older than 10 minutes -> cancel it and print one alert line
@@ -396,7 +399,26 @@ def _wake_targets(ledger) -> list[str]:
     # (a park-hook cancel without one was never a withHuman decision and is not announced).
     decided = [r.park_id for r in ledger.list_by_status("denied", "expired", "cancelled")
                if r.notified_at is None and r.request_id]
-    return parked + approved + decided
+    untold = [r.park_id for r in ledger.outcome_unnotified()]  # GitHub #66: tell the chat how the run ended
+    return parked + approved + decided + untold
+
+
+OUTCOME_GIVEUP_STATE = "outcome_giveup_state.json"
+
+
+def _outcome_giveup_alert(ledger, ledger_path: str) -> None:
+    """GitHub #66: a run whose outcome could not be told for 24 hours gets one alert line, then is left alone."""
+    state_path = os.path.join(os.path.dirname(os.path.abspath(ledger_path)), OUTCOME_GIVEUP_STATE)
+    state = _load_state(state_path)
+    said = state.get("said") if isinstance(state.get("said"), list) else []
+    given_up = ledger.outcome_given_up()
+    current = [r.park_id for r in given_up]
+    for row in given_up:
+        if row.park_id not in said:
+            print(f"durable-park ALERT: could not tell the chat the outcome of {row.park_id} ({row.tool}) for 24 "
+                  "hours; check it.", flush=True)
+    if current != said:  # forget parks no longer given up (deleted, or told after all)
+        _save_state(state_path, {"said": current})
 
 
 def _read_secret(path: str) -> str | None:
@@ -831,6 +853,10 @@ def _sweep(argv=None) -> int:
         _load_proof_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the load-proof alert must never stop the sweep
         _err(f"load proof alert failed ({type(exc).__name__})")
+    try:
+        _outcome_giveup_alert(ledger, args.ledger)
+    except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+        _err(f"outcome give-up alert failed ({type(exc).__name__})")
     status = 0
     targets = _wake_targets(ledger)
     if targets:

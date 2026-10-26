@@ -295,6 +295,11 @@ Every one links to the request's page, where you approve or deny.
 - **The chat where you asked never gets the link.** The bot only says the call is waiting for approval. Whoever asked
   may also be an approver, or the chat may be shared, and the asker must not be handed a way to approve their own
   request. Links go only to the approver, through withHuman's alerts.
+- **After an approved action runs:** durable-park posts one line into the chat where it was asked, for example
+  `[durable-park] P-XXXX ran: <tool>. Result: <first 200 characters>` (or "did NOT complete", or "outcome UNKNOWN"),
+  straight away and with no AI in between, so a restart or crash cannot lose it. If that post did not work, the
+  5-minute sweep re-sends it 2 minutes later at the earliest (GitHub #66). Restarts also wait up to 45 seconds for a
+  reply in progress (`agent.restart_drain_timeout`).
 - **Unanswered after the primary window:** the backup-approver alert ([below](#backup-approver-and-unanswered-approvals-tap2-121)) ends with the link too.
   Like every sweep alert, it goes to the admin's Telegram DM and to the Teams alert chat (`TEAMS_ALERT_WEBHOOK_URL`),
   and to the backup approver's own Teams webhook when one is set. **Keep those alert chats to approvers and admins**:
@@ -304,6 +309,14 @@ Every one links to the request's page, where you approve or deny.
   proposed in [#113](https://github.com/withHumanAI/withHuman/pull/113). Approve in the withHuman app until it ships.
   Before it ships, the Deck relay must move to its own Linux user: today it runs as `hermes`, the agent's user, which
   can read Deck's withHuman key ([backlog](backlog.md)).
+
+### Could not tell the chat the outcome
+
+`durable-park ALERT: could not tell the chat the outcome of P-XXXX (<tool>) for 24 hours; check it.`
+
+A run ended (executed, failed or unknown), but neither the executor's own message nor the sweep's re-sends reached
+the chat for 24 hours (the chat may be gone, or it was a CLI run). The run itself is recorded in the ledger
+(`result_json`, `note`). Tell the person yourself. The sweep says this once per park and then stops trying.
 
 ### Outcome UNKNOWN
 

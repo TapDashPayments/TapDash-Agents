@@ -19,6 +19,7 @@ import httpx
 from agentapprovalprotocol import AsyncClient
 
 from .gatecall import HTTP_TIMEOUT_SECONDS, RETRY_BUDGET_SECONDS
+from .outcome import outcome_text
 from .ledger import Ledger, ParkRow
 
 log = logging.getLogger("durable_park")
@@ -51,6 +52,10 @@ DENIED_TEXT = (
 EXPIRED_TEXT = (
     '[durable-park] {park_id} ("{tool}") got no decision before its deadline. It did not run. '
     "Ask the user if they want to request approval again.")
+
+
+OUTCOME_SUFFIX = " Tell the user this in one short message. Do not run anything."
+_ENDED = frozenset({"executed", "failed", "unknown"})
 
 
 def is_wake_event(event: Any) -> bool:
@@ -224,6 +229,17 @@ async def _process(event: Any, ledger: Ledger, async_client_factory: Callable[[]
     row = ledger.get(park_id)
     if row is None:
         log.warning("durable-park wake: unknown park_id %.40r ignored", park_id)
+        return
+    if row.status in _ENDED:
+        # GitHub #66: the run ended but the chat was not told (the executor's own post did not happen or did not
+        # work). No await: the check, the inject and the mark run together on the gateway loop.
+        text = outcome_text(row) if row.outcome_notified_at is None else None
+        if text is None:
+            return
+        if inject(text + OUTCOME_SUFFIX, session_key=row.session_key):
+            ledger.mark_outcome_notified(row.park_id)
+        else:
+            log.warning("durable-park wake: gateway did not accept the outcome of %s; left untold", row.park_id)
         return
     if row.status == "parked":
         row = await _decide_from_provider(row, ledger, async_client_factory, audit_client_factory)

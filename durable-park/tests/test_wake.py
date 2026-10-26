@@ -251,14 +251,22 @@ def test_wake_before_instant_finish_is_left_alone(env):
     assert after.status == "parked" and after.request_id is None and after.updated_at == row.updated_at
 
 
-@pytest.mark.parametrize("status", ["executing", "executed", "failed", "unknown"])
-def test_wake_for_a_row_past_approval_does_nothing(env, status):
+def _ended(env, status, *, told=False):
     row = env.park()
     env.provider.decide(row.request_id, "approved")
     env.ledger.transition(row.park_id, "parked", "approved")
     env.ledger.transition(row.park_id, "approved", "executing", executing_at="2026-01-01T00:00:00.000000Z")
     if status != "executing":
-        env.ledger.transition(row.park_id, "executing", status)
+        env.ledger.transition(row.park_id, "executing", status, note="tool error: nope")
+    if told:
+        env.ledger.mark_outcome_notified(row.park_id)
+    return row
+
+
+@pytest.mark.parametrize("status, told", [("executing", False), ("executed", True), ("failed", True),
+                                          ("unknown", True)])
+def test_wake_for_a_row_past_approval_does_nothing(env, status, told):
+    row = _ended(env, status, told=told)
     before = len(env.provider.calls)
     assert env.wake(row.park_id) == SKIP
     assert env.injected == [] and len(env.provider.calls) == before
@@ -435,3 +443,32 @@ def test_register_fail_closed_still_drops_wake_events(tmp_path):
     hook = ctx.hooks["pre_gateway_dispatch"]
     assert asyncio.run(hook(event=wake_event("P-1"))) == SKIP
     assert asyncio.run(hook(event=wake_event("P-1", chat_name="Alice", platform="telegram"))) is None
+
+
+
+# GitHub #66: a run whose outcome the chat was not told is told through the wake -----------------------------
+
+@pytest.mark.parametrize("status, start", [
+    ("executed", "[durable-park] {park_id} ran: " + TOOL + "."),
+    ("failed", "[durable-park] {park_id} (" + TOOL + ") did NOT complete: tool error: nope"),
+    ("unknown", "[durable-park] {park_id} (" + TOOL + "): outcome UNKNOWN."),
+])
+def test_wake_injects_outcome_once(env, status, start):
+    row = _ended(env, status)
+    before = len(env.provider.calls)
+    assert env.wake(row.park_id) == SKIP
+    assert len(env.injected) == 1
+    text, key = env.injected[0]
+    assert text.startswith(start.format(park_id=row.park_id)) and key == SESSION_KEY
+    assert text.endswith("Tell the user this in one short message. Do not run anything.")
+    assert env.ledger.get(row.park_id).outcome_notified_at is not None
+    assert len(env.provider.calls) == before  # withHuman is not asked again
+    env.wake(row.park_id)
+    assert len(env.injected) == 1  # told once
+
+
+def test_wake_outcome_inject_false_leaves_row_untold(env):
+    row = _ended(env, "executed")
+    env.box.result = False
+    env.wake(row.park_id)
+    assert len(env.injected) == 1 and env.ledger.get(row.park_id).outcome_notified_at is None
