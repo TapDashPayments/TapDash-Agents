@@ -530,6 +530,27 @@ and, in the gateway, every 30 minutes, and every process holding unsaved problem
 A problem that goes away and comes back alerts again. When adding tools from a new provider, expect these alerts
 if its rules differ from the QuickBooks ones.
 
+### No pay link (Authorize.net forms)
+
+When an approved Authorize.net form (`authnet_create_payment_form`, `authnet_create_profile_form`) runs, the chat
+gets a pay link: `[durable-park] P-XXXX made an Authorize.net form (...). Pay link: https://proto-agents.taila95862.ts.net/pay/<id> (works until 17:20 UTC)`.
+Send that link to the customer. It opens a page with one "Continue to payment" button, and the customer types the
+card on Authorize.net's own page. It works for 14 minutes; after that it says "This payment link has expired" and you
+ask the agent for a new form ([architecture](architecture.md#1-system-map), row "pay links").
+
+If the line says `No pay link: <reason>. Tell an admin.` instead, the form was made but there is nothing to send:
+
+| Reason | What to do |
+|---|---|
+| `pay links are not set up (paylink_dir, paylink_origin)` | Re-run `configure_hermes.sh` (it sets both settings) when no ledger row is parked, approved or executing. |
+| `the pay-link folder does not exist (paylink_dir)` | Same: the script creates `/var/lib/durable-park-paylinks` (`2750 hermes:dppay`). |
+| `the form key in the answer was cut by the connector's safety filter` | The Authorize.net server is older than `4dd4278` ([gateway setup](gateway-setup.md#payment-server-sources-acceptblue-and-authorizenet)). Check the image tag ends in `-an-4dd4278` or later. |
+| `the form page posts somewhere other than ...`, `unexpected field`, `unexpected shape` | The connector's page changed. Nothing is served. Compare `paylink.py` with the connector's `launcher_html` before allowing anything new. |
+
+Check the service: `systemctl is-active durable-park-paylink` should say `active`, and
+`curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8793/pay/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA` should print `410`
+(an unknown link). The gateway log has `durable-park: no pay link for P-XXXX: <reason>` for every miss.
+
 ## Troubleshooting
 
 ### Backup approver and unanswered approvals (TAP2-121)

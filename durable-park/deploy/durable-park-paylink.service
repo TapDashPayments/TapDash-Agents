@@ -1,0 +1,35 @@
+# durable-park pay-link service: GET /pay/<link id> (via Tailscale Funnel) -> a page that opens one Authorize.net
+# hosted form. Installed by deploy/configure_hermes.sh as /etc/systemd/system/durable-park-paylink.service.
+# It only reads the pay-link folder (hermes writes it; group dppay reads it) and keeps no state of its own.
+[Unit]
+Description=durable-park pay links (Authorize.net hosted forms)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dppay
+Group=dppay
+Environment=DURABLE_PARK_PAYLINK_DIR=/var/lib/durable-park-paylinks
+ExecStart=/opt/durable-park/bin/python -I -B /opt/durable-park/paylink/paylink_app.py
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/durable-park-paylinks
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -123,6 +123,7 @@ flowchart LR
   remote[("Supabase CRM dev, monday, DocuSign demo<br/>official MCP servers on the internet")]
   lf[("Langfuse Cloud US<br/>trace store, 30 days")]
   deckapp(["Deck app<br/>on your computer"])
+  payer(["Customer or user<br/>opening a pay link"])
 
   subgraph WH["withHuman cloud"]
     aap["AAP API<br/>approval requests"]
@@ -153,6 +154,9 @@ flowchart LR
     tunnel["wh-tunnel container<br/>QuickBooks MCP server<br/>+ Maverick MCP server<br/>+ accept.blue and Authorize.net MCP servers"]
     funnelA{{"Funnel /aap/events"}}
     funnelB{{"Funnel /wh/bridge"}}
+    paylinks[("pay-link folder<br/>/var/lib/durable-park-paylinks")]
+    paysvc["pay-link service<br/>127.0.0.1:8793 - user dppay"]
+    funnelP{{"Funnel /pay"}}
   end
 
   chat -->|"message"| agent
@@ -198,6 +202,12 @@ flowchart LR
   sweep -->|"reads"| bstatus
   sweep -->|"reads"| lstatus
   hook -->|"writes"| lstatus
+  exec -->|"Authorize.net form ran:<br/>saves one pay link (15 min)"| paylinks
+  payer -->|"opens the link"| funnelP
+  funnelP --> paysvc
+  paysvc -->|"reads"| paylinks
+  paysvc -->|"page with one button:<br/>posts the form key"| payer
+  payer -->|"types the card on<br/>Authorize.net's own page"| an
   sweep -->|"alerts: UNKNOWN, form checker broken,<br/>withHuman unreachable, note not moved<br/>(Telegram message + Teams Adaptive Card)"| chat
 ```
 
@@ -217,6 +227,7 @@ flowchart LR
 | bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). Its digest comparison (`ledger.normalize_args`) drops the top-level `withhuman_context`, which is why the note the park hook moved to the top level (and the gateway strips before forwarding) does not change the match: the park row and the delivered call agree. |
 | bridge check | `deploy/bridge_check.py` | Read-only isolation check, run as root by `configure_hermes.sh` right after the bridge answers 401 (the deploy stops if it fails) and by hand ([runbook](runbook.md#health-check)). Seven checks: the socket unit is active and listens on exactly `127.0.0.1:8791`; the service is active, its main process runs as `dpbridge` and the `Groups:` line of its `/proc/<pid>/status` is empty or only `dpbridge`'s own gid; only systemd and that process hold the port; no other process runs `bridge.app`; no user-level `durable-park-bridge*` unit exists for any user; `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; `bridge_secret` is `root:root 0600` (stat only, never read). |
 | links | `plugin/durable_park/links.py` | Builds the link to one request's page in withHuman's review queue (`<app>/queue/<request id>`; the sweep's `--withhuman-url`, default `https://app.withhuman.ai`). The page opens only for a signed-in member and withHuman still checks who may decide, but the link goes only to approvers. Standard library only: the sweep loads it by path. Used by the backup-approver alert, which goes only to the admin alert channels (the Telegram DM, the Teams alert chat, the backup approver's Teams webhook). The bot's own reply in the chat never carries the link: whoever asked must not be handed a way to approve their own request. |
+| pay links | `plugin/durable_park/paylink.py`, `paylink/paylink_app.py` | Authorize.net opens a hosted card form only when a page POSTs the form key to it, so the connector answers with a small page (`launcher_html`) that a chat cannot click (TAP2-82). When an approved `authnet_create_payment_form` or `authnet_create_profile_form` has run, the executor reads the post address and hidden fields out of that page, checks each against a fixed list (Authorize.net's hosted page addresses only; fields `token`, `paymentProfileId`, `shippingAddressId` with fixed shapes), and saves them in one file in `/var/lib/durable-park-paylinks` named by the SHA-256 of a 32-character random link id. The model gets only the link (`<paylink_origin>/pay/<id>`) and is told to give it to the user; it never sees the form key. The outcome line shows the link too (`[durable-park] P-XXXX made an Authorize.net form (...). Pay link: ... (works until 17:20 UTC)`). The pay-link service (user `dppay`, read-only) answers that link with its own page (one "Continue to payment" button that posts the key to Authorize.net; no script, so link previews and mail scanners that open the link send nothing on) until one minute before the form's 15 minutes end, then "This payment link has expired". If no link can be made (not set up, a cut form key, an unexpected page) the model is told to say so, the outcome line says why and the gateway log has an error: never silent. Expired files are removed the next time a link is made. |
 | sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, wakes a run whose outcome the chat was not told (ended 2 minutes to 24 hours ago; the wake handler tells the chat) and alerts once for one still untold after 24 hours (GitHub #66), marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), routes an approval nobody answered to the backup approver (the alert ends with the request's withHuman link) and denies it when nobody answers in time (only with `/etc/durable-park/approvers.json`, TAP2-121, [runbook](runbook.md#backup-approver-and-unanswered-approvals-tap2-121)), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, and once per (tool, kind, key, detail) when the park hook reports that the agent's `withhuman_context` note was not moved, was dropped or could not be checked for (`lift_status.json`, [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). Its alerts go to the Telegram DM (the cron job's delivery target) and, because `TEAMS_ALERT_WEBHOOK_URL` is set on the VM, also to Teams as an Adaptive Card that renders full width (`"msteams": {"width": "Full"}`) ([runbook](runbook.md#live-hermes-settings-on-proto-agents)). |
 
 ### Plugin settings
@@ -233,6 +244,8 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
 | `audit_key_file` | `/etc/durable-park/audit_key` | Optional for the plugin (the bridge needs the same key: systemd hands it a private copy when the bridge starts, so a rotation also needs `sudo systemctl restart durable-park-bridge`). A withHuman org API key with `audit.read`, `request.read` and `request.read.unrouted` and nothing else; the plugin only uses `audit.read`. Read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
 | `audit_base_url` | `https://app.withhuman.ai` | Where that audit lookup (`GET /api/v1/audit`) goes. A bad `audit_*` setting (not a string, empty, a path that cannot be resolved) only switches the name off with a warning in the log; unlike the other settings it never refuses tool calls. |
+| `paylink_dir` | (none) | The pay-link folder the executor writes one file per link into (`/var/lib/durable-park-paylinks` on proto-agents, set by `configure_hermes.sh`). Unset or missing: no pay link is made, and the chat is told why. |
+| `paylink_origin` | (none) | The public `https://` address in front of `/pay/<id>` (this machine's Tailscale Funnel name, read by `configure_hermes.sh`). Unset or not `https://`: no pay link, and the chat is told why. |
 | `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json`, `formcheck_status.json`, `lift_status.json` and `plugin_load.json` are written next to it. |
 | `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
 | `risky_tools` | (retired) | Renamed `form_checked_tools`. If still set, a warning `risky_tools is renamed form_checked_tools; ignoring it` is logged and its value is not used. |
@@ -720,8 +733,9 @@ groups or at the permissions of `/etc/durable-park` itself, and a change to the 
 | receiver | `aaprecv` | `/opt/durable-park/receiver/` (root-owned copy) | `127.0.0.1:8790` `/aap/events` | system unit `durable-park-receiver` |
 | bridge | `dpbridge` | `/opt/durable-park/bridge/` + the whole `/opt/durable-park/plugin/durable_park/` package (root-owned copy; it uses `ledger.args_digest` and `gatecall.gateway_slug`, never the ledger file) | `127.0.0.1:8791` `/wh/bridge` (the socket is held by systemd, not by the bridge process) | system units `durable-park-bridge.socket` (holds the port) and `durable-park-bridge` (`Restart=always`) |
 | sweep | `hermes` | `/home/hermes/durable-park/scripts/durable_park_sweep.py` (the git clone) | - | Hermes cron `durable-park-sweep`, `*/5 * * * *`, no agent |
+| pay-link service | `dppay` | `/opt/durable-park/paylink/paylink_app.py` (root-owned copy) | `127.0.0.1:8793` `/pay/<id>` (read-only: it only reads `/var/lib/durable-park-paylinks`) | system unit `durable-park-paylink` |
 | tunnel | container user `withhuman` | image `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-4dd4278` (live since 2026-10-26), QuickBooks, Maverick, accept.blue and Authorize.net servers (4 servers; [gateway setup](gateway-setup.md#the-acceptblue-and-authorizenet-servers-in-the-image)). It replaced `-an-6084f36` (live from 2026-10-25 16:31 UTC; its form keys were broken), which replaced `-mav-d6f43f9` (live from 15:22 UTC), which is kept for rollback, as are `-mav-e4a2b10` (live from 02:38 UTC) and the QuickBooks-only `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` ([gateway setup](gateway-setup.md#the-maverick-server-in-the-image)) | outbound only | Docker, container `wh-tunnel` |
-| Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events` and `/wh/bridge`; `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
+| Public entry points | - | Tailscale Funnel `https://proto-agents.taila95862.ts.net/aap/events`, `/wh/bridge` and `/pay` (pay links); `/hermes-shell` for the Proto-Agents connector (GitHub OAuth, one allowed GitHub account) | 443 | `tailscale funnel --bg` |
 
 System users behind that table:
 
@@ -730,6 +744,7 @@ System users behind that table:
 | `hermes` | the agent, the plugin, the sweep, the Hermes user units (gateway, dashboard, Teams tunnel) | `dpwake` (reads `wake_secret`); no sudo |
 | `aaprecv` | the receiver | `dpwake` |
 | `dpbridge` | the gateway bridge | its own group only; no login, no home, shell `nologin`; deliberately not in `dpwake` or `hermes` (`bridge_check.py` checks it) |
+| `dppay` | the pay-link service | its own group only; no login, no home. Reads the pay-link folder (`2750 hermes:dppay`, setgid, files `0640`); `hermes` writes it |
 | `ubuntu` | the admin and the Claude connector (no Hermes install since 2026-10-22) | passwordless sudo |
 
 - Outside services the gateway talks to: withHuman (approvals and the MCP gateway), Telegram, Teams and, since 2026-10-22, Langfuse Cloud (traces out only).
@@ -791,6 +806,7 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | 30 days | `allowed`, `refused` and `cancelled` rows older than this are deleted | `durable_park_sweep.py --retention-days` |
 | 10 min | An `executing` row older than this becomes `unknown` | `durable_park_sweep.py` |
 | 30 min | Form self-check interval | `formcheck.py` |
+| 14 min | A pay link works this long: the form's 15 minutes less one, so a customer never reaches an expired Authorize.net form | `paylink.py` |
 | 75 min | Form-check report older than this is treated as broken | `durable_park_sweep.py` |
 | 2 | Bad sweeps in a row before a form-checker alert | `durable_park_sweep.py` |
 | 300 s | Allowed clock difference on the bridge signature | `bridge/app.py` |

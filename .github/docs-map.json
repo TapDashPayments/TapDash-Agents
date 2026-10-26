@@ -36,7 +36,8 @@
         "durable-park/plugin/durable_park/wake.py",
         "durable-park/plugin/durable_park/executor.py",
         "durable-park/plugin/durable_park/links.py",
-        "durable-park/plugin/durable_park/outcome.py"
+        "durable-park/plugin/durable_park/outcome.py",
+        "durable-park/plugin/durable_park/paylink.py"
       ],
       "docs": ["durable-park/docs/architecture.md"]
     },
@@ -67,6 +68,14 @@
       "docs": [
         "durable-park/docs/architecture.md",
         "durable-park/docs/receiver-setup.md"
+      ]
+    },
+    {
+      "name": "Pay-link service",
+      "code": ["durable-park/paylink/**"],
+      "docs": [
+        "durable-park/docs/architecture.md",
+        "durable-park/docs/runbook.md"
       ]
     },
     {
