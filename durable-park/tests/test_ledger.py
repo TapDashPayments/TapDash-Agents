@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -395,3 +396,72 @@ def test_a_replayed_park_keeps_the_user_and_profile_of_the_first_one(tmp_path):
     again = ledger.park(session_key="k", session_id="s", tool_call_id="c", tool="t", args={}, call_key="x",
                         server="srv", user_id="u2", profile="p2")
     assert again.park_id == first.park_id and (again.user_id, again.profile) == ("u1", "p1")
+
+
+# GitHub #66: whether the chat was told the outcome of a run ---------------------------------------------------
+
+def _terminal(ledger, n, status):
+    row = ledger.park(session_key="agent:main:teams:dm:1", session_id="s", tool_call_id=f"o{n}", tool="t",
+                      args={"n": n}, call_key=f"ok{n}", server="park:qb")
+    path = {"parked": [], "executed": ["approved", "executing", "executed"],
+            "failed": ["approved", "executing", "failed"], "unknown": ["approved", "executing", "unknown"]}[status]
+    prev = "parked"
+    for nxt in path:
+        assert ledger.transition(row.park_id, prev, nxt)
+        prev = nxt
+    return row.park_id
+
+
+def _set_updated(ledger, park_id, minutes_ago):
+    at = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    con = sqlite3.connect(ledger.path, isolation_level=None)
+    try:
+        con.execute("UPDATE parks SET updated_at=? WHERE park_id=?", (at, park_id))
+    finally:
+        con.close()
+
+
+def test_outcome_column_added_and_old_terminal_rows_backfilled(tmp_path):
+    path = str(tmp_path / "ledger.db")
+    old = Ledger(path)
+    ids = {s: _terminal(old, i, s) for i, s in enumerate(("executed", "failed", "unknown", "parked"))}
+    con = sqlite3.connect(path, isolation_level=None)
+    try:
+        con.execute("ALTER TABLE parks DROP COLUMN outcome_notified_at")  # a ledger from before the column
+    finally:
+        con.close()
+    new = Ledger(path)
+    for status in ("executed", "failed", "unknown"):
+        assert new.get(ids[status]).outcome_notified_at is not None
+    assert new.get(ids["parked"]).outcome_notified_at is None
+    before = {pid: new.get(pid).outcome_notified_at for pid in ids.values()}
+    again = Ledger(path)  # a second open changes nothing
+    assert {pid: again.get(pid).outcome_notified_at for pid in ids.values()} == before
+
+
+def test_new_terminal_rows_start_untold(tmp_path):
+    ledger = Ledger(str(tmp_path / "ledger.db"))
+    assert ledger.get(_terminal(ledger, 1, "executed")).outcome_notified_at is None
+
+
+def test_mark_outcome_notified_once(tmp_path):
+    ledger = Ledger(str(tmp_path / "ledger.db"))
+    pid = _terminal(ledger, 1, "executed")
+    assert ledger.mark_outcome_notified(pid) is True
+    assert ledger.mark_outcome_notified(pid) is False
+    assert ledger.get(pid).outcome_notified_at is not None
+
+
+def test_outcome_unnotified_window(tmp_path):
+    ledger = Ledger(str(tmp_path / "ledger.db"))
+    fresh, due, stale, told, waiting = (_terminal(ledger, 1, "executed"), _terminal(ledger, 2, "failed"),
+                                        _terminal(ledger, 3, "unknown"), _terminal(ledger, 4, "executed"),
+                                        _terminal(ledger, 5, "parked"))
+    _set_updated(ledger, fresh, 1)
+    _set_updated(ledger, due, 3)
+    _set_updated(ledger, stale, 25 * 60)
+    _set_updated(ledger, told, 3)
+    _set_updated(ledger, waiting, 3)
+    ledger.mark_outcome_notified(told)
+    assert [r.park_id for r in ledger.outcome_unnotified()] == [due]
+    assert [r.park_id for r in ledger.outcome_given_up()] == [stale]

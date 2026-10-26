@@ -517,6 +517,7 @@ stateDiagram-v2
 - `gateway_passed_at` is no longer written: the bridge does not open the ledger (it asks withHuman). The column
   stays; old rows may have it set and nothing reads it. `notified_at` is set when the chat was told about a decision.
 - `user_id` and `profile` (nullable) are the Hermes session's `HERMES_SESSION_USER_ID` and `HERMES_SESSION_PROFILE` at park time, saved by the park hook so `build_call` can rebuild the same approval body at execute time. Empty or unknown = NULL = the key is left out of the context; rows from before the columns existed are NULL, so they rebuild the body they were parked with. A replayed park keeps the first row's values. They are added to an older ledger the same way as `decided_by` (below).
+- `outcome_notified_at` (nullable, GitHub #66) is when the chat was told how a run ended (`executed`, `failed` or `unknown`). The executor sets it after its own outcome post works; the wake handler sets it after the sweep's re-send was accepted. Set once only (compare-and-set). When the column is first added to an older ledger, every run that had already ended is marked as told in the same transaction, so old runs are never announced.
 - `decided_by` (nullable, `"Name (channel)"`) is written in the same single update as the decision, only for
   `approved`, `denied` and `cancelled`, and only when the withHuman audit log's newest `approval.decided` event for
   the request was made by a human. It is cosmetic: any failure of that lookup (no key file, HTTP error, 5 s timeout,
