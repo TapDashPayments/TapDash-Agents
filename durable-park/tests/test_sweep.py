@@ -1287,3 +1287,63 @@ def test_sweep_marks_stale_executing_unknown_then_outcome_is_told(world, monkeyp
     world.posted.clear()
     world.main(monkeypatch)
     assert [p for p, _, _ in world.posted] == [stale]
+
+
+# GitHub #73 / TAP2-170: the sweep's own fallback alert for an approval still waiting ---------------------------
+
+def test_pending_approval_is_announced_once_after_the_delay(world, monkeypatch, capsys):
+    park_id = world.row("parked")
+    world.backdate(park_id, 4)
+    world.main(monkeypatch, "--withhuman-url", "https://withhuman.example.com/")
+    request_id = world.ledger.get(park_id).request_id
+    out = capsys.readouterr().out
+    assert f"durable-park: approval for {park_id} ({TOOL}) still waiting after 4 min." in out
+    assert f"Decide it in withHuman: https://withhuman.example.com/queue/{request_id}" in out
+    assert world.ledger.get(park_id).status == "parked"
+    world.main(monkeypatch)
+    assert "still waiting" not in capsys.readouterr().out
+
+
+def test_pending_fallback_skips_young_and_requestless_rows(world, monkeypatch, capsys):
+    young = world.row("parked")
+    world.backdate(young, 2)
+    world.row("parked", request_id=None)
+    world.main(monkeypatch)
+    assert "still waiting" not in capsys.readouterr().out
+
+
+def test_pending_fallback_delay_is_configurable_and_zero_is_off(world, monkeypatch, capsys):
+    park_id = world.row("parked")
+    world.backdate(park_id, 6)
+    world.main(monkeypatch, "--pending-alert-minutes", "0")
+    assert "still waiting" not in capsys.readouterr().out
+    world.main(monkeypatch, "--pending-alert-minutes", "10")
+    assert "still waiting" not in capsys.readouterr().out
+    world.main(monkeypatch, "--pending-alert-minutes", "5")
+    assert f"approval for {park_id}" in capsys.readouterr().out
+
+
+def test_pending_fallback_line_goes_to_the_teams_alert_chat(world, monkeypatch, capsys):
+    park_id = world.row("parked")
+    world.backdate(park_id, 4)
+    posts = []
+    monkeypatch.setenv(sweep.TEAMS_WEBHOOK_ENV, "https://teams.example.invalid/hook")
+    monkeypatch.setattr(sweep, "_post_teams", lambda url, text: posts.append((url, text)))
+    world.main(monkeypatch)
+    assert len(posts) == 1 and f"approval for {park_id}" in posts[0][1]
+
+
+def test_pending_fallback_state_forgets_decided_parks(world, monkeypatch, capsys):
+    park_id = world.row("parked")
+    world.backdate(park_id, 4)
+    world.main(monkeypatch)
+    state = Path(world.ledger.path).parent / sweep.PENDING_STATE
+    assert park_id in state.read_text()
+    world.ledger.transition(park_id, "parked", "denied", note="test")
+    world.main(monkeypatch)
+    assert park_id not in state.read_text()
+
+
+def test_pending_fallback_rejects_a_negative_delay(world, monkeypatch):
+    with pytest.raises(SystemExit):
+        world.main(monkeypatch, "--pending-alert-minutes", "-1")
