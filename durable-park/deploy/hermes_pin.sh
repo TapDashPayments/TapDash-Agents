@@ -48,8 +48,16 @@ case "${1:-}" in
     echo "Update block is ON. Check: $0 check"
     ;;
   unblock)
-    git -C "$CHECKOUT" config --unset "$KEY" || true
-    git -C "$CHECKOUT" config --unset tapdash.pinned || true
+    for key in "$KEY" tapdash.pinned; do
+      rc=0; git -C "$CHECKOUT" config --unset-all "$key" || rc=$?
+      # 5 = the key was not set (already off); any other failure must stop here, never be hidden
+      if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+        echo "FAIL could not remove $key (git exit $rc); the update block may still be on" >&2; exit 1
+      fi
+    done
+    if git -C "$CHECKOUT" config --get "$KEY" >/dev/null; then
+      echo "FAIL the update block is still set" >&2; exit 1
+    fi
     echo "Update block is OFF. The sweep will alert until you re-pin: update deploy/hermes-pin.json, then '$0 block'."
     ;;
   *)

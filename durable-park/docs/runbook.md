@@ -1596,7 +1596,7 @@ flowchart LR
 |---|---|
 | `hermes_pin.sh check` | Says OK or FAIL for: on the pinned commit, update block on, passive update check off. Exit 0 = all OK. |
 | `hermes_pin.sh block` | Turns the update block on and `updates.check` off. |
-| `hermes_pin.sh unblock` | Turns the update block off (only during a planned upgrade; the sweep alerts until you block again). |
+| `hermes_pin.sh unblock` | Turns the update block off (only during a planned upgrade; the sweep alerts until you block again). If git cannot remove the setting it says `FAIL` and stops, so it never claims the block is off when it is not. |
 
 The block works because Hermes on Linux updates only through `git fetch` from github.com/NousResearch (the ZIP
 download fallback is for Windows only). All three ways to update (`hermes update`, the dashboard's Update button and
