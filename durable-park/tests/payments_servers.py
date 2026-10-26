@@ -7,7 +7,7 @@ the same commit.
 """
 
 ACCEPTBLUE_COMMIT = "9bb8d722a0d5fc9dce08437eedc8328d34005bcc"
-AUTHORIZENET_COMMIT = "6084f3693b135d8e3d4c237cc147ad963826d654"
+AUTHORIZENET_COMMIT = "4dd427863d1103c788bfa03d3dfde46777bde3a0"
 
 ACCEPTBLUE_APPROVALS = {
     "ablue_adjust_transaction": "you",

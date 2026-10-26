@@ -19,7 +19,8 @@ process. Every call goes through the withHuman approval pipeline first.
 | Tunnel binary | `withhuman-tunnel 0.0.369 (protocol 1)`, entrypoint `withhuman-tunnel`, default cmd `run`, user `withhuman` (uid 100), Alpine, Node 24.22.0, `uv` 0.9.30 |
 | Intuit server | `https://github.com/intuit/quickbooks-online-mcp-server` at commit `31a1dd5c3e170e368dbff651abbaf61aabde6ed9` (2026-09-15, "fix: make tests and CI cross-platform (#136)") |
 | Local image built | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9` (2026-10-25: QuickBooks + Maverick at d6f43f9; built with `build.sh`). **Ran** in `wh-tunnel` from 2026-10-25 15:22 UTC to 16:31 UTC; it is the rollback image now (still on the VM). More rollback images: `...-mav-e4a2b10` (the previous Maverick pin; also set it back in `maverick-mcp.sha`, `docker-compose.yml` and `/opt/maverick-mcp-src`) and `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5` (QuickBooks only: also remove the `maverick` entry from `tunnel.yaml`) |
-| Current image (**live since 2026-10-25 16:31 UTC**) | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36`: the same plus the accept.blue server at `9bb8d72` and the Authorize.net server at `6084f36`. The tag lists the commit of every server inside. `build.sh` passed (all three approvals checks ok) and the check service listed maverick 42, quickbooks 142, acceptblue 28 and authnet 24 tools; the tunnel serves 4 servers. **To go back**: the previous image above, with the previous `docker-compose.yml`, `tunnel.yaml` and the two new `.env` files left unused (see [rollback](runbook.md#acceptblue-and-authorizenet)) |
+| Current image (**live since 2026-10-26**) | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-4dd4278`: the same servers, with the Authorize.net server at `4dd4278` (authorizenet-mcp #2: the two form tools give the form key back whole; before, the credential scrub cut its `.<API Login ID>` end, so no form could open). The tag lists the commit of every server inside. **To go back**: the previous image below, with the previous `authorizenet-mcp.sha`, `docker-compose.yml` and `/opt/authorizenet-mcp-src` commit |
+| Previous image (live 2026-10-25 16:31 UTC to 2026-10-26) | `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36`: the same plus the accept.blue server at `9bb8d72` and the Authorize.net server at `6084f36`. `build.sh` passed (all three approvals checks ok) and the check service listed maverick 42, quickbooks 142, acceptblue 28 and authnet 24 tools. It is the rollback image now (still on the VM) |
 | Docker on VM | `docker.io` 29.1.3 + `docker-compose-v2` 2.40.3 + `docker-buildx` (Ubuntu 26.04 packages); service enabled; `hermes` is NOT in the `docker` group, run docker with `sudo` (as the admin `ubuntu`; `hermes` has had no sudo since 2026-10-22) |
 
 The tunnel tells you to upgrade when its protocol is outdated ("the tunnel stops
@@ -100,7 +101,7 @@ all three checkouts.
 | Thing | accept.blue | Authorize.net |
 | --- | --- | --- |
 | Repo | `TapDashPayments/acceptblue-mcp` (private) | `TapDashPayments/authorizenet-mcp` (private) |
-| Pinned commit | the one line in [`deploy/tunnel/acceptblue-mcp.sha`](../deploy/tunnel/acceptblue-mcp.sha) (`9bb8d722a0d5fc9dce08437eedc8328d34005bcc`) | the one line in [`deploy/tunnel/authorizenet-mcp.sha`](../deploy/tunnel/authorizenet-mcp.sha) (`6084f3693b135d8e3d4c237cc147ad963826d654`) |
+| Pinned commit | the one line in [`deploy/tunnel/acceptblue-mcp.sha`](../deploy/tunnel/acceptblue-mcp.sha) (`9bb8d722a0d5fc9dce08437eedc8328d34005bcc`) | the one line in [`deploy/tunnel/authorizenet-mcp.sha`](../deploy/tunnel/authorizenet-mcp.sha) (`4dd427863d1103c788bfa03d3dfde46777bde3a0`) |
 | Checkout on the VM | `/opt/acceptblue-mcp-src` (owner `root`, mode 0755, files 0644, detached at the pinned commit) | `/opt/authorizenet-mcp-src` (same) |
 | Access (made 2026-10-25) | deploy key `proto-agents-root-read` on that repo (**read-only**), private key `/root/.ssh/acceptblue_mcp_deploy` | deploy key `proto-agents-root-read` on that repo (**read-only**), private key `/root/.ssh/authorizenet_mcp_deploy` |
 | Skills the agent reads | `/opt/acceptblue-mcp-src/skills` | `/opt/authorizenet-mcp-src/skills` |
@@ -151,7 +152,7 @@ commit into that server's `.sha` file and change **that** server's part of the i
 on the new image and update `tests/payments_servers.py` and the pipeline rules in the same change (the tests compare the
 pipeline's `auto` lists with that file, and that file with the pinned commits).
 
-**Why the image tag is long.** `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36` names the
+**Why the image tag is long.** `durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-4dd4278` names the
 tunnel version and the commit of every server inside (`qbo` QuickBooks, `mav` Maverick, `ab` accept.blue, `an`
 Authorize.net), so the tag alone says what is in the image, and `build.sh` refuses a tag that does not match the three
 `.sha` files. The tag part is 53 characters (Docker allows 128).
@@ -268,8 +269,8 @@ as Maverick's, which builds; the build stops with a clear error if one is missin
 not touch the running tunnel):
 
 ```bash
-sudo docker run --rm --pull=never --entrypoint acceptblue-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36 --list-approvals
-sudo docker run --rm --pull=never --entrypoint authnet-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-6084f36 --list-approvals
+sudo docker run --rm --pull=never --entrypoint acceptblue-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-4dd4278 --list-approvals
+sudo docker run --rm --pull=never --entrypoint authnet-mcp-server durable-park/wh-tunnel:0.0.369-qbo-31a1dd5-mav-d6f43f9-ab-9bb8d72-an-4dd4278 --list-approvals
 ```
 
 Expect 28 accept.blue tools (7 `auto`, 21 `you`) and 24 Authorize.net tools (5 `auto`, 19 `you`).
