@@ -2,6 +2,9 @@
 """durable-park sweep: a Hermes cron ``--no-agent`` script (every 5 minutes).
 
 * a ``parked`` row with an approval request          -> post a wake (a decision may have been missed)
+* a ``parked`` row with an approval request not announced before -> print one line with the link to its page in
+  withHuman's review queue (``--withhuman-url``), so the approver can open it from Telegram or Teams (state in
+  ``approval_link_state.json``; a park is announced once)
 * an ``approved`` row the chat was not told about    -> post a wake (the first injection failed)
 * a denied/expired/cancelled row with a request that the chat was not told about -> post a wake
 * a ``parked`` row with no request id attached older than 10 minutes -> cancel it and print one alert line
@@ -120,6 +123,19 @@ def _load_ledger_module():
     return module
 
 
+def _load_links_module():
+    path = os.path.join(_REPO, "plugin", "durable_park", "links.py")
+    spec = importlib.util.spec_from_file_location("durable_park_links", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_links = _load_links_module()
+APPROVAL_LINK_STATE = "approval_link_state.json"
+
+
 def _positive_int(text: str) -> int:
     try:
         value = int(text)
@@ -137,6 +153,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--wake-url", default=DEFAULT_WAKE_URL)
     parser.add_argument("--approvers-file", default=DEFAULT_APPROVERS_FILE,
                         help="backup approver / unanswered-approval timeout config (TAP2-121); absent = off")
+    parser.add_argument("--withhuman-url", default=_links.DEFAULT_APP_URL,
+                        help="the withHuman app's address, for links to a request's page")
     parser.add_argument("--retention-days", type=_positive_int, default=DEFAULT_RETENTION_DAYS,
                         help="delete allowed/refused/cancelled rows not updated for this many days (>= 1)")
     return parser.parse_args(argv)
@@ -168,17 +186,31 @@ class _Tee:
         return getattr(self.inner, name)
 
 
+_APPROVAL_LINE = re.compile(r"durable-park: (P-[0-9A-F]{8}) \(.*?Approve or deny it: (https?://\S+/queue/\S+)$",
+                            re.MULTILINE)
+MAX_CARD_BUTTONS = 5  # Teams shows a few buttons per card; the links stay in the text either way
+
+
+def _approval_buttons(text: str) -> list[dict]:
+    """An "Open P-... in withHuman" button for each announced approval in ``text`` (one tap on a phone)."""
+    return [{"type": "Action.OpenUrl", "title": f"Open {park_id} in withHuman", "url": url}
+            for park_id, url in _APPROVAL_LINE.findall(text)[:MAX_CARD_BUTTONS]]
+
+
 def _post_teams(webhook_url: str, text: str) -> None:
     """POST ``text`` to the Teams webhook (a Power Automate "Post card in a chat or channel" flow, which rejects
     plain ``{"text": ...}``) as an Adaptive Card. A failure is never silent and never stops the sweep: one plain
     ALERT line on stdout (so it reaches the chat like any other alert) and one line on stderr, both with only the
     error type or HTTP code, because the URL is a secret."""
     try:
+        content = {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                   "version": "1.4", "msteams": {"width": "Full"},
+                   "body": [{"type": "TextBlock", "text": text, "wrap": True}]}
+        actions = _approval_buttons(text)
+        if actions:
+            content["actions"] = actions
         card = {"type": "message", "attachments": [{
-            "contentType": "application/vnd.microsoft.card.adaptive",
-            "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                        "version": "1.4", "msteams": {"width": "Full"},
-                        "body": [{"type": "TextBlock", "text": text, "wrap": True}]}}]}
+            "contentType": "application/vnd.microsoft.card.adaptive", "content": content}]}
         request = urllib.request.Request(webhook_url, data=json.dumps(card).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=TEAMS_TIMEOUT_SECONDS):
@@ -286,7 +318,32 @@ def load_approvers(path: str) -> dict | None:
     return out
 
 
-def _route_unanswered(ledger, ledger_path: str, approvers_path: str, now: datetime) -> None:
+def _announce_approvals(ledger, ledger_path: str, app_url: str, now: datetime) -> None:
+    """One line per approval a person must decide (a ``parked`` row with a request id) that was not announced
+    before, with the link to the request's page in withHuman. Parks that are no longer waiting are forgotten."""
+    state_path = os.path.join(os.path.dirname(os.path.abspath(ledger_path)), APPROVAL_LINK_STATE)
+    state = _load_state(state_path)
+    told = state.get("told") if isinstance(state.get("told"), dict) else {}
+    before = dict(told)
+    waiting = set()
+    for row in ledger.list_by_status("parked"):
+        if not row.request_id:
+            continue
+        waiting.add(row.park_id)
+        if row.park_id in told:
+            continue
+        print(f"durable-park: {row.park_id} ({row.tool}) is waiting for your approval. Approve or deny it: "
+              f"{_links.approval_url(row.request_id, app_url)}", flush=True)
+        told[row.park_id] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    for park_id in list(told):
+        if park_id not in waiting:
+            del told[park_id]
+    if told != before:
+        _save_state(state_path, {"told": told})
+
+
+def _route_unanswered(ledger, ledger_path: str, approvers_path: str, now: datetime,
+                      app_url: str = _links.DEFAULT_APP_URL) -> None:
     """TAP2-121: a backup approver, or a clear denial, for approvals nobody answered.
 
     Only ``parked`` rows WITH a request id are waiting on a person (rows without one are the orphan check's).
@@ -343,7 +400,8 @@ def _route_unanswered(ledger, ledger_path: str, approvers_path: str, now: dateti
             where = f" (withHuman escalation path {backup['escalation_path']})" if backup["escalation_path"] else ""
             line = (f"durable-park: approval for {row.park_id} ({row.tool}) unanswered for "
                     f"{config['primary_minutes']} min; routed to backup approver {backup['name']}{where}. "
-                    f"Decide it in withHuman within {backup['minutes']} min or it is denied.")
+                    f"Decide it in withHuman within {backup['minutes']} min or it is denied: "
+                    f"{_links.approval_url(row.request_id, app_url)}")
             print(line, flush=True)
             routed[row.park_id] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
             webhook = os.environ.get(backup["teams_webhook_env"] or "", "").strip() if backup["teams_webhook_env"] else ""
@@ -791,7 +849,11 @@ def _sweep(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
         _err(f"orphan cancel failed ({type(exc).__name__})")
     try:
-        _route_unanswered(ledger, args.ledger, args.approvers_file, datetime.now(timezone.utc))
+        _announce_approvals(ledger, args.ledger, args.withhuman_url, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+        _err(f"approval announcement failed ({type(exc).__name__})")
+    try:
+        _route_unanswered(ledger, args.ledger, args.approvers_file, datetime.now(timezone.utc), args.withhuman_url)
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
         _err(f"backup approver step failed ({type(exc).__name__})")
     try:

@@ -23,6 +23,13 @@ def stamp(minutes_ago):
     return at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def announced(world, park_id):
+    """The one line that announces a new approval with its withHuman link (see _announce_approvals)."""
+    row = world.ledger.get(park_id)
+    return (f"durable-park: {park_id} ({row.tool}) is waiting for your approval. Approve or deny it: "
+            f"https://app.withhuman.ai/queue/{row.request_id}\n")
+
+
 def write_policy(tmp_path, *, ok, problems=()):
     (tmp_path / "tool_policy_status.json").write_text(json.dumps(
         {"ok": ok, "checked_at": "2026-10-21T10:00:00Z", "problems": list(problems), "allowed": []}))
@@ -136,7 +143,7 @@ def test_sweep_rewakes_unnotified_approved(world, monkeypatch, capsys):
     assert parked_no_request not in [p[0] for p in world.posted]
     assert approved_notified not in [p[0] for p in world.posted]
     out = capsys.readouterr()
-    assert out.out == "" and out.err == ""
+    assert out.out == announced(world, parked) and out.err == ""  # only the new approval is announced
 
 
 def test_sweep_rewakes_unnotified_decisions_that_have_a_request(world, monkeypatch, capsys):
@@ -194,7 +201,7 @@ def test_sweep_stale_check_falls_back_to_updated_at_when_executing_at_missing(wo
 
 def test_unknown_alert_is_printed_even_if_the_wake_phase_fails(world, monkeypatch, capsys):
     stale = world.row("executing", executing_minutes_ago=15)
-    world.row("parked")
+    parked = world.row("parked")
 
     def boom(ledger):
         raise RuntimeError("database is locked")
@@ -203,7 +210,8 @@ def test_unknown_alert_is_printed_even_if_the_wake_phase_fails(world, monkeypatc
     with pytest.raises(RuntimeError):
         world.main(monkeypatch)
     assert capsys.readouterr().out == (
-        f"durable-park: {stale} outcome UNKNOWN \u2014 check {TOOL} in the sandbox before retrying\n")
+        f"durable-park: {stale} outcome UNKNOWN \u2014 check {TOOL} in the sandbox before retrying\n"
+        + announced(world, parked))
     assert world.ledger.get(stale).status == "unknown"
 
 
@@ -220,7 +228,7 @@ def test_unknown_alerts_are_printed_before_any_wake_is_posted(world, monkeypatch
     monkeypatch.setattr("builtins.print", spy_print)
     monkeypatch.setattr(sweep, "post_wake", lambda *a, **k: order.append("post") or 202)
     sweep.main(["--ledger", world.ledger.path, "--wake-secret-file", str(world.secret_file)])
-    assert order == ["print", "post"] and stale
+    assert order == ["print", "print", "post"] and stale  # the UNKNOWN line and the announcement, then the wake
 
 
 def test_sweep_silent_when_nothing_to_do(world, monkeypatch, capsys):
@@ -243,7 +251,7 @@ def test_sweep_post_failures_go_to_stderr_only_and_do_not_stop_the_sweep(world, 
     world.fail = {first: urllib.error.URLError("connection refused"), second: 401}
     assert world.main(monkeypatch) == 0
     out = capsys.readouterr()
-    assert out.out == ""
+    assert out.out == announced(world, first) + announced(world, third)  # only the announcements, no wake errors
     assert [p[0] for p in world.posted] == [first, third, second]  # parked rows, then approved ones
     assert f"{first}" in out.err and "URLError" in out.err
     assert f"{second}" in out.err and "401" in out.err
@@ -1167,7 +1175,7 @@ def test_backup_is_routed_once_then_denied_after_its_minutes(world, monkeypatch,
     out = capsys.readouterr().out
     assert (f"durable-park: approval for {park_id} ({TOOL}) unanswered for 60 min; routed to backup approver "
             "Backup Person (withHuman escalation path notify-backup). Decide it in withHuman within 30 min or it "
-            "is denied.") in out
+            f"is denied: https://app.withhuman.ai/queue/{world.ledger.get(park_id).request_id}") in out
     assert world.ledger.get(park_id).status == "parked"
     world.main(monkeypatch, "--approvers-file", path)
     assert "routed to backup" not in capsys.readouterr().out  # said once
@@ -1228,3 +1236,77 @@ def test_example_approvers_file_is_valid_and_has_no_person():
     example = Path(sweep.__file__).resolve().parent.parent / "deploy" / "approvers.example.json"
     config = sweep.load_approvers(str(example))
     assert config == {"primary_minutes": 60, "backup": None}
+
+
+# Approval links: every new approval a person must decide is announced once, with its withHuman link ----------
+
+def test_new_approval_is_announced_once_with_its_link(world, monkeypatch, capsys):
+    park_id = world.row("parked")
+    request_id = world.ledger.get(park_id).request_id
+    world.main(monkeypatch)
+    out = capsys.readouterr().out
+    assert (f"durable-park: {park_id} ({TOOL}) is waiting for your approval. Approve or deny it: "
+            f"https://app.withhuman.ai/queue/{request_id}") in out
+    world.main(monkeypatch)
+    assert "is waiting for your approval" not in capsys.readouterr().out  # said once
+
+
+def test_no_announcement_without_a_request_or_once_decided(world, monkeypatch, capsys):
+    world.row("parked", request_id=None)  # not asked yet: nothing to open
+    world.row("approved")
+    world.row("denied", notified=True)
+    world.row("allowed", notified=True)
+    world.main(monkeypatch)
+    assert "is waiting for your approval" not in capsys.readouterr().out
+
+
+def test_announcement_uses_the_given_withhuman_address(world, monkeypatch, capsys):
+    park_id = world.row("parked")
+    request_id = world.ledger.get(park_id).request_id
+    world.main(monkeypatch, "--withhuman-url", "https://withhuman.example.com/")
+    assert f"Approve or deny it: https://withhuman.example.com/queue/{request_id}" in capsys.readouterr().out
+
+
+def test_decided_parks_are_forgotten_and_a_new_one_is_announced(world, monkeypatch, capsys, tmp_path):
+    first = world.row("parked")
+    world.main(monkeypatch)
+    capsys.readouterr()
+    assert world.ledger.transition(first, "parked", "denied")
+    second = world.row("parked")
+    world.main(monkeypatch)
+    out = capsys.readouterr().out
+    assert f"durable-park: {second} ({TOOL}) is waiting for your approval" in out
+    assert f"{first} ({TOOL}) is waiting" not in out  # the decided one is not announced again
+    state = json.loads((tmp_path / "approval_link_state.json").read_text())
+    assert list(state["told"]) == [second]
+
+
+def test_backup_routing_line_carries_the_link(world, monkeypatch, capsys, tmp_path):
+    path = write_approvers(tmp_path, {"primary_minutes": 60, "backup_approver": BACKUP})
+    park_id = world.row("parked")
+    world.backdate(park_id, 61)
+    request_id = world.ledger.get(park_id).request_id
+    world.main(monkeypatch, "--approvers-file", path)
+    out = capsys.readouterr().out
+    assert ("Decide it in withHuman within 30 min or it is denied: "
+            f"https://app.withhuman.ai/queue/{request_id}") in out
+
+
+def test_teams_card_gets_an_open_button_for_each_approval_link(world, monkeypatch, capsys):
+    sent = _teams(monkeypatch)
+    first, second = world.row("parked"), world.row("parked")
+    assert world.main(monkeypatch) == 0
+    body = sent[0][1]
+    text = _card_text(body)
+    assert text == capsys.readouterr().out.strip()  # the lines are posted as printed
+    actions = body["attachments"][0]["content"]["actions"]
+    assert actions == [
+        {"type": "Action.OpenUrl", "title": f"Open {pid} in withHuman",
+         "url": f"https://app.withhuman.ai/queue/{world.ledger.get(pid).request_id}"} for pid in (first, second)]
+
+
+def test_teams_card_has_no_buttons_without_approval_links(world, monkeypatch):
+    sent = _teams(monkeypatch)
+    world.row("executing", executing_minutes_ago=30)
+    assert world.main(monkeypatch) == 0
+    assert "actions" not in sent[0][1]["attachments"][0]["content"]
