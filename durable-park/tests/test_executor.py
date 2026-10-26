@@ -634,3 +634,55 @@ def test_crash_after_execute_switch_reads_the_environment(monkeypatch):
     assert executor_mod.crash_after_execute_enabled() is False
     monkeypatch.setenv("DURABLE_PARK_CRASH_AFTER_EXECUTE", "1")
     assert executor_mod.crash_after_execute_enabled() is True
+
+
+# ---- pay links for Authorize.net form tools (TAP2-82) -------------------------------------------------------------
+
+FORM_TOOL = "mcp__wh__authnet__authnet_create_payment_form"
+FORM_KEY = "66oTeT0c6/r39pwCcfkNpcjF+I01JUvaULhkE3qWzfz=.5KP3u95bQpv"
+FORM_PAGE = ('<!doctype html><meta charset="utf-8"><title>Authorize.net</title><form method="post" '
+             'action="https://test.authorize.net/payment/payment"><input type="hidden" name="token" '
+             f'value="{FORM_KEY}"><noscript><button>Continue</button></noscript></form>'
+             "<script>document.forms[0].submit()</script>")
+FORM_ANSWER = json.dumps({"result": f"- post_url: https://test.authorize.net/payment/payment\n- hosted_form_key: "
+                                    f"{FORM_KEY}\n- expires_in_minutes: 15\n- launcher_html: {FORM_PAGE}\n"})
+
+
+def test_form_tool_reply_carries_the_pay_link_not_the_key(env):
+    from durable_park.paylink import make_form_link
+
+    folder = env.tmp_path / "paylinks"
+    folder.mkdir()
+    env.box.result = FORM_ANSWER
+    posts = []
+    executor = env.build(form_link=make_form_link(str(folder), "https://pay.example", log=None),
+                         post_fn=lambda text: posts.append(text) or SimpleNamespace(ok=True))
+    row = env.approve(tool=FORM_TOOL, args={"amount": "5.00"})
+    reply = json.loads(executor({"park_id": row.park_id}))
+    assert reply["status"] == "executed" and reply["pay_link"].startswith("https://pay.example/pay/")
+    assert FORM_KEY not in json.dumps(reply) and "result" not in reply
+    done = env.ledger.get(row.park_id)
+    assert done.status == "executed" and done.result_json == FORM_ANSWER  # the raw answer stays in the ledger
+    assert done.note.startswith("Pay link: https://pay.example/pay/")
+    assert posts == [f"[durable-park] {row.park_id} made an Authorize.net form ({FORM_TOOL}). {done.note}"]
+    assert len(list(folder.iterdir())) == 1
+
+
+def test_form_tool_without_pay_link_setup_says_so(env):
+    from durable_park.paylink import make_form_link
+
+    env.box.result = FORM_ANSWER
+    executor = env.build(form_link=make_form_link(None, None))
+    row = env.approve(tool=FORM_TOOL, args={"amount": "5.00"})
+    reply = json.loads(executor({"park_id": row.park_id}))
+    assert reply["status"] == "executed" and "not set up" in reply["message"] and FORM_KEY not in json.dumps(reply)
+    assert env.ledger.get(row.park_id).note.startswith("No pay link: pay links are not set up")
+
+
+def test_other_tools_keep_their_raw_result(env):
+    from durable_park.paylink import make_form_link
+
+    executor = env.build(form_link=make_form_link(None, None))
+    row = env.approve()
+    reply = json.loads(executor({"park_id": row.park_id}))
+    assert reply["result"] == env.box.result and env.ledger.get(row.park_id).note is None

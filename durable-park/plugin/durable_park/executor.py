@@ -26,6 +26,7 @@ from .gatecall import build_call
 from .outcome import outcome_text
 from .ledger import Ledger, ParkRow
 from .park_hook import default_session_key
+from .paylink import is_form_tool
 
 log = logging.getLogger("durable_park")
 
@@ -160,12 +161,17 @@ def make_refusing_executor(message: str) -> Callable[..., str]:
 def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Callable[..., Any],
                   session_key_fn: Callable[[], str] | None = None, crash_after_consume: bool = False,
                   exit_fn: Callable[[int], Any] | None = None, post_fn: Callable[[str], Any] | None = None,
-                  crash_after_execute: bool = False) -> Callable[..., str]:
+                  crash_after_execute: bool = False,
+                  form_link: Callable[[ParkRow, str], tuple[dict[str, Any], str]] | None = None
+                  ) -> Callable[..., str]:
     """Build the tool handler. ``dispatch(tool, args)`` is ``ctx.dispatch_tool``; ``exit_fn`` is for tests.
     ``post_fn(text)`` is ``ctx.post_message``: when the run this call claimed has ended (executed, failed or
     unknown), the outcome line goes straight into the chat, and the row is marked told only when the post
     worked (GitHub #66). A failed or raising post changes nothing else: the reply and the row stay as they are,
-    and the sweep re-sends later."""
+    and the sweep re-sends later.
+    ``form_link(row, raw)`` runs for an executed Authorize.net form tool (``paylink.is_form_tool``): its reply
+    fields replace the raw answer (so the model never sees the form key) and its note goes on the row, where the
+    outcome line shows it (the pay link, or why there is none)."""
 
     def announce(park_id: str) -> None:
         if post_fn is None:
@@ -250,14 +256,18 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
             log.warning("tool error for %s tool=%s", park_id, row.tool)
             return _reply("failed", park_id, message=FAILED_MESSAGE.format(
                 park_id=park_id, note=f"tool error: {error}"))
-        if not ledger.transition(park_id, "executing", "executed", result_json=raw):
+        reply_fields: dict[str, Any] = {"result": raw}
+        done: dict[str, Any] = {"result_json": raw}
+        if form_link is not None and is_form_tool(row.tool):
+            reply_fields, done["note"] = form_link(row, raw)
+        if not ledger.transition(park_id, "executing", "executed", **done):
             log.error("%s ran but the ledger row was no longer executing", park_id)
         log.info("executed %s tool=%s", park_id, row.tool)
         # The tool's own text, nested as a JSON *string*: Hermes v0.22.2 marks any tool result with "error" or
         # "failed" in its first 500 characters as a failure (agent/display.py:999-1037, _detect_tool_failure).
         # Nested, every quote inside the tool's answer is escaped (\"error\"), so a success can never trip that
         # check, and the reply itself never has an "error" key. Failures keep their "failed" status (flagged).
-        return _reply("executed", park_id, result=raw)
+        return _reply("executed", park_id, **reply_fields)
 
     def handler(args: Any = None, **_kw: Any) -> str:
         park_id = str(args.get("park_id") or "").strip() if isinstance(args, dict) else ""

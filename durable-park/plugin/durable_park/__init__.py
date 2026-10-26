@@ -15,6 +15,7 @@ from typing import Any
 
 from . import compat
 from . import formcheck
+from . import paylink
 from .breaker import STATUS_FILENAME as BREAKER_STATUS_FILENAME, Breaker
 from .executor import (EXECUTE_SCHEMA, crash_after_consume_enabled, crash_after_execute_enabled, make_executor,
                        make_refusing_executor)
@@ -68,6 +69,12 @@ RISKY_TOOLS_RENAMED = "risky_tools is renamed form_checked_tools; ignoring it"
 
 class BadSetting(ValueError):
     """A plugin setting has the wrong type."""
+
+
+def _opt_str(ctx: Any, key: str) -> str | None:
+    """An optional string setting; anything else counts as unset (the pay link then says it is not set up)."""
+    value = ctx.get_config(key, None)
+    return value if isinstance(value, str) and value else None
 
 
 def is_gateway_process() -> bool:
@@ -445,7 +452,9 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
                               crash_after_consume=crash_after_consume_enabled(),
                               # a Hermes without post_message only loses the instant notice; the sweep still tells the chat
                               post_fn=getattr(ctx, "post_message", None),
-                              crash_after_execute=crash_after_execute_enabled()),
+                              crash_after_execute=crash_after_execute_enabled(),
+                              form_link=paylink.make_form_link(_opt_str(ctx, "paylink_dir"),
+                                                               _opt_str(ctx, "paylink_origin"), log=log)),
         description=EXECUTE_SCHEMA["description"])
     log.info("durable-park loaded: ledger=%s, %d exempt tool(s), %d form-checked pattern(s), %d observer "
              "hook(s), aap=%s", ledger_path, len(exempt), len(form_checked), len(observers), base_url)

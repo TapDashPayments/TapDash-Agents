@@ -11,6 +11,9 @@
 #      copy of receiver/*.py; system unit durable-park-receiver (enabled + started: it answers 401 to every
 #      event until provision.py has written /etc/durable-park/receiver.json); the Hermes secret-source helper
 #      /opt/durable-park/libexec/hermes-secrets
+#   3b. pay links (TAP2-82): system user dppay; folder /var/lib/durable-park-paylinks (2750 hermes:dppay: the
+#      plugin writes one file per link, the service only reads); root-owned copy of paylink/paylink_app.py under
+#      /opt/durable-park/paylink; system unit durable-park-paylink (127.0.0.1:8793, User=dppay)
 #   4. Hermes (as user hermes, through Hermes's own CLI): plugin symlink; `hermes plugins enable` (PM
 #      admission installs the plugin.yaml python_dependencies into Hermes's environment); plugin settings;
 #      plugins.hook_callback_timeout 60; agent.restart_drain_timeout 45; the local webhook platform (127.0.0.1:8644, route durable-park-wake,
@@ -40,7 +43,8 @@
 #      plugin did not load: no plugin_load.json for the gateway's pid) and limits restarts (StartLimitBurst=3 in 10 min).
 #   5. sweep wrapper ~/.hermes/scripts/durable_park_sweep.sh + cron job (`*/5 * * * *`, --no-agent, telegram;
 #      an existing job on another schedule is moved over with `hermes cron edit`)
-#   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events and /wh/bridge -> 127.0.0.1:8791/wh/bridge
+#   6. Tailscale Funnel /aap/events -> 127.0.0.1:8790/aap/events, /wh/bridge -> 127.0.0.1:8791/wh/bridge and
+#      /pay -> 127.0.0.1:8793/pay; the plugin's paylink_origin is this machine's Funnel address
 #   7. restart: the hermes user manager when the gateway does not carry the dpwake group yet, else the
 #      hermes-gateway user unit; then wait for the plugin's "durable-park loaded" log line
 #
@@ -67,6 +71,10 @@ RECEIVER_LOCAL=http://127.0.0.1:8790/aap/events
 BRIDGE_UNIT=durable-park-bridge
 BRIDGE_FUNNEL_PATH=/wh/bridge
 BRIDGE_LOCAL=http://127.0.0.1:8791/wh/bridge
+PAYLINK_UNIT=durable-park-paylink
+PAYLINK_DIR=/var/lib/durable-park-paylinks
+PAYLINK_FUNNEL_PATH=/pay
+PAYLINK_LOCAL=http://127.0.0.1:8793/pay
 SECRETS_HELPER="$VENV/libexec/hermes-secrets"
 # Earlier value of secrets.command.command (inline sed); migrated to SECRETS_HELPER.
 OLD_SECRET_COMMAND="sed -n 's/^/DURABLE_PARK_WAKE_SECRET=/p' $ETC/wake_secret"
@@ -176,6 +184,24 @@ systemctl enable --quiet "$UNIT"
 restart_if_needed "$UNIT"   # stateless; provision.py restarts it itself after writing receiver.json
 log "receiver unit: $(systemctl is-active "$UNIT")"
 
+# --- 3b. pay-link service (TAP2-82) ------------------------------------------------------------------------
+if ! id -u dppay >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin dppay
+    log "created system user dppay"
+fi
+# setgid: every file the plugin (as hermes) writes here belongs to group dppay, which the service reads with.
+install -d -m 2750 -o "$HERMES_USER" -g dppay "$PAYLINK_DIR"
+install -d -m 0755 -o root -g root "$VENV/paylink"
+CHANGED=0
+install_root "$REPO/paylink/paylink_app.py" "$VENV/paylink/paylink_app.py" 0644
+install_root "$REPO/deploy/$PAYLINK_UNIT.service" "/etc/systemd/system/$PAYLINK_UNIT.service" 0644
+[[ $CHANGED == 1 ]] && systemctl daemon-reload
+systemctl enable --quiet "$PAYLINK_UNIT"
+restart_if_needed "$PAYLINK_UNIT"
+log "pay-link unit: $(systemctl is-active "$PAYLINK_UNIT")"
+PAYLINK_ORIGIN="https://$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
+[[ $PAYLINK_ORIGIN =~ ^https://[a-z0-9.-]+\.ts\.net$ ]] || die "could not read this machine's Funnel address ($PAYLINK_ORIGIN)"
+
 # Hermes `command` secret source helper: KEY=VALUE lines on stdout, read by Hermes at every start (as hermes;
 # Hermes discards the helper's stderr). The instance token line appears only once provisioning wrote the file.
 helper=$(mktemp)
@@ -235,6 +261,8 @@ set_cfg "plugins.entries.$PLUGIN_ID.allow_gateway_injection" true
 set_cfg "plugins.entries.$PLUGIN_ID.settings.aap_base_url" "$AAP_BASE_URL"
 set_cfg "plugins.entries.$PLUGIN_ID.settings.token_file" "$ETC/instance_token"
 set_cfg "plugins.entries.$PLUGIN_ID.settings.ledger_path" "$LEDGER"
+set_cfg "plugins.entries.$PLUGIN_ID.settings.paylink_dir" "$PAYLINK_DIR"
+set_cfg "plugins.entries.$PLUGIN_ID.settings.paylink_origin" "$PAYLINK_ORIGIN"
 set_cfg secrets.command.enabled true
 set_cfg secrets.command.command "$SECRETS_HELPER"
 set_cfg platforms.webhook.enabled true
@@ -416,6 +444,9 @@ if ! has "$funnel_status" -F -- "$FUNNEL_PATH"; then
 fi
 if ! has "$funnel_status" -F -- "$BRIDGE_FUNNEL_PATH"; then
     tailscale funnel --bg --set-path="$BRIDGE_FUNNEL_PATH" "$BRIDGE_LOCAL"
+fi
+if ! has "$funnel_status" -F -- "$PAYLINK_FUNNEL_PATH "; then
+    tailscale funnel --bg --set-path="$PAYLINK_FUNNEL_PATH" "$PAYLINK_LOCAL"
 fi
 
 # --- 7. restart Hermes -------------------------------------------------------------------------------------

@@ -9,6 +9,7 @@ import json
 from typing import Any
 
 from .ledger import ParkRow
+from .paylink import is_form_tool
 
 MAX_RESULT_CHARS = 200
 MAX_LINE_CHARS = 400
@@ -17,6 +18,8 @@ EXECUTED_TEXT = "[durable-park] {park_id} ran: {tool}."
 EXECUTED_RESULT_TEXT = "[durable-park] {park_id} ran: {tool}. Result: {result}"
 FAILED_TEXT = "[durable-park] {park_id} ({tool}) did NOT complete: {note}"
 UNKNOWN_TEXT = "[durable-park] {park_id} ({tool}): outcome UNKNOWN. Check it before trying again."
+# An Authorize.net form tool: never its raw answer (it holds the form key), only the pay link note (paylink.py).
+FORM_TEXT = "[durable-park] {park_id} made an Authorize.net form ({tool}). {note}"
 
 
 def _flat(text: Any, limit: int) -> str:
@@ -81,7 +84,9 @@ def _result(result_json: str | None) -> str:
 
 def outcome_text(row: ParkRow) -> str | None:
     """The outcome line for a run that ended (``executed``, ``failed``, ``unknown``); ``None`` otherwise."""
-    if row.status == "executed":
+    if row.status == "executed" and is_form_tool(row.tool):
+        text = FORM_TEXT.format(park_id=row.park_id, tool=row.tool, note=row.note or "No pay link was recorded.")
+    elif row.status == "executed":
         result = _result(row.result_json)
         text = (EXECUTED_RESULT_TEXT.format(park_id=row.park_id, tool=row.tool, result=result) if result
                 else EXECUTED_TEXT.format(park_id=row.park_id, tool=row.tool))

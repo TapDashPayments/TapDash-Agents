@@ -49,6 +49,9 @@ flowchart LR
   tun -.->|"accept.blue API<br/>(placeholder settings)"| ab[("accept.blue")]
   tun -.->|"Authorize.net API<br/>(placeholder settings)"| an[("Authorize.net")]
   gw -->|"with the sign-in withHuman holds"| remote[("Supabase CRM dev,<br/>monday, DocuSign demo")]
+  plugin -->|"an Authorize.net form was made"| pay["pay-link service<br/>one short link, 14 minutes"]
+  customer(["Customer"]) -->|"clicks the link, then types<br/>the card on Authorize.net"| pay
+  pay -.->|"posts the form key"| an
 ```
 
 Lookups and the servers' own `auto` calls skip the saving and waiting: the rules approve them right away.
@@ -85,6 +88,7 @@ The open-source and third-party pieces it is built on (versions, licenses, links
 | `plugin/durable_park/` | The Hermes plugin: park hook, form check, ledger, wake handler, executor. Loaded by Hermes from this folder. |
 | `bridge/` | The gateway bridge service (withHuman's pipeline asks it "is this call approved?"). |
 | `receiver/` | The webhook receiver (withHuman tells it a decision was made) and one-time provisioning. |
+| `paylink/` | The pay-link service: turns an Authorize.net form the agent made into a short link a customer can click (on the test path with pytest, `pyproject.toml`). |
 | `scripts/` | The 5-minute sweep (safety net and alerts), run by Hermes cron. |
 | `deploy/` | Deploy script, systemd units, the v1 tool lockdown (re-applied on proto-agents 2026-10-21 03:16 UTC as a stopgap), the QuickBooks tunnel container. |
 | `tests/` | Unit tests (no network). `tests/live/` holds manual tests for the VM. |
