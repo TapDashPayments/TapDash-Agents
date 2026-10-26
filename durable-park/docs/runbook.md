@@ -123,6 +123,7 @@ or `~/.hermes/.env`: they hold secrets).
 | `tools.tool_search.enabled` | `on` (since 2026-10-21 19:59 UTC) | Cuts a new chat's input tokens; verification in [the record](acceptance-2026-10-21-tool-search.md). How it was switched on and off: [Turn on Tool Search](#turn-on-tool-search). |
 | `platforms.api_server.enabled` | `false` | Hermes v0.22.3 refuses to start the API server platform without `API_SERVER_KEY`, and nothing here uses it. With it enabled and no key the gateway reported `DEGRADED`. |
 | `platforms.ntfy.enabled` | `false` | Hermes has no adapter for ntfy and nothing here uses it; it also made the gateway report `DEGRADED`. |
+| `agent.restart_drain_timeout` | `45` (set by `configure_hermes.sh`; GitHub #66) | Hermes's default `0` made any stop or restart cut off a reply in progress (2026-10-26: the "it ran" reply for P-BBD5A244 was lost). Now a stop or restart waits up to 45 s for replies to finish. Keep it at least 15 s under the gateway unit's `TimeoutStopSec` (`70`). |
 | `max_concurrent_sessions` | `20` | The key was present and empty, and Hermes warned about it; the owner chose 20. |
 | Secret references (`platforms.webhook.extra.routes.durable-park-wake.secret`, `mcp_servers.wh.headers.Authorization`) | bare `${VAR}` form | PR #28; no `${env:...}` is left in `config.yaml`. See [Config ref is not set](#every-hermes-command-prints-config-ref---is-not-set). |
 | `TEAMS_ALERT_WEBHOOK_URL` (environment of the sweep's cron run, set in `~/.hermes/.env`; a secret, never print it) | **set** (verified with a test card on 2026-10-22 at 16:57 ET) | The URL of a Power Automate "Post card in a chat or channel" (Teams webhook) flow; the sweep sends an Adaptive Card with `"msteams": {"width": "Full"}` at its root so it fills the Teams chat width instead of wrapping in a narrow column (a plain `{"text": ...}` body is rejected with "Property 'type' must be 'AdaptiveCard'"). When set, the sweep also posts what it printed (its alert lines: ids, tool names and reasons, never argument values) to Teams once per run. When unset, nothing changes. A failed post (timeout 10 s, so an outage can delay the sweep's exit by about that long) adds one plain line to the chat alerts, `durable-park ALERT: Teams post failed (<ErrorType or HTTP code>).`, and `teams alert failed (...)` on stderr; the exit code stays 0, so the Telegram message is not wrapped in "Script exited with code 1". The URL is never printed. If the sweep itself crashes, what it printed is still posted and the crash is not hidden. |
@@ -294,6 +295,16 @@ Every one links to the request's page, where you approve or deny.
 - **The chat where you asked never gets the link.** The bot only says the call is waiting for approval. Whoever asked
   may also be an approver, or the chat may be shared, and the asker must not be handed a way to approve their own
   request. Links go only to the approver, through withHuman's alerts.
+- **After an approved action runs:** durable-park posts one line into the chat where it was asked, for example
+  `[durable-park] P-XXXX ran: <tool>. Result: <first 200 characters>` (or "did NOT complete", or "outcome UNKNOWN"),
+  straight away and with no AI in between, so a restart or crash cannot lose it. If that post did not work, the
+  5-minute sweep re-sends it 2 minutes later at the earliest (GitHub #66). Restarts also wait up to 45 seconds for a
+  reply in progress (`agent.restart_drain_timeout`).
+  Known limits (GitHub #66): (1) if the server dies in the instant after the line was posted but before the ledger
+  recorded it, the sweep posts it once more (at most one duplicate; Hermes posts have no delivery receipt or
+  de-duplication key). (2) The sweep's re-send goes through the agent: it counts as told once the gateway accepts
+  it, so a second crash before the agent relays it can still lose that one re-send. The run itself is always in
+  the ledger (`result_json`, `note`).
 - **Unanswered after the primary window:** the backup-approver alert ([below](#backup-approver-and-unanswered-approvals-tap2-121)) ends with the link too.
   Like every sweep alert, it goes to the admin's Telegram DM and to the Teams alert chat (`TEAMS_ALERT_WEBHOOK_URL`),
   and to the backup approver's own Teams webhook when one is set. **Keep those alert chats to approvers and admins**:
@@ -303,6 +314,14 @@ Every one links to the request's page, where you approve or deny.
   proposed in [#113](https://github.com/withHumanAI/withHuman/pull/113). Approve in the withHuman app until it ships.
   Before it ships, the Deck relay must move to its own Linux user: today it runs as `hermes`, the agent's user, which
   can read Deck's withHuman key ([backlog](backlog.md)).
+
+### Could not tell the chat the outcome
+
+`durable-park ALERT: could not tell the chat the outcome of P-XXXX (<tool>) for 24 hours; check it.`
+
+A run ended (executed, failed or unknown), but neither the executor's own message nor the sweep's re-sends reached
+the chat for 24 hours (the chat may be gone, or it was a CLI run). The run itself is recorded in the ledger
+(`result_json`, `note`). Tell the person yourself. The sweep says this once per park and then stops trying.
 
 ### Outcome UNKNOWN
 

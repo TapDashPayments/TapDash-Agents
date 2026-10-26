@@ -16,7 +16,8 @@ from typing import Any
 from . import compat
 from . import formcheck
 from .breaker import STATUS_FILENAME as BREAKER_STATUS_FILENAME, Breaker
-from .executor import EXECUTE_SCHEMA, crash_after_consume_enabled, make_executor, make_refusing_executor
+from .executor import (EXECUTE_SCHEMA, crash_after_consume_enabled, crash_after_execute_enabled, make_executor,
+                       make_refusing_executor)
 from .gatecall import LIFT_STATUS_FILENAME, GateHolder, LiftStatus
 from .ledger import Ledger
 from .park_hook import (BRIDGE_CALL_TOOL, DEFAULT_EXEMPT_TOOLS, DEFAULT_FORM_CHECKED_TOOLS, fail_closed_hook,
@@ -441,7 +442,10 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
     ctx.register_tool(
         name=EXECUTOR_TOOL, toolset="durable_park", schema=EXECUTE_SCHEMA,
         handler=make_executor(ledger, holder.get, ctx.dispatch_tool,
-                              crash_after_consume=crash_after_consume_enabled()),
+                              crash_after_consume=crash_after_consume_enabled(),
+                              # a Hermes without post_message only loses the instant notice; the sweep still tells the chat
+                              post_fn=getattr(ctx, "post_message", None),
+                              crash_after_execute=crash_after_execute_enabled()),
         description=EXECUTE_SCHEMA["description"])
     log.info("durable-park loaded: ledger=%s, %d exempt tool(s), %d form-checked pattern(s), %d observer "
              "hook(s), aap=%s", ledger_path, len(exempt), len(form_checked), len(observers), base_url)

@@ -555,3 +555,82 @@ def test_executor_sends_the_park_time_user_and_profile_whoever_is_in_the_chat_no
     assert out["status"] == "executed"
     assert sent[0].context == sent[-1].context and sent[-1].context["user_id"] == "u1"
     assert env.provider.only().consumed_at is not None
+
+
+# GitHub #66: the executor tells the chat how the run ended, itself ------------------------------------------
+
+class Posted:
+    def __init__(self, ok=True, raises=None):
+        self.ok, self.raises, self.texts = ok, raises, []
+
+    def __call__(self, text):
+        self.texts.append(text)
+        if self.raises:
+            raise self.raises
+        return SimpleNamespace(ok=self.ok)
+
+
+def test_executor_posts_outcome_once_and_marks_it(env):
+    row = env.approve()
+    post = Posted()
+    out = run(env.build(post_fn=post), row.park_id)
+    assert out["status"] == "executed"
+    assert post.texts == [f"[durable-park] {row.park_id} ran: {TOOL}. Result: "
+                          + json.dumps({"ok": True, "payment_id": "pay_1"})]
+    assert env.ledger.get(row.park_id).outcome_notified_at is not None
+
+
+@pytest.mark.parametrize("post", [Posted(ok=False), Posted(raises=RuntimeError("adapter down"))],
+                         ids=["post-refused", "post-raises"])
+def test_executor_post_failure_keeps_reply_and_row_unmarked(env, post):
+    baseline_row = env.approve(tool_call_id="call-a")
+    baseline = run(env.build(), baseline_row.park_id)  # the reply with no post at all
+    row = env.approve(tool_call_id="call-b")
+    out = run(env.build(post_fn=post), row.park_id)
+    assert out == {**baseline, "park_id": row.park_id}
+    stored = env.ledger.get(row.park_id)
+    assert stored.status == "executed" and stored.outcome_notified_at is None
+    assert len(post.texts) == 1
+
+
+def test_failed_and_unknown_runs_post_too(env):
+    row = env.approve(tool_call_id="call-f")
+    env.box.result = json.dumps({"error": "customer not found"})
+    post = Posted()
+    assert run(env.build(post_fn=post), row.park_id)["status"] == "failed"
+    assert post.texts and "did NOT complete" in post.texts[0]
+    row2 = env.approve(tool_call_id="call-u")
+    env.box.raises = RuntimeError("boom")
+    post2 = Posted()
+    assert run(env.build(post_fn=post2), row2.park_id)["status"] == "unknown"
+    assert post2.texts == [f"[durable-park] {row2.park_id} ({TOOL}): outcome UNKNOWN. Check it before trying again."]
+
+
+def test_refused_call_posts_nothing(env):
+    row = env.approve()
+    post = Posted()
+    handler = env.build(post_fn=post)
+    run(handler, row.park_id)
+    run(handler, row.park_id)  # refused: already executed
+    run(handler, "P-NOPE0000")
+    assert len(post.texts) == 1
+
+
+def test_crash_after_execute_exits_before_posting(env):
+    row = env.approve()
+    post = Posted()
+
+    def boom(code):
+        assert env.ledger.get(row.park_id).status == "executed" and post.texts == []
+        raise Crash(code)
+
+    with pytest.raises(Crash):
+        env.build(post_fn=post, crash_after_execute=True, exit_fn=boom)({"park_id": row.park_id})
+    assert post.texts == [] and env.ledger.get(row.park_id).outcome_notified_at is None
+
+
+def test_crash_after_execute_switch_reads_the_environment(monkeypatch):
+    monkeypatch.delenv("DURABLE_PARK_CRASH_AFTER_EXECUTE", raising=False)
+    assert executor_mod.crash_after_execute_enabled() is False
+    monkeypatch.setenv("DURABLE_PARK_CRASH_AFTER_EXECUTE", "1")
+    assert executor_mod.crash_after_execute_enabled() is True

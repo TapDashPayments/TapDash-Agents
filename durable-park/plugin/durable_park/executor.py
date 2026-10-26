@@ -23,6 +23,7 @@ from typing import Any, Callable
 from agentapprovalprotocol import Allow, Deny
 
 from .gatecall import build_call
+from .outcome import outcome_text
 from .ledger import Ledger, ParkRow
 from .park_hook import default_session_key
 
@@ -62,6 +63,12 @@ _NOTE_LIMIT = 200
 def crash_after_consume_enabled() -> bool:
     """Fault injection for the live crash test: die right after the approval is consumed."""
     return os.environ.get("DURABLE_PARK_CRASH_AFTER_CONSUME") == "1"
+
+
+def crash_after_execute_enabled() -> bool:
+    """Fault injection for the live test of GitHub #66: die right after the run is recorded, before the chat is
+    told (the sweep must then tell it)."""
+    return os.environ.get("DURABLE_PARK_CRASH_AFTER_EXECUTE") == "1"
 
 
 def _hard_exit(code: int) -> None:  # separate function so tests can replace it
@@ -152,8 +159,28 @@ def make_refusing_executor(message: str) -> Callable[..., str]:
 
 def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Callable[..., Any],
                   session_key_fn: Callable[[], str] | None = None, crash_after_consume: bool = False,
-                  exit_fn: Callable[[int], Any] | None = None) -> Callable[..., str]:
-    """Build the tool handler. ``dispatch(tool, args)`` is ``ctx.dispatch_tool``; ``exit_fn`` is for tests."""
+                  exit_fn: Callable[[int], Any] | None = None, post_fn: Callable[[str], Any] | None = None,
+                  crash_after_execute: bool = False) -> Callable[..., str]:
+    """Build the tool handler. ``dispatch(tool, args)`` is ``ctx.dispatch_tool``; ``exit_fn`` is for tests.
+    ``post_fn(text)`` is ``ctx.post_message``: when the run this call claimed has ended (executed, failed or
+    unknown), the outcome line goes straight into the chat, and the row is marked told only when the post
+    worked (GitHub #66). A failed or raising post changes nothing else: the reply and the row stay as they are,
+    and the sweep re-sends later."""
+
+    def announce(park_id: str) -> None:
+        if post_fn is None:
+            return
+        try:
+            row = ledger.get(park_id)
+            text = outcome_text(row) if row is not None and row.outcome_notified_at is None else None
+            if text is None:
+                return
+            if getattr(post_fn(text), "ok", False):
+                ledger.mark_outcome_notified(park_id)
+            else:
+                log.warning("outcome post for %s was not accepted; the sweep will re-send it", park_id)
+        except Exception as exc:  # noqa: BLE001 - telling the chat must never break the run's own reply
+            log.warning("outcome post for %s failed (%s); the sweep will re-send it", park_id, type(exc).__name__)
 
     def fail(row: ParkRow, note: str) -> str:
         ledger.transition(row.park_id, "executing", "failed", note=note)
@@ -235,6 +262,14 @@ def make_executor(ledger: Ledger, gate_factory: Callable[[], Any], dispatch: Cal
     def handler(args: Any = None, **_kw: Any) -> str:
         park_id = str(args.get("park_id") or "").strip() if isinstance(args, dict) else ""
         state: dict[str, Any] = {"row": None, "dispatched": False}
+        reply = _handle(park_id, state)
+        if state["row"] is not None:  # this call claimed the row: it has ended one way or another
+            if crash_after_execute:
+                (exit_fn or _hard_exit)(CRASH_EXIT_CODE)
+            announce(park_id)
+        return reply
+
+    def _handle(park_id: str, state: dict[str, Any]) -> str:
         try:
             return execute(park_id, state)
         except Exception as exc:  # noqa: BLE001 - e.g. ledger I/O error; never raise into the agent loop

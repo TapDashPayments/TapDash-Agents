@@ -16,7 +16,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 ACTIVE_STATUSES = ("parked", "approved", "executing")
@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS parks (
     decided_by       TEXT,
     user_id          TEXT,
     profile          TEXT,
+    outcome_notified_at TEXT,
     UNIQUE (session_id, tool_call_id)
 );
 CREATE INDEX IF NOT EXISTS parks_session ON parks (session_key, status);
@@ -86,6 +87,7 @@ class ParkRow:
     decided_by: str | None = None  # who decided in withHuman ("Name (channel)"), when the audit log said
     user_id: str | None = None  # the Hermes session's user and profile at park time (NULL = unknown or a row
     profile: str | None = None  # from before they were saved); the approval call is rebuilt from the row alone
+    outcome_notified_at: str | None = None  # when the chat was told how a run ended (GitHub #66); NULL = not yet
 
 
 _COLUMNS = tuple(f.name for f in fields(ParkRow))
@@ -154,8 +156,12 @@ def call_key(session_id: str, tool_call_id: str) -> str:
     return hashlib.sha256(f"{session_id}:{tool_call_id}".encode()).hexdigest()
 
 
+def _stamp(at: datetime) -> str:
+    return at.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return _stamp(datetime.now(timezone.utc))
 
 
 def _row(raw: sqlite3.Row | None) -> ParkRow | None:
@@ -186,6 +192,34 @@ class Ledger:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc):
                     raise
+        Ledger._add_outcome_column(con)
+
+    @staticmethod
+    def _add_outcome_column(con: sqlite3.Connection) -> None:
+        """Add ``outcome_notified_at`` (GitHub #66) and, in the same transaction, mark every run that had already
+        ended as told: the chat heard about those before this column existed, and the sweep must not announce
+        them now. Only the process that adds the column backfills; another process that finds it present does
+        nothing, so a run that ends later is never marked by mistake."""
+        if "outcome_notified_at" in Ledger._column_names(con):
+            return
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            if "outcome_notified_at" in Ledger._column_names(con):
+                con.execute("COMMIT")
+                return
+            try:
+                con.execute("ALTER TABLE parks ADD COLUMN outcome_notified_at TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
+                con.execute("ROLLBACK")  # another process added it (and backfilled in its own transaction)
+                return
+            con.execute("UPDATE parks SET outcome_notified_at = updated_at WHERE outcome_notified_at IS NULL "
+                        "AND status IN ('executed', 'failed', 'unknown')")
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -252,6 +286,36 @@ class Ledger:
                 f"SELECT * FROM parks WHERE session_key=? AND status IN ({marks}) ORDER BY created_at, rowid",
                 (session_key, *ACTIVE_STATUSES)).fetchall()
         return [_row(r) for r in rows]
+
+    def mark_outcome_notified(self, park_id: str) -> bool:
+        """Record that the chat was told how the run ended; True only the first time (compare-and-set on NULL).
+        ``updated_at`` is left alone: it still says when the run ended."""
+        with self._connect() as con:
+            cur = con.execute("UPDATE parks SET outcome_notified_at=? WHERE park_id=? AND outcome_notified_at IS NULL",
+                              (_now(), park_id))
+            return cur.rowcount == 1
+
+    def _untold(self, newer_than: str | None, older_than: str) -> list[ParkRow]:
+        sql = ("SELECT * FROM parks WHERE status IN ('executed', 'failed', 'unknown') "
+               "AND outcome_notified_at IS NULL AND updated_at <= ?")
+        params: list[str] = [older_than]
+        if newer_than is not None:
+            sql += " AND updated_at > ?"
+            params.append(newer_than)
+        with self._connect() as con:
+            rows = con.execute(sql + " ORDER BY updated_at, rowid", params).fetchall()
+        return [_row(r) for r in rows]
+
+    def outcome_unnotified(self, older_than_minutes: int = 2, give_up_hours: int = 24) -> list[ParkRow]:
+        """Ended runs the chat was not told about, ended more than ``older_than_minutes`` ago (the executor's own
+        post gets that long) and less than ``give_up_hours`` ago."""
+        now = datetime.now(timezone.utc)
+        return self._untold(_stamp(now - timedelta(hours=give_up_hours)),
+                            _stamp(now - timedelta(minutes=older_than_minutes)))
+
+    def outcome_given_up(self, give_up_hours: int = 24) -> list[ParkRow]:
+        """Ended runs still untold ``give_up_hours`` after they ended (the sweep alerts once and stops trying)."""
+        return self._untold(None, _stamp(datetime.now(timezone.utc) - timedelta(hours=give_up_hours)))
 
     def list_by_status(self, *statuses: str) -> list[ParkRow]:
         if not statuses:

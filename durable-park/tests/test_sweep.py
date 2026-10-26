@@ -1243,3 +1243,47 @@ def test_no_new_alert_lines_for_a_waiting_approval(world, monkeypatch, capsys):
     world.row("parked")  # withHuman itself alerts the approver; the sweep stays silent
     world.main(monkeypatch)
     assert capsys.readouterr().out == ""
+
+
+
+# GitHub #66: the sweep re-sends an outcome the chat was not told ---------------------------------------------
+
+def _backdate_update(world, park_id, minutes):
+    con = sqlite3.connect(world.ledger.path, isolation_level=None)
+    try:
+        con.execute("UPDATE parks SET updated_at=? WHERE park_id=?", (stamp(minutes), park_id))
+    finally:
+        con.close()
+
+
+def test_sweep_rewakes_untold_outcomes_after_two_minutes(world, monkeypatch):
+    fresh, due, told = world.row("executed"), world.row("executed"), world.row("executed")
+    _backdate_update(world, fresh, 1)
+    _backdate_update(world, due, 3)
+    _backdate_update(world, told, 3)
+    world.ledger.mark_outcome_notified(told)
+    assert world.main(monkeypatch) == 0
+    assert [p for p, _, _ in world.posted] == [due]
+
+
+def test_sweep_gives_up_after_24h_with_one_alert(world, monkeypatch, capsys):
+    old = world.row("executed")
+    _backdate_update(world, old, 25 * 60)
+    world.main(monkeypatch)
+    out = capsys.readouterr().out
+    assert (f"durable-park ALERT: could not tell the chat the outcome of {old} ({TOOL}) for 24 hours; "
+            "check it.") in out
+    assert old not in [p for p, _, _ in world.posted]
+    world.main(monkeypatch)
+    assert "could not tell the chat" not in capsys.readouterr().out  # said once
+
+
+def test_sweep_marks_stale_executing_unknown_then_outcome_is_told(world, monkeypatch, capsys):
+    stale = world.row("executing", executing_minutes_ago=15)
+    world.main(monkeypatch)
+    assert world.ledger.get(stale).status == "unknown"
+    assert stale not in [p for p, _, _ in world.posted]  # just ended: the next sweeps tell it
+    _backdate_update(world, stale, 3)
+    world.posted.clear()
+    world.main(monkeypatch)
+    assert [p for p, _, _ in world.posted] == [stale]

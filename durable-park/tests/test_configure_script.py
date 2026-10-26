@@ -627,3 +627,13 @@ def test_hermes_mcp_script_checks_every_skills_folder_before_it_writes_anything(
                    for name in ("MAVERICK", "ACCEPTBLUE", "AUTHNET")]
     assert last_checks == sorted(last_checks)
     assert last_checks[0] > text.index("tool policy ok")
+
+
+GATEWAY_TIMEOUT_STOP_SEC = 70  # the Hermes-generated hermes-gateway user unit (not in this repo): TimeoutStopSec=70
+
+
+def test_configure_sets_restart_drain_timeout():
+    """GitHub #66: a stop or restart waits up to 45 s for a reply in progress, well under systemd's stop limit."""
+    text = SCRIPT.read_text()
+    assert "set_cfg agent.restart_drain_timeout 45" in text
+    assert 45 <= GATEWAY_TIMEOUT_STOP_SEC - 15
