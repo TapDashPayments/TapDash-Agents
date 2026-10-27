@@ -15,20 +15,24 @@ from typing import Any
 
 from . import compat
 from . import formcheck
+from . import keys
 from . import paylink
+from . import wake as _wake
 from .breaker import STATUS_FILENAME as BREAKER_STATUS_FILENAME, Breaker
 from .executor import (EXECUTE_SCHEMA, crash_after_consume_enabled, crash_after_execute_enabled, make_executor,
                        make_refusing_executor)
 from .gatecall import LIFT_STATUS_FILENAME, GateHolder, LiftStatus
 from .ledger import Ledger
+from . import park_hook as _park_hook
 from .park_hook import (BRIDGE_CALL_TOOL, DEFAULT_EXEMPT_TOOLS, DEFAULT_FORM_CHECKED_TOOLS, fail_closed_hook,
                         make_pre_tool_call)
-from .wake import drop_wake_hook, handle_wake, make_async_client_factory, make_audit_client_factory
+from .wake import (drop_wake_hook, handle_wake, make_async_client_factory, make_async_client_for_key_file,
+                   make_audit_client_factory)
 
 log = logging.getLogger("durable_park")
 
 DEFAULT_AAP_BASE_URL = "https://app.withhuman.ai/api/aap"
-DEFAULT_TOKEN_FILE = "/etc/durable-park/instance_token"
+DEFAULT_TOKEN_FILE = keys.DEFAULT_TOKEN_FILE
 DEFAULT_AUDIT_KEY_FILE = "/etc/durable-park/audit_key"  # optional: org key with audit.read only
 DEFAULT_AUDIT_BASE_URL = "https://app.withhuman.ai"
 EXECUTOR_TOOL = EXECUTE_SCHEMA["name"]
@@ -75,6 +79,76 @@ def _opt_str(ctx: Any, key: str) -> str | None:
     """An optional string setting; anything else counts as unset (the pay link then says it is not set up)."""
     value = ctx.get_config(key, None)
     return value if isinstance(value, str) and value else None
+
+
+def _profile_setting(ctx: Any) -> str | None:
+    """The ``profile`` setting: the Hermes profile this copy of the plugin serves. Absent, ``""`` and ``"default"``
+    mean the default profile (None). Anything that is not a valid profile name (``keys.valid_profile``) raises
+    ``BadSetting``; ``register`` then refuses every call.
+
+    The setting is written by hand, so it is checked against the profile this copy really runs in
+    (``ctx.profile_name``: ``"default"``, the ``~/.hermes/profiles/<name>`` id, or ``"custom"``;
+    hermes_cli/plugins.py:392). A string ``profile_name`` that differs from the setting (both with the default
+    spellings folded together) raises ``BadSetting``: a template that forgot ``profile:``, or copied another
+    person's, must never make a copy act as the wrong profile. Without a usable ``profile_name`` a setting that
+    names a person raises ``BadSetting`` too (it cannot be confirmed); a default setting is accepted, as before.
+    ``"custom"`` never matches a named setting; a default setting may run in a ``custom`` home."""
+    value = ctx.get_config("profile", None)
+    # the setting is stricter than a row's profile: ``main`` is how Hermes names the default profile in a session
+    # key, but nobody may write it here
+    if value is None or (isinstance(value, str) and value in ("", "default")):
+        setting = None
+    elif not keys.valid_profile(value):
+        raise BadSetting("setting profile must be a valid profile name (or empty for the default profile)")
+    else:
+        setting = value
+    actual = getattr(ctx, "profile_name", None)
+    if isinstance(actual, str):
+        # ``custom`` is a Hermes home outside ``~/.hermes/profiles`` (never a person's profile): a default setting
+        # may run there, a named setting may not
+        folded = "default" if actual in ("", "default", "custom") and setting is None else actual
+        if ("default" if folded in ("", "default") else folded) != (setting or "default"):
+            raise BadSetting("setting profile does not match the profile this copy runs in")
+    elif setting is not None:
+        raise BadSetting("setting profile cannot be used: cannot confirm which profile this copy runs in")
+    return setting
+
+
+def _user_profile_fn(own_profile: str | None) -> Any:
+    """``user_profile_fn`` for ``make_pre_tool_call``: the turn's user id, and the profile to put on the ledger row.
+    A named copy stores ITS OWN profile (the copy that opens a request is the one whose session key is used, so the
+    row can never disagree with the key, even when ``HERMES_SESSION_PROFILE`` is empty for a routed turn). The
+    default copy keeps the environment's value."""
+    def user_profile() -> tuple[str, str]:
+        user_id, env_profile = _park_hook.default_user_profile()  # looked up per call
+        return user_id, own_profile or env_profile
+    return user_profile
+
+
+def _check_token_file(token_file: Any, own_profile: str | None) -> None:
+    """The ``token_file`` setting must be this copy's own key file, or ``BadSetting`` (everything refused, no request
+    opened). The default profile's file must not lie inside the instances directory (``keys.INSTANCES_DIR``, where
+    people's keys are; same ``realpath`` rule as the wake's ``_own_key_problem``); a person's file must be named
+    ``<profile>.token`` (the basename only: the directory is the admin's choice)."""
+    if not isinstance(token_file, str) or not token_file:
+        raise BadSetting(f"setting token_file must be a path, got {type(token_file).__name__}")
+    if own_profile is None:
+        if _wake._inside(os.path.expanduser(token_file), keys.INSTANCES_DIR):
+            raise BadSetting("setting token_file does not belong to this profile")
+    elif os.path.basename(token_file) != f"{own_profile}.token":
+        raise BadSetting("setting token_file does not belong to this profile")
+
+
+def _status_dir_setting(ctx: Any, ledger_path: Any) -> str:
+    """The ``status_dir`` setting: the one directory every status file goes in (the load proof, the policy load
+    verdict, the breaker, the lift report, the form-check report, ``wake_refusals.json``). Default: the ledger's
+    directory, so the default profile is unchanged. Not a non-empty string -> ``BadSetting``."""
+    value = ctx.get_config("status_dir", None)
+    if value is None:
+        return str(Path(ledger_path).expanduser().parent)
+    if not isinstance(value, str) or not value:
+        raise BadSetting(f"setting status_dir must be a path, got {type(value).__name__}")
+    return str(Path(value).expanduser())
 
 
 def is_gateway_process() -> bool:
@@ -190,8 +264,15 @@ def _own_hook_live(ctx: Any, own: set[int]) -> bool:
 
 
 def _proof_directory(ctx: Any) -> str | None:
-    """Where the load proof goes (next to the ledger) when ``register`` is already on its failure path: the
-    ``ledger_path`` setting's directory, else the plugin data dir, else ``None`` (no proof; the check fails)."""
+    """Where the load proof goes when ``register`` is already on its failure path: the ``status_dir`` setting
+    (when it is a usable path), else the ``ledger_path`` setting's directory, else the plugin data dir, else
+    ``None`` (no proof; the check fails)."""
+    try:
+        status_dir = ctx.get_config("status_dir", None)
+        if isinstance(status_dir, str) and status_dir:
+            return str(Path(status_dir).expanduser())
+    except Exception:  # noqa: BLE001
+        pass
     try:
         return str(Path(ctx.get_config("ledger_path", str(Path(ctx.state.data_dir) / "ledger.db")))
                    .expanduser().parent)
@@ -326,14 +407,23 @@ def register(ctx) -> None:
         else:
             log.error("durable-park failed to load (%s); refusing every tool call", type(exc).__name__)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS))
-        register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
+        register_hook("pre_gateway_dispatch", _fallback_wake_hook(ctx))  # wakes must still never reach the agent
         directory = _proof_directory(ctx) if is_gateway_process() else None
         if directory is not None:  # LAST: the refusing hook is registered
             _write_load_proof(ctx, own, os.path.join(directory, PLUGIN_LOAD_FILENAME), "refusing-error", registered)
 
 
-def _proof_path(ledger_path: str) -> str:
-    return str(Path(ledger_path).expanduser().parent / PLUGIN_LOAD_FILENAME)
+def _fallback_wake_hook(ctx: Any) -> Any:
+    """The wake-dropping hook of a copy that cannot work: it drops its own profile's wakes, or every profile's
+    when its ``profile`` setting is itself unusable."""
+    try:
+        return drop_wake_hook(_profile_setting(ctx))
+    except Exception:  # noqa: BLE001 - the profile is unknown: no wake of any profile may reach the agent
+        return drop_wake_hook(None, any_profile=True)
+
+
+def _proof_path(status_dir: str) -> str:
+    return str(Path(status_dir) / PLUGIN_LOAD_FILENAME)
 
 
 def _write_load_proof(ctx: Any, own: set[int], proof_path: str, mode: str, registered: list[str]) -> None:
@@ -359,13 +449,19 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
     observers = expand_observer_hooks(_names("observer_hooks", ctx.get_config("observer_hooks", [])))
 
     ledger_path = ctx.get_config("ledger_path", str(Path(ctx.state.data_dir) / "ledger.db"))
-    default_policy = str(Path(ledger_path).expanduser().parent / POLICY_STATUS_FILENAME)
+    own_profile = _profile_setting(ctx)  # None = the default profile
+    status_dir = _status_dir_setting(ctx, ledger_path)
+    try:
+        Path(status_dir).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # the status files then cannot be written: the load check fails closed
+        log.error("durable-park could not create status_dir (%s)", type(exc).__name__)
+    default_policy = str(Path(status_dir) / POLICY_STATUS_FILENAME)
     policy_path = ctx.get_config("tool_policy_status", default_policy)
     if not isinstance(policy_path, str) or not policy_path:
         raise BadSetting(f"setting tool_policy_status must be a path, got {type(policy_path).__name__}")
     problem = policy_problem(str(Path(policy_path).expanduser()), datetime.now(timezone.utc))
     if is_gateway_process():
-        write_policy_load(str(Path(ledger_path).expanduser().parent / POLICY_LOAD_FILENAME), problem)
+        write_policy_load(str(Path(status_dir) / POLICY_LOAD_FILENAME), problem)
     else:  # the cron sweep and CLI runs fail closed below but must not overwrite the gateway's verdict
         global _logged_not_gateway
         if not _logged_not_gateway:
@@ -382,13 +478,13 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
         else:
             log.error("durable-park tool policy check failed (%s); refusing every tool call", problem)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS, POLICY_MESSAGE))
-        register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
+        register_hook("pre_gateway_dispatch", drop_wake_hook(own_profile))  # wakes must still never reach the agent
         # The executor stays registered so the model's call gets a clean refusal (nothing consumed: an
         # approved park stays approved and can run after the admin fixes the policy and restarts the gateway).
         ctx.register_tool(
             name=EXECUTOR_TOOL, toolset="durable_park", schema=EXECUTE_SCHEMA,
             handler=make_refusing_executor(POLICY_MESSAGE), description=EXECUTE_SCHEMA["description"])
-        _write_load_proof(ctx, own, _proof_path(ledger_path), "refusing-policy", registered)  # LAST
+        _write_load_proof(ctx, own, _proof_path(status_dir), "refusing-policy", registered)  # LAST
         return
     try:
         Path(ledger_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -396,15 +492,16 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
     except Exception as exc:  # noqa: BLE001
         log.error("durable-park ledger unavailable (%s); refusing every tool call", type(exc).__name__)
         register_hook("pre_tool_call", fail_closed_hook(DEFAULT_EXEMPT_TOOLS))
-        register_hook("pre_gateway_dispatch", drop_wake_hook())  # wakes must still never reach the agent
-        _write_load_proof(ctx, own, _proof_path(ledger_path), "refusing-error", registered)  # LAST
+        register_hook("pre_gateway_dispatch", drop_wake_hook(own_profile))  # wakes must still never reach the agent
+        _write_load_proof(ctx, own, _proof_path(status_dir), "refusing-error", registered)  # LAST
         return
 
     base_url = ctx.get_config("aap_base_url", DEFAULT_AAP_BASE_URL)
     token_file = ctx.get_config("token_file", DEFAULT_TOKEN_FILE)
-    state_dir = Path(ledger_path).expanduser().parent
+    _check_token_file(token_file, own_profile)  # before any gate or wake client can be built from it
     # Register the wake hook first so a later registration failure can never leave wakes reaching the agent.
     wake_client_factory = make_async_client_factory(base_url, token_file)
+    wake_client_for_key_file = make_async_client_for_key_file(base_url)
     # Optional: names who decided. The key file is read per lookup; none = no name, nothing else changes.
     audit_key_file = ctx.get_config("audit_key_file", DEFAULT_AUDIT_KEY_FILE)
     audit_base_url = ctx.get_config("audit_base_url", DEFAULT_AUDIT_BASE_URL)
@@ -422,16 +519,18 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
         # Hermes awaits async hooks on the gateway loop and passes event=, gateway=, session_store=.
         # ctx.inject_message is sync and only schedules the turn on that loop (plugins_injection.py).
         return await handle_wake(event, ledger=ledger, async_client_factory=wake_client_factory,
-                                 inject=ctx.inject_message, audit_client_factory=audit_client_factory)
+                                 inject=ctx.inject_message, audit_client_factory=audit_client_factory,
+                                 own_profile=own_profile, token_file=token_file, status_dir=status_dir,
+                                 client_for_key_file=wake_client_for_key_file)
 
     register_hook("pre_gateway_dispatch", durable_park_wake)
 
     # One gate for the hook and the executor (rebuilt when the token file changes; read lazily, so a missing
     # token never breaks plugin load and refuses calls instead). One breaker, its status next to the ledger.
     holder = GateHolder(base_url, token_file)
-    breaker = Breaker(str(state_dir / BREAKER_STATUS_FILENAME))
+    breaker = Breaker(str(Path(status_dir) / BREAKER_STATUS_FILENAME))
     checker = formcheck.FormChecker()
-    lift_status = LiftStatus(str(state_dir / LIFT_STATUS_FILENAME))
+    lift_status = LiftStatus(str(Path(status_dir) / LIFT_STATUS_FILENAME))
 
     def foreign_hooks() -> list[str]:
         # Checked on every call: a plugin that registers a hook later is still caught.
@@ -439,10 +538,10 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
 
     register_hook("pre_tool_call", make_pre_tool_call(
         ledger, holder.get, form_checked, exempt=exempt, breaker=breaker, foreign_hooks_fn=foreign_hooks,
-        form_checker=checker, lift_status=lift_status))
+        form_checker=checker, lift_status=lift_status, user_profile_fn=_user_profile_fn(own_profile)))
     # Background self-check (Hermes processes only): proves the form check can read and use every form-checked
     # tool's rules and writes the result next to the ledger, where the sweep raises an alert.
-    formcheck.start_selfcheck(checker, form_checked, str(state_dir / formcheck.STATUS_FILENAME),
+    formcheck.start_selfcheck(checker, form_checked, str(Path(status_dir) / formcheck.STATUS_FILENAME),
                               on_tick=lift_status.flush)
     # ctx.dispatch_tool -> registry.dispatch does not run pre_tool_call hooks, so the executor's own
     # dispatch cannot be blocked by the park hook.
@@ -458,5 +557,5 @@ def _register(ctx: Any, own: set[int], register_hook: Any, registered: list[str]
         description=EXECUTE_SCHEMA["description"])
     log.info("durable-park loaded: ledger=%s, %d exempt tool(s), %d form-checked pattern(s), %d observer "
              "hook(s), aap=%s", ledger_path, len(exempt), len(form_checked), len(observers), base_url)
-    _write_load_proof(ctx, own, _proof_path(ledger_path), "asking", registered)  # LAST: the asking hook is registered
+    _write_load_proof(ctx, own, _proof_path(status_dir), "asking", registered)  # LAST: the asking hook is registered
 

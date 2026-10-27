@@ -147,7 +147,14 @@ flowchart LR
     fstatus[("formcheck_status.json")]
     bstatus[("breaker_status.json")]
     lstatus[("lift_status.json")]
-    route["Hermes webhook route<br/>127.0.0.1:8644"]
+    route["Hermes webhook route<br/>127.0.0.1:8644<br/>default profile: /webhooks/durable-park-wake"]
+    dkey[("default key file<br/>/etc/durable-park/instance_token")]
+    subgraph PP["Each person's own profile (example: sarah) - same gateway process"]
+      pcopy["own copy of durable-park<br/>park hook + wake handler<br/>setting profile: sarah"]
+      pkey[("own key file<br/>/etc/durable-park/instances/sarah.token")]
+      pstat[("own status folder<br/>plugin-data/durable-park/profiles/sarah/<br/>load proof, breaker, form check,<br/>wake_refusals.json")]
+      proute["own wake route<br/>/p/sarah/webhooks/durable-park-wake-sarah"]
+    end
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
     bridge["bridge<br/>127.0.0.1:8791 (held by systemd) - user dpbridge<br/>keeps no state"]
     sweep["sweep<br/>cron every 5 min"]
@@ -197,6 +204,16 @@ flowchart LR
   gw -->|"forwards with the sign-in withHuman holds (OAuth)"| remote
   sweep -->|"reads, updates;<br/>deletes finished rows after 30 days"| ledger
   sweep -->|"re-wakes missed decisions"| route
+  hook -->|"reads"| dkey
+  recv -->|"wake for a person's call:<br/>to that person's own route"| proute
+  proute -->|"only that person's copy<br/>handles it"| pcopy
+  pcopy -->|"saves the call, records the decision<br/>(one shared ledger)"| ledger
+  pcopy -->|"asks and re-reads with its OWN key"| aap
+  pcopy -->|"reads"| pkey
+  pcopy -->|"writes"| pstat
+  sweep -->|"re-wakes a person's row<br/>at that person's route"| proute
+  sweep -->|"reads the root folder and<br/>every folder under profiles"| pstat
+  sweep -->|"alerts if the key file<br/>is missing"| pkey
   selfck -->|"writes"| fstatus
   sweep -->|"reads"| fstatus
   sweep -->|"reads"| bstatus
@@ -208,27 +225,35 @@ flowchart LR
   paysvc -->|"reads"| paylinks
   paysvc -->|"page with one button:<br/>posts the form key"| payer
   payer -->|"types the card on<br/>Authorize.net's own page"| an
-  sweep -->|"alerts: UNKNOWN, form checker broken,<br/>withHuman unreachable, note not moved,<br/>Hermes not as pinned<br/>(Telegram message + Teams Adaptive Card)"| chat
+  sweep -->|"alerts: UNKNOWN, form checker broken,<br/>withHuman unreachable, note not moved,<br/>Hermes not as pinned, wake not posted,<br/>a person's key missing or refused<br/>(Telegram message + Teams Adaptive Card)"| chat
 ```
+
+Reading the map: the boxes outside the "Each person's own profile" box belong to the default profile (the one that
+has always run). Every person gets the same set of things in their own box: their own copy of durable-park, their
+own withHuman key, their own status folder and their own wake route. All copies use **one shared ledger**; each row
+says whose call it is (its `profile` column). Details: [One copy per person](#one-copy-per-person). Until people
+exist (Tasks 7 and 8 of the [per-person plan](../../docs/plans/2026-10-26-per-person-roles.md)) the person's box is
+empty and nothing changes for the default profile.
 
 | Part | Code | What it does |
 |---|---|---|
 | Langfuse plugin (Nous Research's, patched by us) | Live since 2026-10-22: TapDash's patched copy `tapdash-langfuse`, in [`tracing/tapdash_langfuse`](../../tracing/tapdash_langfuse) of this repo (changes listed in its `PATCHES.md`), installed as a symlink `~/.hermes/plugins/tapdash-langfuse` into the live clone. It replaced Nous Research's unpatched `langfuse` plugin, which is no longer enabled | Sends traces to Langfuse Cloud: one per turn, one generation per model call, one observation per tool call, full content ([runbook](runbook.md#tracing-langfuse)). The patched copy also sets the chat sender id as `userId`, names traces by platform and tags traces by configured patterns such as `park:P-...`. Its `pre_tool_call` hook only observes and is listed in `observer_hooks` (`hermes_plugins.tapdash_langfuse.on_pre_tool_call`; the function is byte-identical to upstream's). No durable-park code or approval behaviour changes. A one-way arrow out: Langfuse sends nothing back and cannot change a call. Tracing live since 2026-10-22 04:37 UTC (unpatched at first, patched copy since about 19:52 UTC). |
 | Hermes Deck plugin and relay (Hermes-Deck, third party) | Live since 2026-10-22: the plugin in `~/.hermes/plugins/hermes-deck`, the relay as the user service `hermes-deck-relay`. Shows the Deck app what the agent is doing; its one `pre_tool_call` hook is a reviewed observer ([runbook](runbook.md#hermes-deck-desktop-app)) |
-| plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook and middleware registries on every call for other plugins' `pre_tool_call` hooks and `tool_request` / `tool_execution` middleware (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
+| plugin entry point | `plugin/durable_park/__init__.py` | `register(ctx)`: reads the [plugin settings](#plugin-settings) (including `profile` and `status_dir`: every status file goes in `status_dir`), builds one shared gate (hook and executor) and one breaker, registers the hooks and the executor tool. Checks Hermes's hook and middleware registries on every call for other plugins' `pre_tool_call` hooks and `tool_request` / `tool_execution` middleware (foreign-hook guard). If the ledger cannot open it registers a hook that refuses every non-exempt call and drops wakes. |
 | park hook | `plugin/durable_park/park_hook.py` | Hermes `pre_tool_call` hook. For every tool call except the exempt ones (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`): refuses a `tool_call` wrapper that Hermes did not unwrap ([section 4b](#4b-hermes-tool-search-the-bridge-tools-in-the-hook-path)); lifts a `withhuman_context` note the model nested inside an argument object to the top level (gateway tools only, [section 4](#4-tool-call-form-check-then-one-question-to-withhuman)); checks the form (form-checked tools only), saves the call, and asks withHuman once, with the note as the approver's reason. An instant approval lets the tool run (row `allowed`; Hermes gets the lifted arguments when anything was lifted); an instant refusal or an error blocks it (row `refused`); otherwise the call is parked until a person decides. The block message tells the agent the call has NOT run and nothing was recorded, sent, charged or created, and to tell the user plainly that it is waiting for their approval (never to describe it as done). It carries no approval link: links go only to approvers. Refuses everything while another plugin hook could change arguments after approval, or while the breaker is open. |
 | form check | `plugin/durable_park/formcheck.py` | Checks arguments against the tool's own rules before anyone is asked. Background self-check. |
 | ledger | `plugin/durable_park/ledger.py` | SQLite record of every tool call that was asked about and its state. The single source of truth. |
-| wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. For a run that ended (`executed`, `failed`, `unknown`) whose outcome the chat was not told, it injects the outcome line plus "Tell the user this in one short message. Do not run anything." into the original chat and marks it told when the gateway accepts it (GitHub #66). |
+| profile keys | `plugin/durable_park/keys.py` (tests: `tests/test_keys.py`, `test_profile_register.py`, `test_profile_wake.py`, `test_profile_receiver.py`, `test_sweep_profiles.py`, `test_plugin_load_check.py`) | Says which key file belongs to which Hermes profile and which profile names are allowed. `valid_profile(name)`: letters (lower case), digits, `-` and `_`, at most 63, starts with a letter or digit, never `default` or `main`. `is_default_profile(p)`: `None`, `""`, `"default"` and `"main"` (how Hermes names the default profile in a session key). `token_file_for(profile)`: the default profile gets `/etc/durable-park/instance_token`; a person gets `/etc/durable-park/instances/<profile>.token`; a bad name raises `ValueError` and never becomes a path. Standard library only (the sweep loads it by path). `receiver/wake_post.py` repeats the name rule because it is copied on its own to `/opt`; `tests/test_keys.py` keeps the two equal. |
+| wake handler | `plugin/durable_park/wake.py` | Hermes `pre_gateway_dispatch` hook. Turns a wake into a ledger update and a message in the original chat. For a run that ended (`executed`, `failed`, `unknown`) whose outcome the chat was not told, it injects the outcome line plus "Tell the user this in one short message. Do not run anything." into the original chat and marks it told when the gateway accepts it (GitHub #66). Each copy handles only its own profile's wakes and rows: it treats only its own wake route as a wake (`is_wake_event(event, own_profile)`), refuses a row of another profile (log line, nothing read or posted, left for the sweep), reads the decision only with the key of the row's profile, also refuses a row whose session key (`agent:<profile>:...`) belongs to another profile than its own, and counts every key withHuman refuses (`CredentialRefused`) in `wake_refusals.json` in its status folder ([One copy per person](#one-copy-per-person)). |
 | executor | `plugin/durable_park/executor.py` | The `parked_action_execute` tool. Consumes the approval and replays the saved call exactly once. When the run it claimed has ended (executed, failed or unknown), it posts the outcome line (`outcome.py`, for example `[durable-park] P-XXXX ran: <tool>. Result: Payment created successfully (id 159, amount 5)`: a JSON answer is cut down to a few key fields such as id, number, transaction, amount and status; anything else is its text, at most 200 characters) straight into the chat with `ctx.post_message` (no model in between) and marks the row told (`outcome_notified_at`) only when the post worked, so a restart or crash while the model is still writing its own reply cannot lose the news (GitHub #66; the sweep re-sends anything not marked told). Its schema gives no example park ID (a concrete one invited the model to call it with that ID): the tool description says to call it only after being told in this chat that the park was APPROVED, and the `park_id` description says to use the exact ID from a `[durable-park]` message in this chat and never guess or invent one. |
-| approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key, and the user id and profile saved with the row when there are any), the agent's top-level `withhuman_context` as the request's reasoning (the `agent_reasoning` field, at most 2000 characters), and one shared gate that is rebuilt when the token file changes (the replaced gate's HTTP client is closed one rebuild later, as a call may still be using it). `build_call` is a pure function of the row. The user id and profile are read from the Hermes session once, when the call is parked, and stored in the row. The executor never reads them again. The SDK hashes the whole body into the idempotency key, so a different body would not find the approval. |
-| breaker | `plugin/durable_park/breaker.py` | Circuit breaker for withHuman outages: after 3 consecutive errors it stays open for 30 s (calls are refused without asking), then lets calls through again until an outcome is recorded; a failure re-opens, a success closes. It records open/close in `breaker_status.json` next to the ledger (written only on a change); it never calls withHuman itself. Started with a status file that still says open (a restart during an outage), it starts open but lets calls through at once, so the first success writes the close. |
-| receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
+| approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key, and the user id and profile saved with the row when there are any), the agent's top-level `withhuman_context` as the request's reasoning (the `agent_reasoning` field, at most 2000 characters), and one shared gate that is rebuilt when the token file changes (the replaced gate's HTTP client is closed one rebuild later, as a call may still be using it). `build_call` is a pure function of the row. The user id and profile are read from the Hermes session once, when the call is parked, and stored in the row (a named copy of the plugin stores its own profile, never the environment's value; the default copy stores the environment's). The executor never reads them again. The SDK hashes the whole body into the idempotency key, so a different body would not find the approval. |
+| breaker | `plugin/durable_park/breaker.py` | Circuit breaker for withHuman outages: after 3 consecutive errors it stays open for 30 s (calls are refused without asking), then lets calls through again until an outcome is recorded; a failure re-opens, a success closes. It records open/close in `breaker_status.json` in the status folder (`status_dir`; next to the ledger unless that setting is set; written only on a change); it never calls withHuman itself. Started with a status file that still says open (a restart during an outage), it starts open but lets calls through at once, so the first success writes the close. A key file the park hook cannot read or use (missing, empty, not text) counts as a failure too (the call is still refused): after 3 the breaker opens and the sweep says "withHuman could not be reached". |
+| receiver | `receiver/app.py`, `receiver/wake_post.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. The wake goes to the profile that made the call: the receiver reads the profile from the handle's `session_key` (`agent:<profile>:...`) and posts to `wake_url_for(profile)`, which is `/p/<profile>/webhooks/durable-park-wake-<profile>`. The default profile (`agent:main:...`, no session key, or one that does not look like that) keeps `/webhooks/durable-park-wake`. A profile name that breaks the rule is not posted to (a log line; the sweep retries from the ledger row). It always posts to Hermes at `127.0.0.1:8644` (no setting for another address). |
 | bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park, asked for by the same person?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. It trusts only the agents named in `DURABLE_PARK_EXPECTED_AGENTS` (today `proto-agents`; the role agents `ops-admin` and `ops-ops` once per-person roles are live; never the Viewer `ops-viewer`). Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). Its digest comparison (`ledger.normalize_args`) drops the top-level `withhuman_context`, which is why the note the park hook moved to the top level (and the gateway strips before forwarding) does not change the match: the park row and the delivered call agree. |
 | bridge check | `deploy/bridge_check.py` | Read-only isolation check, run as root by `configure_hermes.sh` right after the bridge answers 401 (the deploy stops if it fails) and by hand ([runbook](runbook.md#health-check)). Seven checks: the socket unit is active and listens on exactly `127.0.0.1:8791`; the service is active, its main process runs as `dpbridge` and the `Groups:` line of its `/proc/<pid>/status` is empty or only `dpbridge`'s own gid; only systemd and that process hold the port; no other process runs `bridge.app`; no user-level `durable-park-bridge*` unit exists for any user; `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; `bridge_secret` is `root:root 0600` (stat only, never read). |
 | links | `plugin/durable_park/links.py` | Builds the link to one request's page in withHuman's review queue (`<app>/queue/<request id>`; the sweep's `--withhuman-url`, default `https://app.withhuman.ai`). The page opens only for a signed-in member and withHuman still checks who may decide, but the link goes only to approvers. Standard library only: the sweep loads it by path. Used by the backup-approver alert, which goes only to the admin alert channels (the Telegram DM, the Teams alert chat, the backup approver's Teams webhook). The bot's own reply in the chat never carries the link: whoever asked must not be handed a way to approve their own request. |
 | pay links | `plugin/durable_park/paylink.py`, `paylink/paylink_app.py` | Authorize.net opens a hosted card form only when a page POSTs the form key to it, so the connector answers with a small page (`launcher_html`) that a chat cannot click (TAP2-82). When an approved `authnet_create_payment_form` or `authnet_create_profile_form` has run, the executor reads the post address and hidden fields out of that page, checks each against a fixed list (Authorize.net's hosted page addresses only; fields `token`, `paymentProfileId`, `shippingAddressId` with fixed shapes), and saves them in one file in `/var/lib/durable-park-paylinks` named by the SHA-256 of a 32-character random link id. The model gets only the link (`<paylink_origin>/pay/<id>`) and is told to give it to the user; it never sees the form key. The outcome line shows the link too (`[durable-park] P-XXXX made an Authorize.net form (...). Pay link: ... (works until 17:20 UTC)`). The pay-link service (user `dppay`, read-only) answers that link with its own page (one "Continue to payment" button that posts the key to Authorize.net; no script, so link previews and mail scanners that open the link send nothing on) until one minute before the form's 15 minutes end, then "This payment link has expired". If no link can be made (not set up, a cut form key, an unexpected page) the model is told to say so, the outcome line says why and the gateway log has an error: never silent. Expired files, and temp files a crash left more than an hour ago, are removed the next time a link is made. Form keys may be up to 8192 characters (a real sandbox key is about 850 to 1400). |
-| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, wakes a run whose outcome the chat was not told (ended 2 minutes to 24 hours ago; the wake handler tells the chat) and alerts once for one still untold after 24 hours (GitHub #66), marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), routes an approval nobody answered to the backup approver (the alert ends with the request's withHuman link) and denies it when nobody answers in time (only with `/etc/durable-park/approvers.json`, TAP2-121, [runbook](runbook.md#backup-approver-and-unanswered-approvals-tap2-121)), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, once per problem (and every 24 hours while it lasts) when Hermes is not on the pinned commit in `deploy/hermes-pin.json` or the update block is off (GitHub #76, [runbook](runbook.md#hermes-is-not-as-pinned)), and once per (tool, kind, key, detail) when the park hook reports that the agent's `withhuman_context` note was not moved, was dropped or could not be checked for (`lift_status.json`, [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). Its alerts go to the Telegram DM (the cron job's delivery target) and, because `TEAMS_ALERT_WEBHOOK_URL` is set on the VM, also to Teams as an Adaptive Card that renders full width (`"msteams": {"width": "Full"}`) ([runbook](runbook.md#live-hermes-settings-on-proto-agents)). |
+| sweep | `scripts/durable_park_sweep.py` | Safety net: re-wakes missed decisions, wakes a run whose outcome the chat was not told (ended 2 minutes to 24 hours ago; the wake handler tells the chat) and alerts once for one still untold after 24 hours (GitHub #66), marks stuck runs `unknown`, cancels a `parked` row that never got a request id attached after 10 minutes (a request may still be open at withHuman; approving it does nothing), routes an approval nobody answered to the backup approver (the alert ends with the request's withHuman link) and denies it when nobody answers in time (only with `/etc/durable-park/approvers.json`, TAP2-121, [runbook](runbook.md#backup-approver-and-unanswered-approvals-tap2-121)), alerts when the form checker is broken, once each when the tool policy check fails and passes again, once each when the running gateway has no plugin load proof and has one again, once each when withHuman becomes unreachable (breaker open) and answers again, once per problem (and every 24 hours while it lasts) when Hermes is not on the pinned commit in `deploy/hermes-pin.json` or the update block is off (GitHub #76, [runbook](runbook.md#hermes-is-not-as-pinned)), and once per (tool, kind, key, detail) when the park hook reports that the agent's `withhuman_context` note was not moved, was dropped or could not be checked for (`lift_status.json`, [runbook](runbook.md#the-agents-note-could-not-be-moved)). Deletes `allowed`, `refused` and `cancelled` rows after 30 days (retention). Its alerts go to the Telegram DM (the cron job's delivery target) and, because `TEAMS_ALERT_WEBHOOK_URL` is set on the VM, also to Teams as an Adaptive Card that renders full width (`"msteams": {"width": "Full"}`) ([runbook](runbook.md#live-hermes-settings-on-proto-agents)). Since per-person profiles it also runs the per-status checks for every `profiles/<profile>/` folder (its lines say `(profile sarah)`), posts each wake to the route of the row's own profile, and alerts on a wake it cannot post, on a `parked` or `approved` row whose profile has no key file or an empty or unreadable one, and on a `parked` row whose key withHuman refuses ([runbook](runbook.md#per-person-alerts)). |
 
 ### Plugin settings
 
@@ -241,13 +266,15 @@ Read once at gateway start from `plugins.entries.durable-park.settings.<name>` i
 | `form_checked_tools` | `DEFAULT_FORM_CHECKED_TOOLS` (`park_hook.py`: QuickBooks create/update/delete of the 12 money types, six DocuSign writes (`createEnvelope`, `updateEnvelope` and four Maestro workflow tools; slug `docusign` or `docusign_demo`), every Maverick tool `mcp__wh__maverick__maverick_*`, every accept.blue tool `mcp__wh__acceptblue__ablue_*`, every Authorize.net tool `mcp__wh__authnet__authnet_*`) | Regex patterns (`fullmatch` on the Hermes tool name) whose calls get the [form check](form-check.md) before withHuman is asked. An invalid pattern is logged and the defaults are added back. Leaving a tool off does not let it through. |
 | `observer_hooks` | `[]` | `module.qualname` of foreign `pre_tool_call` callbacks an admin has read and confirmed never return `modify` ([runbook](runbook.md#allow-another-hook-observer_hooks)). Foreign means anything in Hermes's hook registry that durable-park did not register: other plugins' hooks, `config.yaml` `hooks:` shell hooks (named `agent.shell_hooks.shell_hook[pre_tool_call:<command>]`) and outbound webhooks (named `agent.outbound_webhooks.outbound_webhook[pre_tool_call:<label>]`, label = the webhook's `name` or else its URL), plus a fourth source: `tool_request` / `tool_execution` middleware another plugin registered (`ctx.register_middleware`, named `<module>.<qualname>`; `tool_execution` middleware runs after `pre_tool_call` and can hand the tool other arguments than were approved). Any unlisted one, or a hook or middleware registry that cannot be read, refuses every non-exempt call. A hook with two names (Hermes Deck: `hermes_plugins.hermes_deck.hermes_deck_pre_tool_call` with its bridge, `hermes_plugins.hermes_deck.events.on_pre_tool_call` without) is accepted under both when either is listed (`OBSERVER_HOOK_ALIASES`, TAP2-129). |
 | `aap_base_url` | `https://app.withhuman.ai/api/aap` | withHuman Agent Approval Protocol endpoint. |
-| `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused. |
+| `token_file` | `/etc/durable-park/instance_token` | Agent instance token; read lazily by the shared gate and re-read when the file changes. Unreadable: calls are refused (and each refusal counts as a failure for the breaker). A person's profile sets `/etc/durable-park/instances/<profile>.token`: the file name must be `<profile>.token`, and the default profile's file must not be inside `/etc/durable-park/instances/`. Otherwise the copy refuses every call at load (`setting token_file does not belong to this profile`; [One copy per person](#one-copy-per-person)). |
 | `audit_key_file` | `/etc/durable-park/audit_key` | Optional for the plugin (the bridge needs the same key: systemd hands it a private copy when the bridge starts, so a rotation also needs `sudo systemctl restart durable-park-bridge`). A withHuman org API key with `audit.read`, `request.read` and `request.read.unrouted` and nothing else; the plugin only uses `audit.read`. Read per lookup, never logged. Present: the wake asks the audit log who decided and names them ("by Yaakov Yehuda (android)"). Missing, unreadable or empty: no name, one `warning` log per process, nothing else changes ([runbook](runbook.md#name-the-decider-optional)). |
 | `audit_base_url` | `https://app.withhuman.ai` | Where that audit lookup (`GET /api/v1/audit`) goes. A bad `audit_*` setting (not a string, empty, a path that cannot be resolved) only switches the name off with a warning in the log; unlike the other settings it never refuses tool calls. |
 | `paylink_dir` | (none) | The pay-link folder the executor writes one file per link into (`/var/lib/durable-park-paylinks` on proto-agents, set by `configure_hermes.sh`). Unset or missing: no pay link is made, and the chat is told why. |
 | `paylink_origin` | (none) | The public `https://` address in front of `/pay/<id>` (this machine's Tailscale Funnel name, read by `configure_hermes.sh`). Unset or not `https://`: no pay link, and the chat is told why. |
-| `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. `breaker_status.json`, `formcheck_status.json`, `lift_status.json` and `plugin_load.json` are written next to it. |
-| `tool_policy_status` | `<ledger dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
+| `ledger_path` | `<plugin data dir>/ledger.db` | The ledger. One file for every profile. The status files are written in `status_dir`, which is the ledger's folder unless set. |
+| `status_dir` | the ledger's folder (so the default profile is unchanged) | The one folder every status file goes in: `plugin_load.json`, `tool_policy_load.json`, `tool_policy_status.json` (its default path), `breaker_status.json`, `lift_status.json`, `formcheck_status.json` and `wake_refusals.json`. A person's profile sets `<ledger dir>/profiles/<profile>`, which is where the sweep and the load check look. Made at start. Not a non-empty text: a bad setting, every call is refused. A person's copy that leaves it unset would write over the default profile's files. |
+| `profile` | none (the default profile) | The Hermes profile this copy serves. Absent, empty or `default`: the default profile. Otherwise a valid profile name ([rules](#one-copy-per-person)); `main` is not accepted here. The copy answers only its own wake route and only rows of its own profile. It is also checked against the profile Hermes says this copy runs in (`ctx.profile_name`): a person's setting must match it, and a default setting may run in a `custom` Hermes home. Not a valid name, a mismatch, a person's setting that cannot be confirmed, or a template that forgot `profile:` inside a named profile: a bad setting, every call is refused and the wakes of every profile are dropped. |
+| `tool_policy_status` | `<status_dir>/tool_policy_status.json` | The report `deploy/tool_policy_check.sh` writes before every gateway start. Missing, unreadable, `ok` not true, or written more than 15 minutes before this process started: the plugin refuses every non-exempt call (see [Gateway start](#gateway-start)). A value that is not a string is a bad setting (refuse everything). |
 | `risky_tools` | (retired) | Renamed `form_checked_tools`. If still set, a warning `risky_tools is renamed form_checked_tools; ignoring it` is logged and its value is not used. |
 
 `exempt_tools`, `form_checked_tools` and `observer_hooks` must each be a list of strings (a lone string counts as a
@@ -256,6 +283,100 @@ non-string) is logged (`durable-park setting <name> must be a list of strings`) 
 except the exempt tools (`parked_action_execute`, `clarify`, `tool_search`, `tool_describe`), as it does for any other error while loading: `register` never raises,
 because Hermes would then drop all of durable-park's hooks and run every tool unchecked
 (`hermes_cli/plugins_loader.py:525-537`).
+
+### One copy per person
+
+In plain English: each person who uses the bot, say Sarah and Tom, gets their own Hermes *profile*. A profile is a
+separate set of settings and chats. Each profile runs its own copy of durable-park, with its own withHuman key and
+its own folder of status files. The ledger stays one shared file: every row has a `profile` column that says whose
+call it is. withHuman knows who asked because each key belongs to one person. **Nothing here is live until people
+exist** (Tasks 7 and 8 of the [per-person plan](../../docs/plans/2026-10-26-per-person-roles.md)). Today only the
+default profile runs, and for it nothing changed: same key file, same status folder, same wake route. So deploying
+this code is safe ([runbook](runbook.md#deploy-a-change)).
+
+| | Default profile | Sarah (profile `sarah`) |
+|---|---|---|
+| withHuman key file | `/etc/durable-park/instance_token` | `/etc/durable-park/instances/sarah.token` |
+| Status folder (`status_dir`) | the ledger's folder, `~/.hermes/plugin-data/durable-park/` | `~/.hermes/plugin-data/durable-park/profiles/sarah/` |
+| Wake route | `/webhooks/durable-park-wake` | `/p/sarah/webhooks/durable-park-wake-sarah` |
+| Plugin settings | the defaults | `profile: sarah`, `status_dir` and `token_file` as above, the same `ledger_path` (in Sarah's own `config.yaml`, [runbook](runbook.md#plugin-settings)) |
+| Ledger | `ledger.db` | the same `ledger.db` |
+
+**Profile names.** Lower-case letters, digits, `-` and `_`; at most 63 characters; the first one is a letter or a
+digit; never `default` or `main` (both mean the default profile). No dots and no slashes, so a name can never walk
+out of `/etc/durable-park/instances/`. The rule lives in `plugin/durable_park/keys.py` and is repeated in
+`receiver/wake_post.py` and `deploy/plugin_load_check.sh`. A name that breaks it never becomes a path or an address:
+the code raises `ValueError`, the receiver does not post, and the load check stops the gateway.
+
+**Which profile a row gets.** A named copy stores its own profile on every new ledger row, never the value from
+the environment, so a row can never disagree with the session key of the copy that opened it. The default copy still
+stores the environment's value.
+
+**Status files.** Each status folder holds: `plugin_load.json` (the load proof), `tool_policy_load.json`,
+`tool_policy_status.json` (the plugin reads it from here; the start check that writes one per person comes with
+Task 5), `breaker_status.json`, `lift_status.json`, `formcheck_status.json` and `wake_refusals.json`. The sweep's
+own `*_alert_state.json` files (what it already said) sit next to the file they belong to. The default profile's
+folder is the root. A person's folder is `<root>/profiles/<profile>/`.
+
+**How a wake works now.** Sarah's call parks. Then:
+
+1. The row says `profile = sarah` and keeps the chat's session key, `agent:sarah:teams:...`.
+2. An approver decides in withHuman. withHuman tells the receiver.
+3. The receiver reads the profile from the session key and posts the signed wake to Sarah's route,
+   `/p/sarah/webhooks/durable-park-wake-sarah`. A default-profile call goes to the old route.
+4. Hermes lets a plugin post only into its own profile's chats, so only Sarah's copy can finish the job. Her copy
+   treats only the chat name `webhook/durable-park-wake-sarah` as a wake. The default copy treats only
+   `webhook/durable-park-wake`.
+5. Sarah's copy checks that the row is Sarah's and that its key file (which must already be named `sarah.token` for the
+   copy to load) holds a key. It
+   reads the decision from withHuman with that key and tells Sarah's chat.
+6. A wake for a row of another profile (a `sarah` row that reaches Tom's copy) is refused: one log line, nothing read,
+   nothing posted, the row is left for the sweep. The same goes when the row says this copy but its session key
+   (`agent:<profile>:...`, `main` means default) belongs to another profile, for a copy whose `token_file` is not named
+   for the row's profile or a default copy whose `token_file` lies inside `/etc/durable-park/instances/` (a person's
+   key; a second line of defence, since such a copy already refuses everything at load), and for a copy whose key file
+   is missing or empty.
+7. The sweep is the safety net. Every 5 minutes it re-posts the wake of every row that needs one, to the route of
+   **that row's** profile (`--wake-base`, default `http://127.0.0.1:8644`). A post that fails is an alert (named
+   profile and park id), and so is a missing key file or a key withHuman refuses
+   ([runbook](runbook.md#per-person-alerts)).
+
+**Refused keys.** When withHuman refuses a profile's key (`CredentialRefused`), the row stays `parked`. The copy
+counts it in that profile's `wake_refusals.json` (park id, profile, count, first time). A good read or a row that is
+no longer `parked` clears the entry. At 3 refusals the sweep alerts once.
+
+**What the sweep reads.** The root status folder and every `profiles/<name>/` folder under it (a valid name, a real
+folder, not a link; anything else is ignored). For each it runs the same checks as before (form check, breaker, tool
+policy, lift, load proof) with its own alert-state files, and the line names the profile:
+`durable-park ALERT (profile sarah): ...`. The default profile's lines are unchanged. Options: `--status-root`
+(default: the ledger's folder), `--wake-base`, `--instances-dir`, `--default-token-file`
+([runbook](runbook.md#per-person-alerts)).
+
+**Bad settings fail closed.** An unusable `profile`, `status_dir` or `token_file` makes that copy refuse every non-exempt call. An
+unusable `profile` or `token_file` also drops the wake of every profile, because the copy no longer knows which one is
+its own (or can no longer be trusted to read with its own key). The
+`profile` line is written by hand, so it is also checked against the profile Hermes says the copy runs in
+(`ctx.profile_name`). These count as unusable: a different profile, a person's profile that cannot be confirmed, and a
+template that forgot `profile:` inside a named profile (the log says `setting profile does not match the profile this
+copy runs in` or `setting profile cannot be used: cannot confirm which profile this copy runs in`). A default setting
+may run in a `custom` Hermes home.
+
+The `token_file` is checked at load too, before any request can be opened: a person's file must be named
+`<profile>.token` (the folder is free), and the default profile's must not lie inside `/etc/durable-park/instances/`
+(the log says `setting token_file does not belong to this profile`). A copy that fails this refuses every call, so no
+approval request is ever opened with the wrong key. Fix the `token_file` line in that profile's plugin settings and
+restart.
+
+**Known limits (until Task 5).** Hermes serves every profile folder under `~/.hermes/profiles` when it multiplexes,
+routed or not. In Task 4 the gateway load check looks only at routed profiles (`gateway.profile_routes`) and the sweep
+only at profiles that already have a status folder. A profile folder with no route is covered by Task 5's start
+checks, which look at every served profile. Also, the sweep notices a missing key file only for a row that is already
+`parked` or `approved`. A new call from a profile whose key is missing fails through the breaker instead: it is
+refused, its row is `cancelled`, and after 3 such calls the sweep says "withHuman could not be reached". Task 5's start
+check reports a missing key at start.
+
+**At gateway start.** `deploy/plugin_load_check.sh` also waits for the proof of every routed profile (the list comes
+from `gateway.profile_routes` in the Hermes config) and names each profile that has none ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)).
 
 ### Gateway start
 
@@ -280,7 +401,7 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
 3. Otherwise the ledger opens and the normal hook, wake handler and executor register.
 4. As the last step of every path that ends with a `pre_tool_call` hook registered (normal, policy refusal, ledger
    unavailable, and the `except` path of `register`), the gateway process writes the **load proof**
-   `plugin_load.json` next to the ledger: `pid`, `written_at`, `mode` (`asking`, `refusing-policy` or
+   `plugin_load.json` in its status folder (next to the ledger unless `status_dir` says otherwise): `pid`, `written_at`, `mode` (`asking`, `refusing-policy` or
    `refusing-error`, naming the live hook) and the `hooks` registered (atomic, never raises; a failed write is only
    logged). Hermes v0.22.2 has no lifecycle hook that fires after all plugins loaded
    (`hermes_cli/plugins.py:109-166`, `VALID_HOOKS`, has no startup, ready or post-load event), so the proof is written
@@ -290,7 +411,7 @@ because Hermes would then drop all of durable-park's hooks and run every tool un
    wall-clock deadline of `DURABLE_PARK_LOAD_TIMEOUT` real seconds (default 30, never cut short by whole-second rounding; Hermes's own load deadline is 10 s and the live load takes about 2 s), for a `plugin_load.json` whose `pid` is the unit's `$MAINPID`.
    Found (any mode, `refusing-*` included: the plugin is live and refusing) it prints one line and exits 0. Not found
    it prints `durable-park ALERT: the plugin did not load in this gateway ...` and exits 1, so systemd stops the
-   gateway and no tool call runs unchecked. The drop-in's `StartLimitIntervalSec=600` / `StartLimitBurst=3` stop the
+   gateway and no tool call runs unchecked. With routed people it also waits for each person's own proof (`profiles/<profile>/plugin_load.json`) and names every profile without one ([One copy per person](#one-copy-per-person)). The drop-in's `StartLimitIntervalSec=600` / `StartLimitBurst=3` stop the
    restart loop after 3 starts in 10 minutes (manual and graceful restarts count too).
 
 The proof is written only when this load was not abandoned (`ctx._load_abandoned`, set by Hermes's
@@ -427,6 +548,8 @@ Notes:
 - Step 5: "NOT run" is true - the hook blocks the call before Hermes sends it anywhere.
 - Steps 9-10: the wake carries only the park id. The handler always re-reads the decision from withHuman, so a
   forged wake cannot approve anything.
+- Steps 9-10 for a person's call: the receiver sends the wake to that person's own route, and only that person's copy
+  of durable-park handles it and reads the decision with that person's key ([One copy per person](#one-copy-per-person)).
 - Step 17: `parked_action_execute` replays with `ctx.dispatch_tool`, which does not run `pre_tool_call` hooks, so
   the replay is not parked again.
 - Step 18: the bridge matches on the Hermes tool name (built the way Hermes builds it, `bridge.verify.hermes_tool_name`)
@@ -548,7 +671,7 @@ stateDiagram-v2
   gone through; the state and the rule are the same.
 - `gateway_passed_at` is no longer written: the bridge does not open the ledger (it asks withHuman). The column
   stays; old rows may have it set and nothing reads it. `notified_at` is set when the chat was told about a decision.
-- `user_id` and `profile` (nullable) are the Hermes session's `HERMES_SESSION_USER_ID` and `HERMES_SESSION_PROFILE` at park time, saved by the park hook so `build_call` can rebuild the same approval body at execute time. Empty or unknown = NULL = the key is left out of the context; rows from before the columns existed are NULL, so they rebuild the body they were parked with. A replayed park keeps the first row's values. They are added to an older ledger the same way as `decided_by` (below).
+- `user_id` and `profile` (nullable) are the Hermes session's `HERMES_SESSION_USER_ID` and `HERMES_SESSION_PROFILE` at park time (a named copy of the plugin stores its own profile instead of the environment's value), saved by the park hook so `build_call` can rebuild the same approval body at execute time. Empty or unknown = NULL = the key is left out of the context; rows from before the columns existed are NULL, so they rebuild the body they were parked with. A replayed park keeps the first row's values. They are added to an older ledger the same way as `decided_by` (below).
 - `outcome_notified_at` (nullable, GitHub #66) is when the chat was told how a run ended (`executed`, `failed` or `unknown`). The executor sets it after its own outcome post works; the wake handler sets it after the sweep's re-send was accepted. Set once only (compare-and-set). When the column is first added to an older ledger, every run that had already ended is marked as told in the same transaction, so old runs are never announced.
 - `decided_by` (nullable, `"Name (channel)"`) is written in the same single update as the decision, only for
   `approved`, `denied` and `cancelled`, and only when the withHuman audit log's newest `approval.decided` event for
@@ -720,6 +843,12 @@ and re-run against the real code on the VM (2026-10-21):
 | Tool returns an unclear error (session expired, interrupted) | `unknown`, same as above. | Check QuickBooks |
 | Tool returns a clear error | `failed`, error stored; nothing to check. | Fix and ask again |
 | A decision's wake is lost (Hermes down, wake refused) | The sweep re-posts wakes every 5 minutes until the chat is told. | Nobody |
+| A wake cannot be posted at all (the gateway is down, or a person's wake route is missing, which answers HTTP 404) | The row stays as it is and the sweep tries again every 5 minutes. After 2 sweeps in a row it alerts, naming the profile and the park id, and again every 24 hours while it lasts. | Fix the route or start the gateway ([runbook](runbook.md#per-person-alerts)) |
+| A `parked` or `approved` row of a person whose key file is missing (person removed, typo), or is there but empty or unreadable (a different alert line) | It is not resumed (the copy cannot ask withHuman without the key). It blocks that chat and restarts. The sweep alerts once for the row. | Add the key or remove the person ([runbook](runbook.md#per-person-alerts)) |
+| withHuman refuses a person's key for a `parked` row 3 times | Not resumed, same as above. The sweep alerts once for the row. | Check the key file is that person's key ([runbook](runbook.md#per-person-alerts)) |
+| A wake reaches the copy of another profile, or a copy whose `token_file` is not named for the row's profile | The copy refuses it with a log line: nothing is read, nothing is posted. The row is left for the sweep, which posts to the right route. | Nobody; if it repeats, check the person's settings |
+| A copy's `token_file` is not its own key file (a person's not named `<profile>.token`, or the default's inside `/etc/durable-park/instances/`) | At load the copy refuses every tool call and drops the wakes of every profile. No approval request is opened with the wrong key. Its load proof says `refusing-error`. | Fix the `token_file` line in that profile's plugin settings, restart ([runbook](runbook.md#plugin-settings)) |
+| A key file cannot be read when a call is made (missing, empty, not text) | The call is refused and its row is `cancelled`. The breaker counts it as a failure; after 3 it opens and the sweep says "withHuman could not be reached". (The missing-key alert does not cover this: it only looks at rows already `parked` or `approved`.) | Fix the key file ([runbook](runbook.md#withhuman-could-not-be-reached)) |
 | Bridge cannot confirm the gateway call (no matching consumed park, a park another person made, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
 | The bridge process dies or is restarted | systemd keeps listening on `127.0.0.1:8791` (the socket unit holds the port) and restarts the service after 1 s (`Restart=always`); a delivery meanwhile waits in the socket's backlog or times out, and withHuman asks a person instead. Nobody else can bind the port and answer, for as long as the socket unit is neither stopped nor failed. systemd fails a socket unit when the service it activates trips its start limit (`service-start-limit-hit`, with `Accept=no`) and when the socket trips its own trigger limit, and either frees the port; so the service has `StartLimitIntervalSec=0` (systemd keeps retrying every second, however long the start keeps failing) and the socket has `TriggerLimitIntervalSec=0`. Only an admin's `systemctl stop` or `disable --now` of the socket frees the port, and `bridge_check.py` check 1 fails when it is not active. | Nobody; check the unit if it keeps restarting ([runbook](runbook.md#health-check)) |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
@@ -741,7 +870,7 @@ groups or at the permissions of `/etc/durable-park` itself, and a change to the 
 
 | Process | Runs as | Code it runs | Listens on | Started by |
 |---|---|---|---|---|
-| Hermes gateway (agent + plugin, Telegram and Teams adapters) | `hermes` | `~/.hermes/plugins/durable-park` -> `/home/hermes/durable-park/plugin/durable_park` (the git clone) | `127.0.0.1:8644` (webhook route `durable-park-wake`), `127.0.0.1:3978` (Teams bot "TapDash Agent") | systemd user unit `hermes-gateway` |
+| Hermes gateway (agent + plugin, Telegram and Teams adapters) | `hermes` | `~/.hermes/plugins/durable-park` -> `/home/hermes/durable-park/plugin/durable_park` (the git clone) | `127.0.0.1:8644` (webhook route `durable-park-wake`, plus one route per person, `durable-park-wake-<profile>`, under `/p/<profile>/`), `127.0.0.1:3978` (Teams bot "TapDash Agent") | systemd user unit `hermes-gateway` |
 | Hermes web dashboard | `hermes` | the `hermes` install (`hermes dashboard`, basic-auth user `TapDash`) | `100.99.171.75:9119` (Tailscale only), HTTPS via Tailscale Serve on `:8443` | systemd user unit `hermes-dashboard` |
 | Teams tunnel | `hermes` (moved from `ubuntu` on 2026-10-22) | Microsoft devtunnel `proto-agents-bot` (program `/usr/local/bin/devtunnel`, root-owned; login cache `/home/hermes/.local/share/DevTunnels`, mode 600, signed in as Yaakov@TapDash.co), forwards to the gateway's `127.0.0.1:3978` | outbound only | systemd user unit `devtunnel-hermes` (in `/home/hermes/.config/systemd/user`, enabled); manage it with `sudo -u hermes XDG_RUNTIME_DIR=/run/user/1001 systemctl --user <verb> devtunnel-hermes` |
 | Claude connector "Proto-Agents" | `ubuntu` (the admin; was `hermes` until 2026-10-22) | `/home/ubuntu/hermes-shell-mcp` (shell access for Claude on this VM; reaches Hermes with `sudo -u hermes ...`) | `127.0.0.1:8792` | system service `hermes-shell-mcp` |
@@ -772,8 +901,10 @@ System users behind that table:
   `formcheck_status.json`, `formcheck_alert_state.json`, `breaker_status.json`, `breaker_alert_state.json`,
   `lift_status.json` (what the lift could not do; with `.lock`, a `lift_status.unwritable.<pid>` marker for each process
   that cannot write it, and, if ever needed, `.corrupt`), `lift_alert_state.json`, `lift_unwritable_alert_state.json`,
-  `lift_check_alert_state.json`, `plugin_load.json` (the load proof) and
-  `plugin_load_alert_state.json`. The bridge keeps nothing here: the
+  `lift_check_alert_state.json`, `plugin_load.json` (the load proof),
+  `plugin_load_alert_state.json`, and the sweep's `wake_post_alert_state.json` and `missing_key_alert_state.json`.
+  Each person's status files are in `profiles/<profile>/` under it (and their own `*_alert_state.json`), including
+  `wake_refusals.json`. The bridge keeps nothing here: the
   `bridge_deliveries.db` of the old bridge is unused and can be deleted once the new bridge is live.
 - Hermes settings that go with the tool lockdown: `approvals.mode: off`, `gateway.strict: true` and
   `gateway.trust_recent_files: false` (while `hermes` owns the ledger, the last two do not protect it). What the
@@ -790,6 +921,7 @@ the repo) and never printed by any script.
 | File | Mode | Read by | Used for |
 |---|---|---|---|
 | `instance_token` | 0640 root:hermes | plugin, Hermes (`wh` MCP server via the secrets helper) | withHuman instance credential: approval requests and the gateway |
+| `instances/<profile>.token` (the folder `instances` is root:hermes 0750) | 0640 root:hermes | that person's copy of the plugin (and the sweep, which only checks that the file exists) | One person's withHuman instance key. Never read for another person's rows. Added when a person is added (`people.sh`, Task 7) |
 | `receiver.json` | 0600 aaprecv | receiver | withHuman webhook signing secret + the receiver's own credential copy |
 | `wake_secret` | 0640 root:dpwake | receiver, sweep, Hermes (via the secrets helper) | signs the local wake to Hermes |
 | `bridge_secret` | 0600 root:root | bridge (systemd reads it as root and hands the bridge a private copy: `LoadCredential`) | verifies withHuman's pipeline webhook signature. The bot cannot read it |
@@ -824,6 +956,9 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | 14 min | A pay link works this long: the form's 15 minutes less one, so a customer never reaches an expired Authorize.net form | `paylink.py` |
 | 75 min | Form-check report older than this is treated as broken | `durable_park_sweep.py` |
 | 2 | Bad sweeps in a row before a form-checker alert | `durable_park_sweep.py` |
+| 2 / 24 h | Sweeps in a row in which a wake could not be posted before the wake-post alert; it repeats after 24 hours while it lasts | `durable_park_sweep.py` |
+| 3 | Refusals of a person's key for one `parked` row before the key-refused alert | `wake.py`, `durable_park_sweep.py` |
+| 63 | Longest profile name (lower-case letters, digits, `-` and `_`) | `keys.py` |
 | 300 s | Allowed clock difference on the bridge signature | `bridge/app.py` |
 | 120 s | A park approval can approve one gateway call only if it was consumed this recently (5 s of clock skew allowed) | `bridge/verify.py` |
 | 3.5 s | The bridge's total budget for its two withHuman lists (withHuman's webhook block gives up at 5 s; 3 s per call). A hard limit: each list runs in a worker thread and the caller stops waiting for it when the budget is spent (`deadline`), even if withHuman stalls mid-response; an abandoned worker ends at its own 3 s httpx timeout | `bridge/app.py`, `bridge/whapi.py` |
@@ -848,3 +983,5 @@ Rotate all of them before production: [runbook](runbook.md#rotate-secrets-before
 | jump host | The production Hermes server the AI agents' connector runs on; it reaches the VM over SSH. Never changed. |
 | approver | A person on withHuman's approvers' escalation path; decides approval requests in the withHuman app. |
 | admin | A person with root on the VM and admin rights in withHuman; enters secrets and does the root steps. |
+| profile | A Hermes profile: one person's own set of settings and chats (for example `sarah`). The default profile is the one that has always run. Each profile has its own copy of durable-park, key file, status folder and wake route ([One copy per person](#one-copy-per-person)). |
+| status folder | The folder a copy of durable-park writes its status files in (`status_dir`): the load proof, breaker, form check and so on. The default profile's is the ledger's folder; a person's is `profiles/<profile>/` under it. |

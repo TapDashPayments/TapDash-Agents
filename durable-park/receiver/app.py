@@ -32,12 +32,13 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
+from wake_post import DEFAULT_BASE_URL, DEFAULT_WAKE_URL, post_wake, wake_url_for  # noqa: E402
 
 log = logging.getLogger("durable_park.receiver")
 
 DEFAULT_CONFIG = "/etc/durable-park/receiver.json"
 DEFAULT_WAKE_SECRET_FILE = "/etc/durable-park/wake_secret"
+DEFAULT_WAKE_BASE = DEFAULT_BASE_URL  # where Hermes's webhook platform listens; other profiles live under /p/<profile>
 DEFAULT_AAP_BASE_URL = "https://app.withhuman.ai/api/aap"
 EVENTS_PATH = "/aap/events"
 HOST = "127.0.0.1"
@@ -98,8 +99,22 @@ def _read_wake_secret(path) -> str:
     return secret
 
 
-def make_resumer(wake_secret_file, wake_url: str, post=post_wake):
+def profile_of(handle: dict) -> str | None:
+    """The Hermes profile in the handle's session key ``agent:<profile>:<platform>:...``, or None for the default
+    profile (``agent:main:...``, no session key, or one that does not look like that)."""
+    key = handle.get("session_key")
+    parts = key.split(":") if isinstance(key, str) else []
+    if len(parts) < 2 or parts[0] != "agent" or parts[1] in ("", "main", "default"):
+        return None
+    return parts[1]
+
+
+def make_resumer(wake_secret_file, wake_url: str, post=post_wake, wake_base: str = DEFAULT_WAKE_BASE):
     """The ``hermes`` resumer: ``resumer(handle, request)`` -> signed wake for ``handle["park_id"]``.
+
+    The wake goes to the profile that made the call (Hermes lets a plugin post only into its own profile's chats):
+    the default profile to ``wake_url``, any other profile to its own route under ``wake_base``. A profile name
+    that is not valid is not posted to; the sweep retries from the ledger row.
 
     Errors propagate to the SDK, which logs "resuming the run for request ... failed"; the cron sweep
     re-posts wakes for anything still undecided/unnotified, so nothing is lost.
@@ -110,8 +125,17 @@ def make_resumer(wake_secret_file, wake_url: str, post=post_wake):
         if not isinstance(park_id, str) or not park_id:
             log.warning("request %s: hermes resume handle has no park_id; not waking", request.id)
             return
+        profile = profile_of(handle)
+        url = wake_url
+        if profile is not None:
+            try:
+                url = wake_url_for(profile, wake_base)
+            except ValueError:
+                log.warning("request %s: %s has a session key with an invalid profile name; not waking "
+                            "(the sweep will retry)", request.id, park_id)
+                return
         secret = _read_wake_secret(wake_secret_file)
-        status = await asyncio.to_thread(post, park_id, secret, wake_url)
+        status = await asyncio.to_thread(post, park_id, secret, url)
         if 200 <= status < 300:
             log.info("woke %s for request %s (%s): HTTP %s", park_id, request.id, request.status, status)
         else:
@@ -122,9 +146,10 @@ def make_resumer(wake_secret_file, wake_url: str, post=post_wake):
 
 
 def create_app(*, config_path=DEFAULT_CONFIG, wake_secret_file=DEFAULT_WAKE_SECRET_FILE,
-               wake_url: str = DEFAULT_WAKE_URL, client_factory=None, post=post_wake) -> Starlette:
+               wake_url: str = DEFAULT_WAKE_URL, wake_base: str = DEFAULT_WAKE_BASE, client_factory=None,
+               post=post_wake) -> Starlette:
     """The Starlette app: ``POST /aap/events`` only. Configuration is read once, at start."""
-    receiver = build_receiver(load_config(config_path), make_resumer(wake_secret_file, wake_url, post),
+    receiver = build_receiver(load_config(config_path), make_resumer(wake_secret_file, wake_url, post, wake_base),
                               client_factory)
     app = Starlette(routes=[Route(EVENTS_PATH, receiver.asgi(), methods=["POST"])])
     app.state.receiver = receiver

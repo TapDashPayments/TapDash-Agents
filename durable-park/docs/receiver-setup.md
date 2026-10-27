@@ -14,6 +14,8 @@ withHuman (request.resolved, Standard-Webhooks signed)
        verifies the signature, answers 204, reads the request with the instance credential,
        context.resume = {"framework": "hermes", "park_id": ..., "session_key": ...}
   -> POST http://127.0.0.1:8644/webhooks/durable-park-wake        (Hermes webhook route, X-Hub-Signature-256)
+     (a person's call, from the profile in the session key "agent:<profile>:...", goes to
+      http://127.0.0.1:8644/p/<profile>/webhooks/durable-park-wake-<profile> instead; see architecture.md, "One copy per person")
   -> durable-park plugin, pre_gateway_dispatch: re-reads the decision from withHuman, updates the ledger,
      injects the APPROVED / DENIED / ... text into the original chat. The wake never reaches the agent.
 ```

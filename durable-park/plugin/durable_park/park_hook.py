@@ -394,7 +394,15 @@ def make_pre_tool_call(ledger: Ledger, gate_factory: Callable[[], Any], form_che
                 return _block(UNREACHABLE_MESSAGE.format(tool=tool))
 
             # Step 7: ask withHuman once.
-            gate = gate_factory()
+            try:
+                gate = gate_factory()
+            except Exception:
+                # The key file cannot be read or used (missing, empty, not text). withHuman cannot be asked, which
+                # is what the breaker counts: after its threshold it opens and the sweep alerts. The call is still
+                # refused (step 11 below).
+                if breaker is not None:
+                    breaker.record_failure()
+                raise
             verdict = gate.check(build_call(row), can_pause=True)
 
             # Step 8: instant approval, already consumed by the SDK: record it, then let the tool run.
