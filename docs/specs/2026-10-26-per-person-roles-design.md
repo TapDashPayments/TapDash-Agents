@@ -126,12 +126,14 @@ Everything else in this design is the same for both. The plan picks one after th
 
 ### 6.2 withHuman
 
-- Agents and keys as in section 4. **Each person's key is used in two places, and both must hold the same key:**
-  durable-park's key file (for its approval questions) and the profile's `DURABLE_PARK_WH_TOKEN` in its `.env`
-  (the agent's `wh` gateway connection reads it: `Authorization: Bearer ${DURABLE_PARK_WH_TOKEN}` in `config.yaml`).
-  If they differ, the park and the real call come from different people and the bridge refuses every approved call.
-  Key files and `.env` files are owned by `hermes` with mode 600 (the plugin runs as `hermes`, like
-  `instance_token` today); nothing prints them. Provisioner tokens are root-only.
+- Agents and keys as in section 4. **Each person's key lives in one place:** the key file
+  `/etc/durable-park/instances/<profile>.token`, owner `root`, group `hermes`, mode 640 (exactly like
+  `/etc/durable-park/instance_token` today). Both users of the key read that one file: durable-park (its
+  `token_file` setting) and the agent's `wh` gateway connection, which gets `DURABLE_PARK_WH_TOKEN` from Hermes's
+  secrets command when the profile starts (today: `/opt/durable-park/libexec/hermes-secrets`, which reads
+  `instance_token`; each person's profile runs the same helper with its profile name, so it reads that person's
+  file). The key is never copied into `config.yaml` or `.env`, as today. Nothing prints keys. Provisioner tokens
+  and the withHuman admin key `people.sh` uses are root-only.
 - **Ops and Admin grants:** what `proto-agents` has today (several servers are granted as "all tools", which also
   covers future tools).
 - **Viewer read list (new, written by hand per server):** today's rules have no clean read lists. QuickBooks reads
@@ -170,8 +172,8 @@ Everything else in this design is the same for both. The plan picks one after th
 
 - Each person's profile is created **blank** from a template (never cloned: cloning copies keys). The template
   sets today's lockdown, the plugin set, `plugins.entries.durable-park.settings.token_file` (an existing
-  durable-park setting) pointing at that person's key file, and the person's `DURABLE_PARK_WH_TOKEN` in the
-  profile's `.env`. Key files follow one naming rule: `/etc/durable-park/instances/<profile>.token` (the default
+  durable-park setting) pointing at that person's key file, and `secrets.command.command` =
+  `/opt/durable-park/libexec/hermes-secrets <profile>`. Key files follow one naming rule: `/etc/durable-park/instances/<profile>.token` (the default
   profile keeps `/etc/durable-park/instance_token`).
 - `not-set-up`: same lockdown and plugin, no tools, and a short persona that answers "you're not set up yet, ask an
   admin". It still runs the model (a small cost) and its reply depends on the model following the persona; it can
@@ -185,7 +187,7 @@ Everything else in this design is the same for both. The plan picks one after th
 | Files | **Shared:** the ledger (one fixed path for every profile). **Per profile:** the status files that sit next to the ledger today (load proof, tool policy load, breaker, lift status, form check), so one profile's copy never overwrites another's. The sweep reads every profile's status files. |
 | Who asked | Already there: ledger rows store `profile` and `user_id` (`ledger.py:55-56`, filled from `HERMES_SESSION_PROFILE` in `park_hook.py:157-163`). Use them. |
 | Decisions and wakes | Wakes arrive at the default profile's copy. It reads the decision with the key of the **row's** profile, found by the naming rule (`/etc/durable-park/instances/<profile>.token`), and the call resumes in that profile's session. The sweep and the start check use the same rule. A missing key file: the row is not resumed and the sweep alerts. |
-| Start checks | `tool_policy_check.sh` checks every profile, `not-set-up` included, and refuses to start when a profile has no key file, when its key file and its `DURABLE_PARK_WH_TOKEN` differ, or when two profiles share a key (key files and `.env` keys both counted). |
+| Start checks | `tool_policy_check.sh` checks every profile, `not-set-up` included. A profile with tools but no key file, a profile whose secrets command does not name itself, or two profiles sharing a key: the check fails, the gateway still starts (so alerts keep working, as today) but **every** copy of durable-park refuses every tool call, and the sweep's Teams alert names the profile. `not-set-up` needs no key: the check requires it to have no tools at all. |
 
 ### 6.5 New admin command `durable-park/deploy/people.sh` (run by an admin with `sudo`)
 
@@ -194,7 +196,7 @@ Hermes's files as the `hermes` user.
 
 | Command | What it does |
 |---|---|
-| `people.sh add <name> <teams-user-id> <role>` | Creates the person's withHuman key (written straight to both places: the key file and the profile's `.env`, owned by `hermes`, mode 600; never printed), the blank profile from the template, the route and the allowlist entry. Restarts the gateway only when no ledger row is `parked`, `approved` or `executing`: it waits up to 10 minutes, saying so; on time-out it undoes everything and exits with an error. |
+| `people.sh add <name> <teams-user-id> <role>` | Creates the person's withHuman key (written straight to its key file, root:hermes 640, never printed), the blank profile from the template, the route and the allowlist entry. Restarts the gateway only when no ledger row is `parked`, `approved` or `executing`: it waits up to 10 minutes, saying so; on time-out it undoes everything and exits with an error. |
 | `people.sh move <name> <role>` | Refused while that person has a row `parked`, `approved` or `executing` (the old key must finish them). Then: new key under the new role, written to both places, old key disabled, and a gateway restart under the same rule as `add` (the gateway connection reads its key only when it connects). Until the restart the person's calls are refused (their old key is disabled), with a Teams alert. |
 | `people.sh remove <name>` | Same refusal while rows are active. Then: key disabled, route and allowlist entry removed, gateway restart under the same rule as `add`, chat history kept for the retention period. |
 | `people.sh sync-role <role>` | Option P only: re-copies the role's tool list to every person in that role. |
@@ -206,7 +208,7 @@ Every step is checked; on any failure it undoes what it did, says what failed, a
 
 | Problem | Result |
 |---|---|
-| A profile has no key file, its key file and `.env` key differ, or two profiles share a key | Gateway does not start; Teams alert names the profile. |
+| A profile with tools has no key file, its secrets command names another profile, or two profiles share a key | The gateway starts but every tool call is refused in every profile; Teams alert names the profile. |
 | A person's key cannot be read at run time | Their tool calls are refused; Teams alert. |
 | An approved call shows up from a different person | The bridge sends it to a person; nothing runs on someone else's approval. |
 | Not on the allowlist | Refused by Hermes. |
@@ -226,6 +228,9 @@ Every step is checked; on any failure it undoes what it did, says what failed, a
 4. What does a real Teams user ID look like, and does a route with `user_id` + `guild_id` match it?
 5. Park → approve → run once in a routed profile, result in that person's chat.
 6. Option P only: does withHuman accept `--` in an agent slug?
+7. Does each routed profile's copy of durable-park load when the gateway starts, or only on that profile's first
+   message? (Decides what the start check waits for.)
+8. How does a routed profile get the AI model's key without also getting the Teams and Telegram bot keys?
 
 **Acceptance (sandbox accounts only):**
 - Viewer: one lookup **per server** runs without asking (both decision steps pass); a change is refused without
