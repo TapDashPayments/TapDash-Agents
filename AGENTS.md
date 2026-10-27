@@ -59,3 +59,12 @@ When in doubt, fail closed (block, or ask a person). Never auto-approve.
 - `cd durable-park && .venv/bin/pytest -q -W error` must pass. Write the failing test first.
 - Unit tests never reach the network and never read real credentials (`tests/conftest.py` enforces both).
   Live checks go in `tests/live/` and run only on the VM with `DURABLE_PARK_LIVE=1`.
+
+## Rule 5: issues live on GitHub
+
+Create every issue on GitHub. Linear copies it by itself (the copy lands in Triage with no priority and no project).
+
+- **Never create an issue in Linear.** A Linear-made issue plus a GitHub one is a duplicate, and linking them is messy.
+- After the copy appears, set its project and priority in Linear. GitHub labels do not set priority.
+- **Do not write Linear ids (like `TAP2-12`) in pull request titles or descriptions, branch names or commit messages.** Linear links the pull request and moves that issue to Done when the pull request merges.
+- In docs and pull requests, say "GitHub issue 89", and link it. A bare `#89` typed inside Linear can link to the wrong repository.

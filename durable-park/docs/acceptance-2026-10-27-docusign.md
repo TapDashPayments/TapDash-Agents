@@ -2,7 +2,7 @@
 
 **Result: PARTLY DONE.** The agent can now see all the DocuSign tools it needs, and the first job (list templates)
 works. Jobs 2 to 5 (send, status, download, void) were **not run**. Yaakov chose to do them later; they are tracked in
-Linear as [TAP2-79](https://linear.app/tapdash/issue/TAP2-79) (High). Nothing below says "works" unless it was checked live.
+[GitHub issue 91](https://github.com/TapDashPayments/TapDash-Agents/issues/91) (High). Nothing below says "works" unless it was checked live.
 
 ```mermaid
 flowchart LR
@@ -36,12 +36,12 @@ From the tool list withHuman fetched at 12:28 UTC on 2026-10-27 (42 tools). Thes
 - **`createEnvelopeFromTemplate` takes only an `accountId`.** It cannot carry recipients or fields, and DocuSign marks it read-only. The agent may pick it because its description says "primary tool", so the send test must steer the bot to `createEnvelope`.
 - **Void:** `updateEnvelope` accepts `status: "voided"` plus `voidedReason`. There is no separate void tool.
 - **Download a signed document: no tool exists.** `listEnvelopeDocuments` only lists documents. Tracked in
-  [TAP2-182](https://linear.app/tapdash/issue/TAP2-182) (Medium).
+  [GitHub issue 92](https://github.com/TapDashPayments/TapDash-Agents/issues/92) (Medium).
 - **The form check does not cover 4 of the 6 granted writes.** It covers `createEnvelope` and `updateEnvelope` only. The other four
   (`createEnvelopeFromTemplate`, `updateEnvelopeRecipients`, `updateEnvelopeTabs`, `sendReminder`) are still asked about, but their
-  arguments are not checked first. Tracked in [TAP2-183](https://linear.app/tapdash/issue/TAP2-183) (Low, needs a yes or no from Yaakov).
+  arguments are not checked first. Tracked in [GitHub issue 89](https://github.com/TapDashPayments/TapDash-Agents/issues/89) (High). On 2026-10-27 Yaakov widened it to every write tool without the check: these 4, plus 8 Supabase and 35 QuickBooks tools.
 
-## Not run (still to do, TAP2-79)
+## Not run (still to do, GitHub issue 91)
 
 | Job | Why not run | What it needs |
 | --- | --- | --- |
@@ -50,7 +50,7 @@ From the tool list withHuman fetched at 12:28 UTC on 2026-10-27 (42 tools). Thes
 | Sign | Needs job 2 | Sign from the email |
 | 3. Status lookup | Needs job 2 | No approval expected (read) |
 | 5. Void | Needs a second sent envelope | One approval expected |
-| 4. Download signed document | No tool | See TAP2-182 |
+| 4. Download signed document | No tool | See GitHub issue 92 |
 
 ## Docs changed with this record
 
