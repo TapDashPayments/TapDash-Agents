@@ -607,7 +607,7 @@ an approved park is not asked about a second time.
 | Secret | `/etc/durable-park/bridge_secret` (0600 root:root: the bot cannot read it). systemd reads it as root when the service starts and hands the bridge a private copy (`LoadCredential`, `--secret-file %d/bridge_secret`) |
 | Org key | `/etc/durable-park/audit_key` (`--key-file %d/audit_key`, env `DURABLE_PARK_WH_KEY_FILE`; the file is 0640 root:hermes because the plugin reads it too, the bridge reads systemd's private copy made when it starts, so a rotation needs `sudo systemctl restart durable-park-bridge`; the bridge re-reads that copy on every call), never logged. Permissions `audit.read`, `request.read`, `request.read.unrouted` and nothing else: it can read requests and cannot approve, deny or read rules or members. Missing or too weak: every delivery gets `human` ([runbook](runbook.md#the-gateway-bridge)). API base `--api-base` (env `DURABLE_PARK_WH_API_BASE`, default `https://app.withhuman.ai/api/v1`) |
 | State | None. No ledger (the old `--ledger` option, `DURABLE_PARK_LEDGER` and `bridge_deliveries.db` are gone; the old file can be deleted once the new bridge is live) |
-| Other options | `--secret-file`, `--systemd-socket` (serve on the listening socket systemd passes as fd 3; it exits at once when systemd passes none; it cannot be combined with `--host` or `--port`), `--host 127.0.0.1` and `--port 8791` (only when run by hand, without `--systemd-socket`), `--expected-agent proto-agents` (env `DURABLE_PARK_BRIDGE_SECRET_FILE`, `DURABLE_PARK_EXPECTED_AGENT`). Budget: 3.5 s for the two withHuman lists (withHuman's webhook block gives up at 5 s) |
+| Other options | `--secret-file`, `--systemd-socket` (serve on the listening socket systemd passes as fd 3; it exits at once when systemd passes none; it cannot be combined with `--host` or `--port`), `--host 127.0.0.1` and `--port 8791` (only when run by hand, without `--systemd-socket`), `--expected-agents proto-agents[,ops-admin,ops-ops]` (a comma list of the agents it trusts; env `DURABLE_PARK_EXPECTED_AGENTS`; the unit sets `Environment=DURABLE_PARK_EXPECTED_AGENTS=proto-agents` and a systemd drop-in changes it, see the [runbook](runbook.md#the-gateway-bridge); the Viewer `ops-viewer`, an empty list and a badly written name are refused at start; the old `--expected-agent` and `DURABLE_PARK_EXPECTED_AGENT` still work for one agent; env `DURABLE_PARK_BRIDGE_SECRET_FILE` names the secret file). Budget: 3.5 s for the two withHuman lists (withHuman's webhook block gives up at 5 s) |
 | Health check | `deploy/bridge_check.py` (root-owned copy in `/opt/durable-park/deploy/`): `sudo python3 -I /opt/durable-park/deploy/bridge_check.py`; `configure_hermes.sh` runs it after the 401 gate and stops if it fails |
 
 Signature (confirmed against withHuman's open-source repo `internal/webhookdelivery`, and its webhook-endpoints
@@ -619,8 +619,8 @@ delivery (so the block falls back to a human).
 Decision, for a delivery with a valid signature (the rule itself is `bridge/verify.py`, a pure function; the full
 rule is in [architecture](architecture.md#the-bridges-decision-rule)):
 
-1. The body must be `type: request_approval_block.webhook`, not `preview: true`, `agent.slug` must equal the
-   expected agent (`proto-agents`), and `request.id` (the gateway request's own id) must be a non-empty string;
+1. The body must be `type: request_approval_block.webhook`, not `preview: true`, `agent.slug` must be one of
+   the trusted agents (`proto-agents` today; see `--expected-agents` above), and `request.id` (the gateway request's own id) must be a non-empty string;
    otherwise `human`.
 2. The Hermes name is built the way Hermes registers MCP tools (`hermes_tool_name`, now in `bridge/verify.py`):
    `mcp__wh__<server>__<tool>` with every character outside `[A-Za-z0-9_]` turned into `_` (so `create-bill`
@@ -628,7 +628,7 @@ rule is in [architecture](architecture.md#the-bridges-decision-rule)):
    digested after `ledger.normalize_args` (top-level `withhuman_context` dropped, `withhuman_scope` defaulted to
    `"default"`, whole-number floats such as `2.0` treated as `2`), exactly as at park time.
 3. The bridge asks withHuman (`GET /api/v1/requests?agent_slug=proto-agents&q=<name>&limit=...`, newest first)
-   for the park requests of that Hermes name. It approves only if exactly one is `approved`, on server
+   for the park requests of that Hermes name. It approves only if exactly one is `approved`, made by the same person as the gateway call (same `agent_instance_id`, read from withHuman's own record of the gateway call, never from the webhook body), on server
    `park:<slug>`, **consumed** (`consumption.consumed_at`) within the last 120 s (withHuman refuses to consume
    an expired approval, so the bridge does not read the approval's expiry),
    not truncated, with the same argument digest. It then lists the gateway requests of that tool: any other

@@ -4,10 +4,11 @@ When the model runs an approved parked call (``parked_action_execute``), the cal
 withHuman MCP gateway. The gateway's approval pipeline POSTs a signed ``request_approval_block.webhook``
 here and asks what to do with it. We answer:
 
-* ``approve`` exactly once, when the delivery is a live one for the configured agent and withHuman itself
-  holds one approved, consumed park request for the same Hermes tool name and exact same arguments that no
-  other gateway request has used yet (the rule is ``bridge.verify.decide``; the questions go to withHuman
-  through ``bridge.whapi.RequestLister``);
+* ``approve`` exactly once, when the delivery is a live one for one of the configured agents and withHuman
+  itself holds one approved, consumed park request, made by the same person (the same withHuman agent
+  instance), for the same Hermes tool name and exact same arguments that no other gateway request has used
+  yet (the rule is ``bridge.verify.decide``; the questions go to withHuman through ``bridge.whapi.RequestLister``).
+  The person is read from withHuman's own record of the gateway request, never from the delivery;
 * ``human`` for everything else, including every error.
 
 The bridge keeps no state and never opens the ledger (a file the bot's Linux user can write).
@@ -33,7 +34,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
@@ -52,6 +53,8 @@ TOLERANCE_SECONDS = 300
 MAX_BODY_BYTES = 1024 * 1024
 DEFAULT_SECRET_FILE = "/etc/durable-park/bridge_secret"
 DEFAULT_EXPECTED_AGENT = "proto-agents"
+# The Viewer role agent may only look things up: it is never trusted for an approval, whatever the settings say.
+NEVER_TRUSTED_AGENTS = frozenset({"ops-viewer"})
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8791
 ROUTE = "/wh/bridge"
@@ -106,10 +109,26 @@ def _clean(value: Any, limit: int = 80) -> str:
     return _UNSAFE_LOG_CHARS.sub("?", text)[:limit] or "-"
 
 
+def clean_agent_list(agents: Iterable[str]) -> tuple[str, ...]:
+    """The trusted agents, each once, in order; ValueError (saying what) for an empty list, an empty or
+    whitespace-holding name, or an agent that is never trusted (the Viewer)."""
+    seen: list[str] = []
+    for name in agents:
+        if not isinstance(name, str) or not name or name != name.strip() or any(c.isspace() for c in name):
+            raise ValueError(f"expected agents: {name!r} is not a plain agent name")
+        if name in NEVER_TRUSTED_AGENTS:
+            raise ValueError(f"expected agents: {name} may only look things up and is never trusted")
+        if name not in seen:
+            seen.append(name)
+    if not seen:
+        raise ValueError("expected agents: the list is empty")
+    return tuple(seen)
+
+
 class Bridge:
-    def __init__(self, expected_agent: str, lister: Any, clock: Callable[[], float] = time.time,
+    def __init__(self, expected_agents: Iterable[str], lister: Any, clock: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic):
-        self.expected_agent = expected_agent
+        self.expected_agents = frozenset(clean_agent_list(expected_agents))
         self.lister = lister
         self.clock = clock
         self.monotonic = monotonic
@@ -152,7 +171,7 @@ class Bridge:
         if not isinstance(arguments, dict):
             return "human", None, "arguments-not-object"
         slug = agent.get("slug")
-        if not isinstance(slug, str) or slug != self.expected_agent:
+        if not isinstance(slug, str) or slug not in self.expected_agents:
             return "human", None, "agent"
         if not isinstance(server, str) or not server or not isinstance(tool, str) or not tool:
             return "human", None, "malformed"
@@ -164,7 +183,6 @@ class Bridge:
         request_id = request.get("id")
         if not isinstance(request_id, str) or not request_id:  # real deliveries always carry it; no id, no verdict
             return "human", None, "no-request-id"
-        call = GatewayCall(request_id, server, tool, arguments, slug)
         park_tool, _ = expected_park(server, tool)
         deadline = self.monotonic() + LIST_BUDGET_SECONDS
         try:
@@ -174,6 +192,15 @@ class Bridge:
             neighbours = self.lister.list(agent_slug=slug, q=None, limit=NEIGHBOUR_LIST_LIMIT, deadline=deadline)
         except ListError as exc:  # withHuman slow, unreachable or unhappy: a person decides
             return "human", None, exc.code
+        # The person who asked is the withHuman instance on withHuman's own record of this gateway request (the
+        # delivery carries only the agent). Not listed, or listed without an instance: a person decides.
+        own = next((o for o in neighbours if isinstance(o, dict) and o.get("id") == request_id), None)
+        if own is None:
+            return "human", None, "gateway-request-not-listed"
+        person = own.get("agent_instance_id")
+        if not isinstance(person, str) or not person:
+            return "human", None, "no-person"
+        call = GatewayCall(request_id, server, tool, arguments, slug, person)
         now = datetime.fromtimestamp(self.clock(), timezone.utc)
         verdict = decide(call, parks, neighbours, now)
         if verdict.approve:
@@ -195,11 +222,11 @@ async def _read_body(request: Request) -> bytes | None:
     return b"".join(chunks)
 
 
-def create_app(*, secret: str | None, lister: Any, expected_agent: str = DEFAULT_EXPECTED_AGENT,
+def create_app(*, secret: str | None, lister: Any, expected_agents: Iterable[str] = (DEFAULT_EXPECTED_AGENT,),
                clock: Callable[[], float] = time.time,
                monotonic: Callable[[], float] = time.monotonic) -> Starlette:
     """Build the ASGI app. With ``secret=None`` it still starts but answers 401 to everything."""
-    bridge = Bridge(expected_agent, lister, clock, monotonic)
+    bridge = Bridge(expected_agents, lister, clock, monotonic)
 
     async def endpoint(request: Request) -> Response:
         raw = await _read_body(request)  # raw bytes first: the signature covers them exactly
@@ -227,9 +254,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         default=os.environ.get("DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET") == "1",
                         help="serve on the listening socket systemd passes as fd 3 (socket activation) instead of "
                              "binding --host/--port (env DURABLE_PARK_BRIDGE_SYSTEMD_SOCKET=1)")
-    parser.add_argument("--expected-agent",
-                        default=os.environ.get("DURABLE_PARK_EXPECTED_AGENT", DEFAULT_EXPECTED_AGENT),
-                        help="agent slug a delivery must carry to be approvable")
+    parser.add_argument("--expected-agents", default=None,
+                        help="comma-separated agent slugs a delivery may carry to be approvable, e.g. "
+                             "proto-agents,ops-admin,ops-ops (env DURABLE_PARK_EXPECTED_AGENTS); never ops-viewer")
+    parser.add_argument("--expected-agent", default=None,
+                        help="the same for one agent (the old flag; env DURABLE_PARK_EXPECTED_AGENT)")
     parser.add_argument("--api-base", default=os.environ.get("DURABLE_PARK_WH_API_BASE", DEFAULT_API_BASE),
                         help="withHuman API base URL, https only (env DURABLE_PARK_WH_API_BASE)")
     parser.add_argument("--key-file", default=os.environ.get("DURABLE_PARK_WH_KEY_FILE", DEFAULT_KEY_FILE),
@@ -237,6 +266,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "systemd unit it is systemd's copy made at service start, so a rotated key needs "
                              "a service restart) (env DURABLE_PARK_WH_KEY_FILE)")
     args = parser.parse_args(argv)
+    if args.expected_agents is not None and args.expected_agent is not None:
+        parser.error("--expected-agents and --expected-agent cannot be combined")
+    # flags beat the environment; the list beats the old single name; the default is the one original agent
+    if args.expected_agents is not None:
+        listed = args.expected_agents
+    elif args.expected_agent is not None:
+        listed = args.expected_agent
+    else:
+        # "set" means set, even to "": an emptied list must stop the bridge, never fall back to the default
+        listed = DEFAULT_EXPECTED_AGENT
+        for name in ("DURABLE_PARK_EXPECTED_AGENTS", "DURABLE_PARK_EXPECTED_AGENT"):
+            if os.environ.get(name) is not None:
+                listed = os.environ[name]
+                break
+    try:
+        args.expected_agents = clean_agent_list(listed.split(","))
+    except ValueError as exc:
+        parser.error(str(exc))
+    del args.expected_agent
     if args.systemd_socket:
         if args.host is not None or args.port is not None:
             parser.error("--systemd-socket cannot be combined with --host or --port")
@@ -263,11 +311,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     fd = systemd_listen_fd(os.environ, os.getpid()) if args.systemd_socket else None
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    log.info("bridge trusts agents: %s", ", ".join(args.expected_agents))  # so a change is visible in the journal
     try:
         lister = RequestLister(args.api_base, args.key_file)
     except ListError:  # never echo the URL (it could carry credentials) or read the key
         raise SystemExit("bridge: --api-base (env DURABLE_PARK_WH_API_BASE) must be an https:// URL") from None
-    app = create_app(secret=load_secret(args.secret_file), lister=lister, expected_agent=args.expected_agent)
+    app = create_app(secret=load_secret(args.secret_file), lister=lister, expected_agents=args.expected_agents)
     if fd is None:
         uvicorn.run(app, host=args.host, port=args.port, log_level="info", access_log=False)
         return

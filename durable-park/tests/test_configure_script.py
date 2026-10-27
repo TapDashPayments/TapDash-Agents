@@ -139,7 +139,7 @@ def test_bridge_unit_takes_the_socket_from_systemd_and_reads_secrets_as_credenti
     service = _unit_sections(BRIDGE_SERVICE)["Service"]
     exec_start = [line for line in service if line.startswith("ExecStart=")]
     assert exec_start == ["ExecStart=/opt/durable-park/bin/python -B -m bridge.app --systemd-socket "
-                          "--secret-file %d/bridge_secret --key-file %d/audit_key --expected-agent proto-agents"]
+                          "--secret-file %d/bridge_secret --key-file %d/audit_key"]
     assert "--host" not in exec_start[0] and "--port" not in exec_start[0]  # a usage error with --systemd-socket
     assert "/etc/durable-park" not in exec_start[0]  # the files are read as root by systemd, not by the bridge
     assert "LoadCredential=bridge_secret:/etc/durable-park/bridge_secret" in service

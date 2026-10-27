@@ -40,9 +40,10 @@ Group=dpbridge
 WorkingDirectory=/opt/durable-park
 Environment=PYTHONPATH=/opt/durable-park/plugin:/opt/durable-park
 Environment=PYTHONUNBUFFERED=1
+Environment=DURABLE_PARK_EXPECTED_AGENTS=proto-agents
 LoadCredential=bridge_secret:/etc/durable-park/bridge_secret
 LoadCredential=audit_key:/etc/durable-park/audit_key
-ExecStart=/opt/durable-park/bin/python -B -m bridge.app --systemd-socket --secret-file %d/bridge_secret --key-file %d/audit_key --expected-agent proto-agents
+ExecStart=/opt/durable-park/bin/python -B -m bridge.app --systemd-socket --secret-file %d/bridge_secret --key-file %d/audit_key
 Restart=always
 RestartSec=1
 
