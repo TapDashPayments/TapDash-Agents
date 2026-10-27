@@ -1,6 +1,9 @@
 # Spike record: per-person roles (Task 1), 2026-10-27
 
-**Result: STOPPED EARLY on purpose, then fully cleaned up.** Test VM `proto-agents`, QuickBooks sandbox only.
+**Result: first run stopped early on purpose; one re-run (11:12 to 11:25 PM ET) got the two missing answers. Both fully cleaned up.** Test VM `proto-agents`, QuickBooks sandbox only.
+
+**Verdict after the re-run: `OPTION = R`, but `INJECT_CROSS_PROFILE = no`, which is the plan's own example of a blocker. By the plan's STOP rule, stop before Tasks 3 and 4 until the wake design is changed. See "Re-run" and "Does any answer block the design?".**
+
 Linear [TAP2-27](https://linear.app/tapdash/issue/TAP2-27). Plan: [docs/plans/2026-10-26-per-person-roles.md](../../docs/plans/2026-10-26-per-person-roles.md), Task 1.
 Spec: [docs/specs/2026-10-26-per-person-roles-design.md](../../docs/specs/2026-10-26-per-person-roles-design.md), section 8.
 
@@ -14,8 +17,14 @@ But the bot never got the answer back: the part that picks up approvals still us
 said "no, that is not yours" (403). That is exactly the gap plan Task 4 is meant to fix. Yaakov chose to stop
 there (option "B"), so the write test was not done. Everything was then removed. Nothing ran in QuickBooks.
 
-So the test answered some of the plan's questions, not all. Two answers are still missing, and one of them is the
-plan's own example of a possible blocker. The design is **not cleared yet** (see "Does any answer block the design?").
+So the first run answered some of the plan's questions, not all. Yaakov approved one re-run ("A", 11:08 PM) to get
+the two missing answers. It got them:
+
+1. The withHuman request made when the tool really runs (the "gateway" request) **does** carry the test instance.
+   So each person's own key shows up on both records. That means **option R** (one withHuman agent per role).
+2. The main profile's wake **cannot** post a result back into another profile's chat. Hermes refuses it on purpose:
+   `session ... belongs to profile spike, not the plugin's profile default`. This is the plan's own example of a
+   blocker, so we **stop** here until the wake design is changed (Yaakov decides how).
 
 ## What was set up (all removed again, see "Clean up")
 
@@ -65,15 +74,47 @@ Left on purpose (not live): withHuman keeps archived agents and old requests (`6
 run, `098c70f5` cancelled) in its history; the two cancelled ledger rows stay until the sweep's 30-day cleanup;
 Hermes left its own 8-byte marker `~/.hermes/profiles/.deleted/spike`.
 
+## Re-run (11:12 to 11:25 PM ET, 03:12 to 03:25Z)
+
+Yaakov said "A" at 11:08 PM: re-run once, with one manual ledger write (mark his approved lookup `approved` by
+hand, after reading his approval with the test key).
+
+Setup was the same as the first run, with one change: `spike-a` was archived and withHuman will not bring an
+archived agent back (`PATCH /agents/spike-a {status: active}` -> `409 agent_archived: Agent is archived.`), so a
+fresh agent **`spike-b`** was made, with instances `spike-b-1` (`2c1d5a90-...`, its key in the spike key file) and
+`spike-b-2` (`ff028d99-...`), and the same two-tool grant. Same blank profile, same config, same helper, same route,
+`hermes_tool_policy.py apply` + `check` OK. Restart at 11:12 PM with 0 active rows; port check printed 1. Spike
+profile log: `durable-park loaded` and `registered 2 tool(s)` before any message.
+
+| Time (ET) | What |
+|---|---|
+| 11:14:06 PM | His "Look up QuickBooks customer 1" reached the spike profile (session `agent:spike:teams:dm:...`) |
+| 11:14:16 PM | Parked: `P-9360E171`, `profile=spike`. withHuman request `d25be236-...`: agent `spike-b`, instance `spike-b-1` (`2c1d5a90-...`) |
+| 11:15:15 PM | He approved it in the withHuman app. Read with the **spike** key: `approved` (decision expires 11:20:15) |
+| 11:15:38 PM | The one manual ledger write: `Ledger.transition("parked" -> "approved")` on `P-9360E171` (durable-park's own call), `decided_by` noting it was marked by hand |
+| 11:15:44 PM | The default profile's wake read the row (now `approved`) and tried to post into his chat. **Hermes refused:** `Plugin message injection refused: plugin=durable-park session=agent:spike:teams:dm:... belongs to profile spike, not the plugin's profile default`. The plugin logged `gateway did not accept the message for P-9360E171; left unnotified` |
+| 11:17:16 PM | To still reach the gateway step, he sent the bot "It's approved. Run parked action P-9360E171 now." The spike profile ran `parked_action_execute` in its own session |
+| 11:17:21 PM | The approval was consumed (`POST .../requests/d25be236-.../consume` -> 200) and the gateway call started. withHuman made the **gateway request `f5698ed7-...`** (tool `get_customer`): agent `spike-b`, instance **`spike-b-1` (`2c1d5a90-...`)**, the same instance as the park request. It asked for a second approval with a 5-minute deadline |
+| 11:22:21 PM | Nobody tapped the second approval in time. withHuman marked `f5698ed7` `expired` (by `system`). Hermes's MCP call hit its own 300 s timeout at the same second, so the row ended **`unknown`** with note `MCP call timed out after 300.0s`. Per the rule, the call was **not retried**. Nothing ran in QuickBooks (the gateway request expired before any approval) |
+| 11:22:24 PM | The bot then asked again on its own: a new park `P-D57A9783` (its withHuman request `92ea5433-...` was left to expire). It was cancelled by hand as part of cleanup (`parked -> cancelled`, note: nothing ran) |
+
+Clean up (11:23 to 11:25 PM ET): config put back byte for byte from the copy taken before the route; 0 active rows;
+restart; port check 1; Teams connected; `hermes profile delete -y spike` (gateway log: `Profile 'spike' unserved`,
+same PID); key file shredded, `/etc/durable-park/instances/`, helper, `/root/.spike-ids.json`, `/home/hermes/.spike/`
+and the config copy deleted; grant set to mode `none` (revision 2), both `spike-b` instances `disabled`, `spike-b`
+archived (0 live instances); `hermes_pin.sh check` as `hermes` in a login shell: all OK (v0.22.3); no `parked`,
+`approved` or `executing` rows. Not checked with a real Teams message after cleanup. Ledger rows `P-9360E171`
+(`unknown`) and `P-D57A9783` (`cancelled`) stay until the 30-day cleanup.
+
 ## Decisions for later tasks
 
 | Key | Answer |
 |---|---|
-| `OPTION` | **Not decided yet: P by the plan's rule until the gateway half is checked.** The plan sets `R` only if *both* withHuman records carry the right instance, else `P`. The park request did; the gateway request was never reached, so spec 8 item 1 (the question that decides R or P) is still open. R is still the likely answer. If Task 3 is built for R before this is checked, it stays safe (a gateway record with no instance goes to a person and never runs: `test_gateway_record_missing_from_listing_goes_to_a_person`), but it may have to be redone. Yaakov decides: re-run first (recommended, see "How to get the missing answers") or build R and accept the rework risk |
-| `INSTANCE_ON_BOTH_RECORDS` | **Park request: yes** (both spike requests, `611043a2` and `098c70f5`, are park requests and show `agent_instance_id` = `spike-a-1`). **Gateway request: not tested** (no call got past the park). No task before the live rollout (Task 8) tests it; Task 4 has no live step |
+| `OPTION` | **R** (one withHuman agent per role). Spec 8 item 1, the question that decides R or P, is answered yes by the re-run: the gateway request `f5698ed7` carried the same instance (`spike-b-1`) as the park request `d25be236`. `INJECT_CROSS_PROFILE = no` does not change R vs P: Hermes refuses the inject because of the *profile* boundary, which is the same under P. But see the STOP verdict below before building Task 3 |
+| `INSTANCE_ON_BOTH_RECORDS` | **yes**. Park requests: `611043a2` and `098c70f5` (first run, `spike-a-1`), `d25be236` (re-run, `spike-b-1`). Gateway request: `f5698ed7` (re-run, tool `get_customer`) shows agent `spike-b`, `agent_instance_id` = `spike-b-1` (`2c1d5a90-...`), from withHuman's request listing |
 | `PLUGIN_LOADS_AT_BOOT` | **yes** for the routed profile: its own log shows `durable-park loaded` 4 seconds after the restart, minutes before the first message. (There is no separate per-profile `plugin_load.json` yet; Task 4 adds `status_dir`) |
 | `SESSION_PROFILE` | **yes**: ledger rows have `profile=spike`; session key `agent:spike:teams:dm:...` |
-| `INJECT_CROSS_PROFILE` | **not tested** (the wake failed before it could resume the call). Task 4 *uses* this answer to build the wake and has no live step, so it cannot find it out itself. The plan's own example of a blocker is `INJECT_CROSS_PROFILE = no` |
+| `INJECT_CROSS_PROFILE` | **no**. With the row `approved`, the default profile's wake tried to post into the spike session and Hermes v0.22.3 refused: `belongs to profile spike, not the plugin's profile default` (`gateway/run_plugin_injection.py`, the profile check for plugin injection under multiplexing). The result did not reach his chat. It only went on because he typed a new message asking the bot to run it |
 | `DEFAULT_KEY_READS_OTHER_INSTANCE` | **no**: the main proto-agents key got `403 Forbidden` on the spike request (logged `CredentialRefused` at 10:15:25 PM ET); the spike key read the same request with `200`, `approved` |
 | `LLM_KEY_SOURCE` | The profile had **no** `auth.json` and an empty `.env`. Hermes used the **global** `~/.hermes/auth.json` (Nous login) as a read-only fallback (`hermes_cli/auth.py`: "profile first, then the global root"). The model answered (provider `nous`). The profile's secret set held only `DURABLE_PARK_WH_TOKEN`: **no** `TEAMS_*`, `TELEGRAM_*` or `BWS_*` keys |
 | `TEAMS_USER_ID_SHAPE` | Entra object ID: a 36-character lowercase GUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`), same as `TEAMS_ALLOWED_USERS`. Route `guild_id` = tenant ID, also a 36-character GUID. The route with `user_id` + `guild_id` matched. (The chat ID is a different thing: `a:` plus a long text) |
@@ -81,7 +122,21 @@ Hermes left its own 8-byte marker `~/.hermes/profiles/.deleted/spike`.
 
 ## Does any answer block the design?
 
-**No answer we got blocks it, but the design is not cleared yet.** The plan says to stop if an answer blocks the
+**Yes. After the re-run, `INJECT_CROSS_PROFILE = no`, and the plan names exactly that as a blocker. STOP before
+Tasks 3 and 4 until the wake design is changed.** `OPTION = R` is settled. The text below the line is the first
+run's verdict, kept for the record.
+
+What the blocker means: under multiplexing, a plugin may only post into sessions of its own profile. The default
+profile's wake (the one webhook route and the one sweep) can therefore never tell a routed person's session that
+an approval came in, whatever key it reads with. Task 4 planned to fix only the key (`token_file_for(row.profile)`);
+that is still needed (`DEFAULT_KEY_READS_OTHER_INSTANCE = no`) but is not enough. Some ways out, for Yaakov to pick
+(none tested): run the wake inside each routed profile (its own webhook route or sweep, so the plugin that posts is
+that profile's own); or have the wake ask the routed profile's own plugin instance to post; or, as a stopgap, tell
+the person to send any message so their own session runs `parked_action_execute` (what the re-run did by hand).
+
+---
+
+First run's verdict: **No answer we got blocks it, but the design is not cleared yet.** The plan says to stop if an answer blocks the
 design. Here is where each answer stands:
 
 - `DEFAULT_KEY_READS_OTHER_INSTANCE = no` does **not** block. It is the gap Task 4 was written for: Task 4 makes the
@@ -94,7 +149,7 @@ design. Here is where each answer stands:
 
 So Tasks 3 and 4 should not start on a guess about these two. Yaakov decides whether to re-run first.
 
-## How to get the missing answers
+## How to get the missing answers (first run's plan; done in the re-run above)
 
 One short re-run of Task 1 steps 2 to 5: the same throwaway setup and the same full cleanup, about 15 minutes, with
 Yaakov's OK and a quiet window. One change: after Yaakov approves the lookup in withHuman, the stuck ledger row is
@@ -108,6 +163,18 @@ marked `approved` by hand, after reading his approval with the spike key (one ma
 
 ## Gaps found (for Task 4 and the runbook)
 
+New from the re-run:
+
+4. The gateway's second approval has a 5-minute deadline, and Hermes's MCP call timeout is also 300 s. If the person
+   does not tap in time, the row ends `unknown` ("may have run") even though withHuman shows the request
+   `expired` and nothing ran. The executor could read the gateway request's state and record `expired` instead.
+5. A read (`get_customer`) still asks twice (park + gateway), as the plan said for writes, because the gateway's
+   rules only trust `proto-agents`. Two taps inside 5 minutes is easy to miss on a phone.
+6. After the `unknown` result the bot parked the same lookup again on its own (`P-D57A9783`). Worth a line in the
+   timeout reply telling the model not to re-ask by itself.
+
+From the first run:
+
 1. A key that withHuman **refuses** (403) leaves a row `parked` forever: the sweep re-wakes every 5 minutes, logs
    a warning, and nobody is alerted; the chat and restarts stay blocked. Task 4's check only covered a
    **missing** key file, so this PR adds a second check to plan Task 4: alert (and say what to do) when the wake
@@ -118,3 +185,4 @@ marked `approved` by hand, after reading his approval with the spike key (one ma
    (The runbook now says so.) The script itself should say "could not run hermes" instead (follow-up).
 3. The park hook's one-at-a-time rule opens a withHuman request for the second call and then cancels it, but the
    cancelled ledger row does not save that request's ID (`098c70f5` is only findable in withHuman). Not harmful (nothing runs), just good to know when reading records.
+
