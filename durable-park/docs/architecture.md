@@ -328,7 +328,8 @@ folder is the root. A person's folder is `<root>/profiles/<profile>/`.
    treats only the chat name `webhook/durable-park-wake-sarah` as a wake. The default copy treats only
    `webhook/durable-park-wake`.
 5. Sarah's copy checks that the row is Sarah's and that its key file (which must already be named `sarah.token` for the
-   copy to load) holds a key. It
+   copy to load) holds a key. The wake compares the expected and configured paths after `os.path.normpath`, so
+   redundant separators and dot components are accepted while another profile's key file is refused. It
    reads the decision from withHuman with that key and tells Sarah's chat.
 6. A wake for a row of another profile (a `sarah` row that reaches Tom's copy) is refused: one log line, nothing read,
    nothing posted, the row is left for the sweep. The same goes when the row says this copy but its session key

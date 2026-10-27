@@ -369,8 +369,9 @@ def _own_key_problem(row: ParkRow, token_file: str, own_profile: str | None,
     """Why this copy must not use its key for ``row`` (a short reason for the log), or None.
 
     The row's key file is ``keys.token_file_for(row.profile)``: for the default profile the copy's configured
-    ``token_file``, for a person ``<dir of the configured token_file>/<profile>.token``. It must be exactly the
-    ``token_file`` this copy was given, so a copy wired to another person's key never reads for this row. The
+    ``token_file``, for a person ``<dir of the configured token_file>/<profile>.token``. It must match the
+    ``token_file`` this copy was given after ``os.path.normpath`` on both, so a copy wired to another person's
+    key never reads for this row. The
     default profile's ``token_file`` must also not lie inside the instances directory (``instances_dir``, default
     ``keys.INSTANCES_DIR``; both sides ``realpath``-ed), where only people's keys live: a default copy wired to a
     person's key file would otherwise read with it. Then the file must exist and hold a key.
@@ -380,7 +381,7 @@ def _own_key_problem(row: ParkRow, token_file: str, own_profile: str | None,
         expected = keys.token_file_for(profile, default=token_file, instances_dir=str(Path(token_file).parent))
     except ValueError:
         return "the row's profile name is not valid"
-    if expected != token_file:
+    if os.path.normpath(expected) != os.path.normpath(token_file):
         return "the configured token_file is not this profile's key file"
     if profile is None and _inside(token_file, keys.INSTANCES_DIR if instances_dir is None else instances_dir):
         return "the default profile's token_file lies inside the instances directory (a person's key file)"

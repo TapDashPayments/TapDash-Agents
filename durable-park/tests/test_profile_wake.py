@@ -233,6 +233,18 @@ def test_wake_reads_decision_with_row_profile_key(env):
     assert env.injected[0][1].startswith("agent:sarah:")
 
 
+@pytest.mark.parametrize("suffix", ["//sarah.token", "/./sarah.token", "/../instances//./sarah.token"])
+def test_wake_reads_decision_with_normalized_profile_key_path(env, suffix):
+    env.key("sarah")
+    token_file = str(env.instances) + suffix
+    row = env.park("sarah")
+    env.provider.decide(row.request_id, "approved")
+    assert env.wake(row, "sarah", token_file) == SKIP
+    assert env.opened == [token_file]
+    assert env.ledger.get(row.park_id).status == "approved"
+    assert len(env.injected) == 1 and env.injected[0][1] == row.session_key
+
+
 def test_the_default_profile_reads_with_its_configured_token_file(env):
     default_file = env.tmp / "elsewhere" / "any-name"
     default_file.parent.mkdir()
@@ -244,9 +256,11 @@ def test_the_default_profile_reads_with_its_configured_token_file(env):
     assert env.ledger.get(row.park_id).status == "approved"
 
 
-def test_a_copy_whose_token_file_is_not_its_profiles_key_refuses(env, caplog):
+@pytest.mark.parametrize("suffix", ["/someone-else.token", "//./someone-else.token"])
+def test_a_copy_whose_token_file_is_not_its_profiles_key_refuses(env, caplog, suffix):
     caplog.set_level(logging.INFO, logger="durable_park")
-    other = env.key("someone-else")  # sarah's copy was wired to another person's key
+    env.key("someone-else")  # sarah's copy was wired to another person's key
+    other = str(env.instances) + suffix
     row = env.park("sarah")
     env.provider.decide(row.request_id, "approved")
     before = env.ledger.get(row.park_id)
