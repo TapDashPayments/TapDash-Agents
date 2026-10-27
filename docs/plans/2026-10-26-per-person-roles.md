@@ -38,7 +38,7 @@
 ### Task 1: Spike (spec section 8, items 1-8; nothing kept except the record)
 
 **Files:**
-- Create: `durable-park/docs/spike-2026-10-XX-per-person-roles.md`
+- Create: `durable-park/docs/spike-2026-10-27-per-person-roles.md`
 
 **Interfaces:**
 - Produces: a table **Decisions for later tasks** with exactly these keys and answers: `OPTION` (`R` or `P`), `INSTANCE_ON_BOTH_RECORDS` (yes/no: the park request and the gateway request each carry the right `agent_instance_id`), `PLUGIN_LOADS_AT_BOOT` (yes/no per routed profile), `SESSION_PROFILE` (does the ledger row get `profile=<name>` from `HERMES_SESSION_PROFILE`), `INJECT_CROSS_PROFILE` (yes/no: the default profile's wake resumes a routed profile's session), `DEFAULT_KEY_READS_OTHER_INSTANCE` (yes/no), `LLM_KEY_SOURCE` (how the routed profile got the model key, and that it got no Teams/Telegram bot keys), `TEAMS_USER_ID_SHAPE` (format only), `SLUG_SEPARATOR` (option P only).

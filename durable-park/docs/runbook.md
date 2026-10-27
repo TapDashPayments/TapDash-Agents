@@ -473,7 +473,9 @@ block is on. `<what is wrong>` says which failed:
 
 The line is said again when the problem changes and every 24 hours while it lasts. `durable-park: Hermes is back on
 the pinned v0.22.3 with updates blocked.` follows when it is fixed. If the check itself crashes, the sweep says
-`durable-park ALERT: Hermes pin check failed (...)`; run `deploy/hermes_pin.sh check` by hand.
+`durable-park ALERT: Hermes pin check failed (...)`; run `deploy/hermes_pin.sh check` by hand, as `hermes` in a
+login shell (`bash -lc 'deploy/hermes_pin.sh check'`): over plain `ssh` the `hermes` command is not on the PATH and
+the check falsely says `FAIL passive update check is on` (seen in the [per-person roles spike](spike-2026-10-27-per-person-roles.md)).
 
 ### Gateway will not start: the plugin did not load
 
