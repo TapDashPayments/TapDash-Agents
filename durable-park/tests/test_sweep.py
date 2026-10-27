@@ -43,10 +43,11 @@ class World:
         self.fail = {}
         self.n = 0
 
-    def row(self, status="parked", *, request_id="req-x", notified=False, executing_minutes_ago=None, tool=TOOL):
+    def row(self, status="parked", *, request_id="req-x", notified=False, executing_minutes_ago=None, tool=TOOL,
+            profile=None):
         self.n += 1
         row = self.ledger.park(session_key=SESSION_KEY, session_id="s", tool_call_id=f"c{self.n}", tool=tool,
-                               args={"n": self.n}, call_key=f"k{self.n}", server="wh")
+                               args={"n": self.n}, call_key=f"k{self.n}", server="wh", profile=profile)
         if request_id:
             self.ledger.set_request_id(row.park_id, f"{request_id}-{self.n}")
         path = {"parked": [], "approved": ["approved"], "denied": ["denied"], "expired": ["expired"],
@@ -92,6 +93,16 @@ class World:
 @pytest.fixture
 def world(tmp_path):
     return World(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _default_key(monkeypatch, tmp_path):
+    """The default profile's key file exists and no routed person has one (tests that need one add it): the
+    missing-key check stays silent for the old tests, and never reads the VM's real /etc/durable-park."""
+    (tmp_path / "instance_token").write_text("k\n")
+    (tmp_path / "instances").mkdir()
+    monkeypatch.setattr(sweep._keys, "DEFAULT_TOKEN_FILE", str(tmp_path / "instance_token"))
+    monkeypatch.setattr(sweep._keys, "INSTANCES_DIR", str(tmp_path / "instances"))
 
 
 @pytest.fixture(autouse=True)
@@ -324,6 +335,10 @@ def test_sweep_defaults_match_the_deployment():
     args = sweep.parse_args(["--ledger", "/x/ledger.db"])
     assert args.wake_secret_file == "/etc/durable-park/wake_secret"
     assert args.wake_url == DEFAULT_URL
+    assert args.wake_base == "http://127.0.0.1:8644"
+    assert args.status_root is None  # the ledger's directory
+    assert args.instances_dir == sweep._keys.INSTANCES_DIR
+    assert args.default_token_file == sweep._keys.DEFAULT_TOKEN_FILE
     with pytest.raises(SystemExit):
         sweep.parse_args([])  # --ledger is required
 

@@ -176,6 +176,7 @@ sudo docker ps --filter name=wh-tunnel --format '{{.Status}}'      # Up ...
 curl -s http://127.0.0.1:8644/health                               # {"status": "ok", ...}
 cat ~/.hermes/plugin-data/durable-park/formcheck_status.json       # "ok": true, recent checked_at
 cat ~/.hermes/plugin-data/durable-park/plugin_load.json            # "pid" = systemctl --user show hermes-gateway -p MainPID --value
+cat ~/.hermes/plugin-data/durable-park/profiles/*/plugin_load.json # one per person, same pid; no such folders until people exist
 hermes cron list | grep -A3 durable-park-sweep                     # last run ok
 ~/.hermes/scripts/durable_park_sweep.sh                            # prints nothing when all is well
 ```
@@ -244,11 +245,24 @@ PY
    |---|---|
    | `plugin/` (park hook, form check, wake, executor, ledger) | `systemctl --user restart hermes-gateway` (as hermes). The ledger gains two nullable columns, `user_id` and `profile`, on the first open by the gateway, the sweep or the bridge (`ALTER TABLE ... ADD COLUMN`, idempotent, existing rows get NULL and keep the approval body they were parked with). So this change needs no ledger drain beyond the rule above: a row in flight across the deploy still executes. Do not roll the code back past this change while rows hold values: older code ignores the columns, which is harmless. |
    | `plugin/durable_park/` (any file, incl. `_vendor/`) or `bridge/` | The bridge's `/opt/durable-park` copy is the **whole package**, `plugin/durable_park/` including `_vendor/` (the bridge imports `durable_park.ledger` for `args_digest` and `durable_park.gatecall` for `gateway_slug`, which run `__init__` -> `formcheck` -> `_vendor`), not single files; a missing `_vendor` crash-loops it (`ModuleNotFoundError`). Root, admin: `sudo bash deploy/configure_hermes.sh` (after the ledger check, **stop `hermes-gateway` first**: see [Before you run the configure script](#before-you-run-the-configure-script) and the [warning](#never-change-plugins-while-the-gateway-runs); the script's last step then restarts the whole `hermes` user manager, the dashboard included). It first refuses to start, changing nothing, if `bridge_secret` or `audit_key` is missing or empty ([store them first](#store-or-rotate-the-bridges-keys)). Step 4b then creates the user `dpbridge` if needed, copies both trees recursively, removes files the repo no longer has, installs the socket unit and the service unit, restarts the bridge when something changed, and **stops with the last 20 journal lines unless the bridge answers `401` to an unsigned `POST` within 10 s**, so it never goes on to restart the gateway on a dead bridge; it then runs `bridge_check.py`, and a `FAIL` stops it too. By hand, copy the tree the same way, then check `curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8791/wh/bridge` prints `401` and run [`bridge_check.py`](#health-check). The script does not restart the socket: a change to `durable-park-bridge.socket` needs `sudo systemctl restart durable-park-bridge.socket durable-park-bridge.service` (the port is free for a moment, so no row `parked`, `approved` or `executing`). The very first move from the old bridge that ran as `hermes`: [first deploy](#store-or-rotate-the-bridges-keys). Rollback of a bridge change: [below](#roll-back-a-bridge-change). |
-   | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver` |
+   | any file in `receiver/` | root, admin: copy each changed file to `/opt/durable-park/receiver/` the same way, then `sudo systemctl restart durable-park-receiver`. Per-person profiles (Task 4) changed `app.py` **and** `wake_post.py`: copy both before the restart (`app.py` now imports `wake_url_for` from `wake_post.py`, so with only one of them copied the receiver does not start) |
    | `scripts/durable_park_sweep.py` | nothing - the next cron run uses it (set `TEAMS_ALERT_WEBHOOK_URL` to also copy its alert lines to Teams as an Adaptive Card: [live settings](#live-hermes-settings-on-proto-agents); a Teams outage can delay the sweep's exit by about 10 s, the post timeout) |
    | `tracing/tapdash_langfuse/` (the patched Langfuse plugin; once it is deployed, the gateway loads it through a symlink into the live clone) | Run `bash tracing/run_tests.sh` as `hermes` first. The change is loaded at the next gateway restart **or the next plugin reload**, so follow [When the plugin changes](#when-the-plugin-changes) (hook re-review before the pull; pull with the gateway stopped) |
    | `deploy/` (units, policy, Hermes config, and the withHuman entry pipeline `deploy/withhuman/entry-pipeline.json`) | For the pipeline file: in withHuman, save it as a new entry revision and ACTIVATE it before the gateway restart that brings this code live (a save activates at once unless `activate` is false). For the rest, on proto-agents `configure_hermes.sh` re-applies the current tool policy (the v1 lockdown, re-applied 2026-10-21 03:16 UTC) and restarts the gateway: run it only when no ledger row is `parked`, `approved` or `executing`, and with the gateway stopped first ([Before you run the configure script](#before-you-run-the-configure-script), [warning](#never-change-plugins-while-the-gateway-runs), [backlog](backlog.md#before-real-books) item 12). Changing which tools are open goes through the [spec](../../docs/specs/2026-10-21-all-tools-withhuman-design.md) section 4.4, not a hand edit of `~/.hermes/config.yaml`. |
    | `deploy/tunnel/` | rebuild and restart the tunnel: see [gateway-setup.md](gateway-setup.md#build-check-run-task-2-step-3-after-the-human-step-below) |
+
+   **Per-person profiles (Task 4) are safe to deploy before any person exists.** Nothing changes live until a profile
+   with its own settings exists (Tasks 7 and 8 of the per-person plan). The default profile keeps its key file
+   (`/etc/durable-park/instance_token`), its status folder and its wake route. `plugin_load_check.sh` behaves as
+   before when the Hermes config has no `gateway.profile_routes`. When you deploy it:
+
+   1. The receiver: copy `receiver/app.py` and `receiver/wake_post.py` (the table row above), then restart it.
+   2. The plugin package: `plugin/durable_park/keys.py` is a new file and `plugin/durable_park/__init__.py` imports it.
+      The bridge runs the whole package from `/opt/durable-park/plugin/durable_park/`, so refresh that copy
+      (`configure_hermes.sh`, as in the row above) before the bridge next restarts. An old copy without `keys.py`
+      crash-loops the bridge (`ModuleNotFoundError`). A bridge that is already running is not affected until it restarts.
+   3. The gateway: restart it as in the `plugin/` row. The sweep needs nothing: the next cron run uses the new code.
+   4. Check: the [health check](#health-check), then `~/.hermes/scripts/durable_park_sweep.sh` prints nothing.
 
    Rollback: revert the code first (git checkout the previous `main`, restart the gateway with 0 active rows); never
    re-activate rev 8 while this code runs - rev 8 auto-approves every `hermes`/`mcp:` request.
@@ -452,7 +466,9 @@ it, so Hermes runs with no `pre_tool_call` hook (only the toolset lockdown is le
 stops such a gateway at start (next procedure), so this means the unit runs without the drop-in, or the proof file
 was removed. Follow [Gateway will not start: the plugin did not load](#gateway-will-not-start-the-plugin-did-not-load),
 then restart the gateway (only when no row is `parked`, `approved` or `executing`). A second line
-`durable-park: the durable-park plugin is loaded in the running gateway.` follows when it recovers.
+`durable-park: the durable-park plugin is loaded in the running gateway.` follows when it recovers. Each person's proof is
+checked the same way (their line says `(profile sarah)`), so one profile that stops loading after a later change is
+still reported.
 
 Known limit: the sweep is a Hermes cron job that runs inside the gateway, so a stopped gateway cannot alert. The
 bot going silent (Telegram, Teams) is the signal; look at `systemctl --user status hermes-gateway`.
@@ -506,6 +522,26 @@ the live gateway loads the plugin in about 2 s, well inside systemd's default 90
    `durable-park failed to load (...)`.
 4. Start it: `systemctl --user reset-failed hermes-gateway && systemctl --user start hermes-gateway`.
 
+**People (routed profiles).** Each person the gateway serves (each `profile` in `gateway.profile_routes` of
+`~/.hermes/config.yaml`) loads their own copy of the plugin in the same gateway process, a few seconds after the
+start and before any message, and writes their own proof, `profiles/<profile>/plugin_load.json`, next to the default
+proof. The check then waits (the same `DURABLE_PARK_LOAD_TIMEOUT`, default 30 s) for a proof with the gateway's pid
+for the default profile **and** for every routed profile. With no `profile_routes` it works exactly as above. The wait is 30 seconds, plus up to 5 seconds per profile in the
+worst case. The
+journal lines:
+
+| The journal says | Meaning | What to do |
+|---|---|---|
+| `durable-park plugin loaded for profile sarah (mode=asking, pid=N)` | Sarah's copy loaded. One such line per person, after the default profile's line. | Nothing. |
+| `durable-park ALERT: the plugin did not load for profile sarah in this gateway (pid N); stopping the gateway so no tool call runs unchecked` | Sarah's copy wrote no proof in time. The gateway stops, so no person runs unchecked. One line per profile without a proof. | The same steps as above, for Sarah's profile: read the journal for `Failed to load plugin`. Then look at the plugin settings in Sarah's own `config.yaml` (`~/.hermes/profiles/sarah/config.yaml`): `status_dir` must be `<ledger folder>/profiles/sarah`, because that is the folder the check looks in ([settings](#plugin-settings)). |
+| `durable-park ALERT: could not read gateway.profile_routes from the Hermes config; stopping the gateway so no profile runs unchecked` | The config mentions `profile_routes`, but the check could not read it (file unreadable, not valid YAML, or no Python with `yaml`; a file the check cannot even read counts as unreadable, never as "no people"). It fails closed: it would rather stop than guess that there are no people. | Read the file as `hermes` (`grep -n profile_routes ~/.hermes/config.yaml`) and fix it. The check uses the system Python when it has `yaml`, else Hermes's own Python from `~/.hermes/installs/*/facts.json`. |
+| `durable-park ALERT: a gateway.profile_routes entry has a profile name that is not valid; stopping the gateway so no profile runs unchecked` | A route's `profile` breaks the [name rule](architecture.md#one-copy-per-person) (lower-case letters, digits, `-` and `_`, up to 63, never `default` or `main`) or is not text. A name such as `*` is not expanded into file names; it is simply an invalid name. | Fix the name in the route. |
+
+Two environment variables change what the check reads (for tests, or when an admin must): `DURABLE_PARK_PROFILES`
+(a list of profile names separated by commas or spaces, used **instead of** reading the config) and
+`DURABLE_PARK_HERMES_CONFIG` (the config file to read, default `$HERMES_HOME/config.yaml`). The names `default` and
+`main` and repeated names are skipped.
+
 Start limit: the drop-in sets `StartLimitIntervalSec=600` and `StartLimitBurst=3` (the unit alone has no limit and
 `Restart=always`, so a gateway whose plugin cannot load would loop for ever). That applies to every cause: **3
 ordinary crashes in 10 minutes also stop the gateway**, and so do manual restarts and Hermes graceful restarts (exit
@@ -523,8 +559,76 @@ ledger (`open`, `opened_at`, `closed_at`); check the withHuman status page, the 
 network (`hermes mcp test wh`). Nothing needs restarting: it closes by itself on the first answer. A gateway
 restart while it is open keeps it open but lets the first call through at once, so the close is still recorded.
 
+**A key file that cannot be read.** The same alert comes when the key file is missing, empty or not text: each call
+that cannot even ask withHuman counts as a failure, so after 3 the breaker opens. The call is refused as before and its row is `cancelled`. Look
+at the key file before you suspect withHuman: `ls -l /etc/durable-park/instance_token`, or a person's
+`/etc/durable-park/instances/<profile>.token` (never print its content). For a person the line says
+`(profile sarah)` and the status file is `profiles/sarah/breaker_status.json`.
+
 `durable-park: withHuman answers again (since <time>); tool calls are decided normally.` follows when it closes. If
 the outage was shorter than 5 minutes, both lines may arrive together.
+
+### Per-person alerts
+
+In plain English: once people have their own profiles ([One copy per person](architecture.md#one-copy-per-person)),
+the sweep also watches each person's folder and each person's wakes. Every line below is an alert (Telegram and
+Teams). Sarah is the example, `P-XXXX` is the park id. Until people exist you will not see the profile lines. One
+thing is new for the default profile too: a wake that cannot be posted now raises an alert (before, it only went to
+the cron log).
+
+**How a line names a person.** The alerts for the default profile (form checker, withHuman could not be reached,
+tool policy, the agent's note, no load proof) also run for every person's folder
+`~/.hermes/plugin-data/durable-park/profiles/<profile>/`. The line is the same text with the profile added:
+`durable-park ALERT (profile sarah): the form checker is not working - ...`. A line that already has a note keeps it:
+`(profile sarah, still happening, 3 times)`. Fix it with the matching section of this runbook, but look in Sarah's
+folder, not in the ledger's folder. The default profile's lines do not change.
+
+| Line | What it means | What to do |
+|---|---|---|
+| `durable-park ALERT: waking P-XXXX for profile sarah failed with HTTP 404 on 2 sweeps in a row; check that person's wake route (the route is missing from the Hermes config or the gateway did not load it): /p/sarah/webhooks/durable-park-wake-sarah.` | The sweep posted Sarah's wake and Hermes does not know the route. Sarah's decision is not delivered. The row waits and blocks her chat and every gateway restart. | In the default profile's `config.yaml`, check that `platforms.webhook.extra.routes.durable-park-wake-sarah` exists (a copy of `durable-park-wake` plus `profile: sarah`, see the [spike record](spike-2026-10-27-per-person-roles.md) for the settings that worked) and that the gateway was restarted after it was added (only with no row `parked`, `approved` or `executing`). The sweep tries again by itself. |
+| `durable-park ALERT: waking P-XXXX for profile sarah failed with HTTP <code> on 2 sweeps in a row; check the gateway and the wake route <route>.` (any other code, and any default-profile failure) | The route is there, but Hermes did not answer 2xx. | Read the gateway log (`~/.hermes/logs/agent.log` and the profile's own log) around the time. The cron log has the line `wake P-XXXX for profile sarah returned HTTP <code>`. |
+| `durable-park ALERT: waking P-XXXX for profile sarah failed (<ErrorType>) on 2 sweeps in a row; check that the gateway is running and listening for the wake route <route>.` | The post got no answer at all (connection refused, timeout). | Run the [health check](#health-check): is `hermes-gateway` active, and does `curl -s http://127.0.0.1:8644/health` answer? |
+| `durable-park ALERT: cannot wake P-XXXX: its stored profile name is not valid, so no wake address can be built and the chat is not told. Check that row's profile in the ledger.` | The row's `profile` breaks the name rule. No address is built from it. Said at the first sweep. | A row gets its profile from Hermes, so this should not happen. Look at the row ([waiting rows](#health-check): add `profile` to the query) and tell the developer. Do not edit the ledger by hand. |
+| `durable-park ALERT: no key file for profile sarah; P-XXXX cannot resume. Add the key or remove the person (people.sh).` | A `parked` or `approved` row of Sarah, but `/etc/durable-park/instances/sarah.token` does not exist (a typo in the profile name, or the key was deleted). Nothing can ask withHuman for it, so it cannot resume. It blocks her chat and every gateway restart. Said once for the row. | As admin, `ls -l /etc/durable-park/instances/`. Put the key back into `sarah.token` (`root:hermes`, mode `0640`, typed in with `read -rs`, never pasted into chat). The sweep then wakes the row on its next run. `people.sh remove` (Task 7) refuses to run while such rows are active, so you only see this after a typo or a hand-deleted key. |
+| `durable-park ALERT: the key file for profile sarah is empty or unreadable; P-XXXX cannot resume. Check /etc/durable-park/instances/sarah.token (people.sh).` | A `parked` or `approved` row of Sarah. The key file is there, but it is empty, not text, not a plain file, or `hermes` cannot read it. The wake refuses it quietly, so the row cannot resume and blocks her chat and restarts. A different line from "no key file". Said once for the row. | As admin, check the file: owner `root:hermes`, mode `0640`, not empty (`sudo test -s <file>`). Put the key in (typed with `read -rs`, never pasted into chat) or fix the permissions. The sweep wakes the row on its next run, and the alert is forgotten once the file is usable. |
+| `durable-park ALERT: P-XXXX has a profile name that is not valid, so its key file cannot be found and it cannot resume. Fix the row's profile or remove the person (people.sh).` | The same check, for a row whose profile name breaks the rule (no path is built from it). | As the "not valid" row above. |
+| `durable-park ALERT: withHuman refuses the key for profile sarah, so P-XXXX cannot resume and blocks that chat and restarts. Check that /etc/durable-park/instances/sarah.token is that person's instance key (people.sh), then the sweep retries.` | A `parked` row of Sarah. Her copy tried 3 or more times to read the decision and withHuman said the key is not accepted. Likely: the file holds another person's key, or a key that was revoked or disabled. | Check the file is Sarah's own instance key (compare in withHuman; never print it). Put the right key in (as above). The sweep re-wakes the row every 5 minutes, so it recovers by itself and the count starts over. |
+| `durable-park ALERT: wake_refusals.json for profile sarah is unreadable (<reason>), so repeated key refusals cannot be checked there until it reads again.` | The plugin's counter file in Sarah's folder is not readable. `<reason>` is an error name such as `PermissionError`, or `not valid JSON`, or `unexpected format`. For the default profile it says `profile default` and the file is in the ledger's folder. | As `hermes`, look at the file. It holds only counters: fix its permissions or delete it, and the plugin writes a new one at the next refusal. Said once, and silent again once it reads. |
+
+**When a wake alert comes.** A wake that could not be posted is alerted only after 2 sweeps in a row (one bad sweep
+can be a gateway restart in progress), once, and again after 24 hours while it keeps failing. There is no "fixed"
+line: the memory of it is dropped as soon as the post works, or the row no longer needs a wake.
+
+**Known limits (until Task 5).**
+
+- Hermes serves every profile folder under `~/.hermes/profiles` when it multiplexes, routed or not. In Task 4 the
+  gateway load check looks only at routed profiles (`gateway.profile_routes`) and the sweep only at profiles that
+  already have a status folder. A profile folder with no route is covered by Task 5's start checks, which look at
+  every served profile.
+- The missing-key alerts above look only at rows already `parked` or `approved`. A new call from a profile whose key
+  file is missing fails through the breaker instead: the call is refused, its row is `cancelled`, and after 3 such
+  calls the sweep says `durable-park ALERT: withHuman could not be reached ...` ([that section](#withhuman-could-not-be-reached)).
+  Task 5's start check reports a missing key at start.
+
+**The sweep's options** (the cron wrapper `~hermes/.hermes/scripts/durable_park_sweep.sh` passes none of the new ones,
+so the defaults apply; they are for tests and a different layout):
+
+| Option | Default | What it does |
+|---|---|---|
+| `--status-root` | the ledger's folder | The root status folder. A person's folder is `<root>/profiles/<profile>/`. The sweep reads the root and every valid, real (not a link) folder under `profiles/`. |
+| `--wake-url` | `http://127.0.0.1:8644/webhooks/durable-park-wake` | The wake address of the default profile (unchanged). |
+| `--wake-base` | `http://127.0.0.1:8644` | Where Hermes's webhook listens. A person's wake address is `<base>/p/<profile>/webhooks/durable-park-wake-<profile>`. (The receiver has no such setting: it always uses the default address.) |
+| `--instances-dir` | `/etc/durable-park/instances` | Where a person's key file is looked for: `<dir>/<profile>.token`. |
+| `--default-token-file` | `/etc/durable-park/instance_token` | The default profile's key file. |
+
+**State files** (what the sweep has already said; deleting one only makes it say the line again):
+
+| File | Where | What it holds |
+|---|---|---|
+| `wake_post_alert_state.json` | the status root | per park id: on how many sweeps in a row the wake failed, and when it was last alerted |
+| `missing_key_alert_state.json` | the status root | lines already said, with the keys `nokey:<park id>`, `unusable:<park id>`, `refused:<park id>` and `unreadable:<profile>` |
+| `formcheck_alert_state.json`, `breaker_alert_state.json`, `plugin_load_alert_state.json` and the other `*_alert_state.json` files | each person's folder | the same state as the default profile's, one set per person |
+| `wake_refusals.json` | each status folder (written by the plugin, read by the sweep) | per park id: profile, count of refusals, first time. Removed for a row when its decision is read or it is no longer `parked` |
 
 ### The agent's note could not be moved
 
@@ -710,7 +814,8 @@ asking) does not block the chat; the sweep cancels it once it is 10 minutes old 
 ### The bot never got the decision
 
 The sweep re-posts the wake every 5 minutes. If it still does not arrive: health check (gateway up? webhook route
-`/health`?), then `journalctl -u durable-park-receiver -n 20` for wake errors.
+`/health`?), then `journalctl -u durable-park-receiver -n 20` for wake errors. For a person's chat the wake goes to that
+person's own route, so also read the [per-person alerts](#per-person-alerts) (a missing route answers HTTP 404).
 
 ### Every `hermes` command prints `Config ref '...' ... is not set`
 
@@ -763,7 +868,12 @@ plugins:
         exempt_tools: [parked_action_execute, clarify, tool_search, tool_describe]   # keep parked_action_execute
         form_checked_tools: ['mcp__wh__quickbooks__(create|update|delete)[_-](payment|bill)']  # optional
         observer_hooks: []                                # module.qualname of reviewed hooks; live values: "Hooks reviewed so far"
-        # tool_policy_status: /path/to/tool_policy_status.json   # default: next to the ledger; leave unset
+        # tool_policy_status: /path/to/tool_policy_status.json   # default: <status_dir>/tool_policy_status.json; leave unset
+        # A person's profile (never the default one) also sets these three, in that profile's own config.yaml
+        # (for example ~/.hermes/profiles/sarah/config.yaml), plus the same ledger_path as the default profile:
+        # profile: sarah
+        # status_dir: /home/hermes/.hermes/plugin-data/durable-park/profiles/sarah
+        # token_file: /etc/durable-park/instances/sarah.token
 ```
 
 - `exempt_tools`, `form_checked_tools` and `observer_hooks` must be lists of strings. A wrong type (a number,
@@ -777,6 +887,34 @@ plugins:
   every call is refused until it is removed.
 - `risky_tools` is retired: it was renamed `form_checked_tools`. If it is still set the gateway log says
   `risky_tools is renamed form_checked_tools; ignoring it`; move the value to `form_checked_tools` and delete it.
+- `profile` (default: none = the default profile): the Hermes profile this copy serves. Empty or `default` means the
+  default profile. Any other value must be a valid profile name (lower-case letters, digits, `-` and `_`, at most 63,
+  the first a letter or digit, never `default` or `main`). A bad value (a number, `Sarah`, `../x`, `main`) makes this
+  copy refuse every non-exempt call and drop the wakes of every profile; the log says
+  `durable-park setting profile must be a valid profile name`. The copy then answers only its own wake route
+  (`webhook/durable-park-wake-<profile>`) and only rows of its own profile. It stores its own profile on every new
+  ledger row. The setting is also checked against the profile Hermes says the copy runs in. The same refusal
+  (every call refused, every profile's wakes dropped) follows when the log says
+  `setting profile does not match the profile this copy runs in` (a template that copied another person's `profile:`,
+  or left it out inside a named profile) or `setting profile cannot be used: cannot confirm which profile this copy
+  runs in`. **What to do:** open that profile's own config (`~/.hermes/profiles/<name>/config.yaml`), set `profile:`
+  under `plugins.entries.durable-park.settings` to that profile's own name (the folder name; a default copy leaves it
+  out, and it may run in a `custom` Hermes home), then restart the gateway (only with no row `parked`, `approved` or
+  `executing`). Look: `grep -n 'durable-park setting profile' ~/.hermes/logs/errors.log`.
+- `status_dir` (default: the ledger's folder, so the default profile is unchanged): the one folder all status files
+  go in. A person's copy must set it to `<ledger folder>/profiles/<profile>`, or it would write over the default
+  profile's files and the sweep would not find them. Not a non-empty text: a bad setting (the log says `durable-park setting status_dir must be a path, got <type>`), every call is refused. If
+  the folder cannot be made, the log says `durable-park could not create status_dir (<ErrorType>)`, no load proof can
+  be written and the gateway start check stops the gateway (and names the profile).
+- `token_file` must be this copy's own key file, or the copy refuses at load. A person's is
+  `/etc/durable-park/instances/<profile>.token`: the file name must be the profile name plus `.token` (the folder is
+  your choice). The default profile keeps `/etc/durable-park/instance_token`, and its `token_file` must not point
+  inside `/etc/durable-park/instances/` (that is a person's key). If either rule is broken, or the value is not a
+  path, the copy refuses every tool call at load and drops the wakes of every profile, and no approval request is
+  opened with the wrong key. The log says `durable-park setting token_file does not belong to this profile; refusing
+  every tool call` (or `setting token_file must be a path, got <type>`). **What to do:** fix the `token_file` line in
+  that profile's plugin settings (its own `config.yaml`), then restart the gateway (only with no row `parked`,
+  `approved` or `executing`).
 - After the restart, `~/.hermes/logs/agent.log` shows `durable-park loaded: ... exempt tool(s), ... form-checked
   pattern(s), ... observer hook(s)`.
 

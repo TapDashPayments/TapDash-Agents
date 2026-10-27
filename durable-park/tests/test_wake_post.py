@@ -98,3 +98,30 @@ def test_post_wake_does_not_follow_redirects(hermes):
 
 def test_default_url_is_the_local_hermes_route():
     assert DEFAULT_WAKE_URL == "http://127.0.0.1:8644/webhooks/durable-park-wake"
+
+
+# ---- per-profile wake address ----------------------------------------------------------------
+
+def test_wake_url_for_a_person():
+    from wake_post import wake_url_for
+    assert wake_url_for("sarah") == "http://127.0.0.1:8644/p/sarah/webhooks/durable-park-wake-sarah"
+
+
+@pytest.mark.parametrize("profile", [None, "", "default", "main"])
+def test_wake_url_for_the_default_profile_is_the_original_route(profile):
+    from wake_post import wake_url_for
+    assert wake_url_for(profile) == DEFAULT_WAKE_URL
+
+
+def test_wake_url_for_takes_another_base():
+    from wake_post import wake_url_for
+    assert wake_url_for("tom", "http://127.0.0.1:9000/") == "http://127.0.0.1:9000/p/tom/webhooks/durable-park-wake-tom"
+    assert wake_url_for(None, "http://127.0.0.1:9000/") == "http://127.0.0.1:9000/webhooks/durable-park-wake"
+
+
+@pytest.mark.parametrize("bad", ["../x", "Sarah", "a" * 64, "x/y", "x y", "x.y", "-x", "sarah\n", "x?y=1", "x#y", 5])
+def test_wake_url_for_a_bad_name_raises_and_builds_no_url(bad):
+    from wake_post import wake_url_for
+    with pytest.raises(ValueError) as caught:
+        wake_url_for(bad)
+    assert str(bad) not in str(caught.value) or str(bad) == "5"

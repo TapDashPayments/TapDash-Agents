@@ -8,11 +8,34 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import urllib.error
 import urllib.request
 
-DEFAULT_WAKE_URL = "http://127.0.0.1:8644/webhooks/durable-park-wake"
+DEFAULT_BASE_URL = "http://127.0.0.1:8644"
+DEFAULT_WAKE_URL = f"{DEFAULT_BASE_URL}/webhooks/durable-park-wake"
+# The profile-name rule of plugin/durable_park/keys.py, repeated because this file is copied on its own to
+# /opt/durable-park/receiver (tests/test_keys.py keeps the two equal).
+PROFILE_PATTERN = r"[a-z0-9][a-z0-9_-]{0,62}"
+RESERVED_PROFILES = frozenset({"default", "main"})  # ``main`` is how Hermes names the default profile in a session key
+_PROFILE = re.compile(PROFILE_PATTERN)
 TIMEOUT_SECONDS = 10.0
+
+
+def wake_url_for(profile: str | None, base: str = DEFAULT_BASE_URL) -> str:
+    """The wake address of the Hermes profile that made the call.
+
+    Hermes lets a plugin post only into its own profile's chats, so each profile has its own webhook route
+    (``/p/<profile>/webhooks/durable-park-wake-<profile>``) and its own copy of durable-park handles it. ``None``,
+    ``""``, ``"default"`` and ``"main"`` (the default profile) use the original route. Raises ``ValueError`` for any
+    other name that is not a valid profile name (a URL is never built from it).
+    """
+    base = base.rstrip("/")
+    if profile is None or profile in ("", "default", "main"):
+        return f"{base}/webhooks/durable-park-wake"
+    if not isinstance(profile, str) or profile in RESERVED_PROFILES or _PROFILE.fullmatch(profile) is None:
+        raise ValueError("not a valid profile name")
+    return f"{base}/p/{profile}/webhooks/durable-park-wake-{profile}"
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

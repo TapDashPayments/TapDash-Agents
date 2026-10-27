@@ -37,6 +37,15 @@
   ``http.https://github.com/NousResearch/.proxy`` pointing at a dead address, GitHub #76) is off
                                                        -> print one alert line (again when the problem changes or
   after 24 hours, and one when it is fixed; state in ``hermes_pin_alert_state.json``)
+* every per-status check above (form check, breaker, tool policy, lift, load proof) also runs for each routed
+  person: their status directory is ``<status root>/profiles/<profile>/`` (the root is ``--status-root``, default
+  the ledger's directory). A profile's lines name it: ``durable-park ALERT (profile sarah): ...``; the default
+  profile's lines are unchanged
+* a wake that could not be posted (an exception, or a non-2xx such as 404 for a missing wake route) on 2 sweeps in
+  a row, once, then again after 24 hours (``wake_post_alert_state.json``)
+* a ``parked`` or ``approved`` row whose profile has no key file (``missing_key_alert_state.json``), once per row
+* a ``parked`` row that withHuman refused the key for 3 or more times (``wake_refusals.json``, which the plugin
+  writes in each status directory), once per row
 Only stdout is delivered by cron, so it prints nothing when nothing needs attention; problems with posting
 wakes go to stderr. Standard library only: it loads the plugin's ledger module by path (without importing
 the plugin package, which needs the AAP SDK) and ``receiver/wake_post.py``, both found relative to this
@@ -46,6 +55,7 @@ file's real path, so it can be run through a symlink or from any directory.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -62,7 +72,7 @@ _HERE = os.path.dirname(os.path.realpath(__file__))
 _REPO = os.path.dirname(_HERE)
 sys.path.insert(0, os.path.join(_REPO, "receiver"))
 
-from wake_post import DEFAULT_WAKE_URL, post_wake  # noqa: E402
+from wake_post import DEFAULT_BASE_URL, DEFAULT_WAKE_URL, post_wake, wake_url_for  # noqa: E402
 
 DEFAULT_SECRET_FILE = "/etc/durable-park/wake_secret"
 DEFAULT_APPROVERS_FILE = "/etc/durable-park/approvers.json"  # TAP2-121; absent = no timeout, parks wait as before
@@ -113,6 +123,13 @@ LIFT_TEXTS = {
     "schema_too_complex": ("durable-park ALERT: the rules of {tool} are too complex to read for the agent's note "
                            "(inside {key}); the note was moved as if they declared no such field."),
 }
+PROFILES_DIR = "profiles"  # <status root>/profiles/<profile>/ holds a routed person's status files
+WAKE_POST_STATE = "wake_post_alert_state.json"
+WAKE_POST_BAD_RUNS = 2  # one bad sweep may be a gateway restart in progress
+WAKE_POST_REALERT = timedelta(hours=24)
+MISSING_KEY_STATE = "missing_key_alert_state.json"  # keys: ``nokey:<park id>``, ``unusable:<park id>``, ``refused:<park id>``, ``unreadable:<profile>``
+WAKE_REFUSALS = "wake_refusals.json"  # written by the plugin: park id -> {profile, count, first_at}
+REFUSED_ALERT_COUNT = 3
 PLUGIN_LOAD = "plugin_load.json"  # the load proof the plugin writes in the gateway (pid of that process)
 PLUGIN_LOAD_STATE = "plugin_load_alert_state.json"
 HERMES_PIN_FILE = os.path.join(_REPO, "deploy", "hermes-pin.json")  # the one Hermes commit we run (GitHub #76)
@@ -148,6 +165,18 @@ def _load_links_module():
 _links = _load_links_module()
 
 
+def _load_keys_module():
+    path = os.path.join(_REPO, "plugin", "durable_park", "keys.py")
+    spec = importlib.util.spec_from_file_location("durable_park_keys", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_keys = _load_keys_module()
+
+
 def _positive_int(text: str) -> int:
     try:
         value = int(text)
@@ -172,7 +201,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="durable-park sweep (Hermes cron --no-agent script)")
     parser.add_argument("--ledger", required=True, help="path of the ledger SQLite file")
     parser.add_argument("--wake-secret-file", default=DEFAULT_SECRET_FILE)
-    parser.add_argument("--wake-url", default=DEFAULT_WAKE_URL)
+    parser.add_argument("--wake-url", default=DEFAULT_WAKE_URL, help="wake address of the default profile")
+    parser.add_argument("--wake-base", default=DEFAULT_BASE_URL,
+                        help="Hermes webhook address; a routed person's wake address is built from it")
+    parser.add_argument("--status-root", default=None,
+                        help="directory with the gateway's status files; a routed person's are in "
+                             "<root>/profiles/<profile>/ (default: the ledger's directory)")
+    parser.add_argument("--instances-dir", default=_keys.INSTANCES_DIR,
+                        help="where each routed person's withHuman key file is (<dir>/<profile>.token)")
+    parser.add_argument("--default-token-file", default=_keys.DEFAULT_TOKEN_FILE,
+                        help="the default profile's withHuman key file")
     parser.add_argument("--approvers-file", default=DEFAULT_APPROVERS_FILE,
                         help="backup approver / unanswered-approval timeout config (TAP2-121); absent = off")
     parser.add_argument("--withhuman-url", default=_links.DEFAULT_APP_URL,
@@ -463,15 +501,16 @@ def _apply_retention(ledger, now: datetime, days: int) -> None:
     ledger.delete_finished_before((now - timedelta(days=days)).strftime(_STAMP))
 
 
-def _wake_targets(ledger) -> list[str]:
-    parked = [r.park_id for r in ledger.list_by_status("parked") if r.request_id]
-    approved = [r.park_id for r in ledger.list_by_status("approved") if r.notified_at is None]
+def _wake_targets(ledger) -> list[tuple[str, str | None]]:
+    """(park id, the row's profile) for every row that needs a wake, so each goes to its own person's route."""
+    parked = [r for r in ledger.list_by_status("parked") if r.request_id]
+    approved = [r for r in ledger.list_by_status("approved") if r.notified_at is None]
     # A decision the wake recorded but could not announce (inject refused): only rows that have a request
     # (a park-hook cancel without one was never a withHuman decision and is not announced).
-    decided = [r.park_id for r in ledger.list_by_status("denied", "expired", "cancelled")
+    decided = [r for r in ledger.list_by_status("denied", "expired", "cancelled")
                if r.notified_at is None and r.request_id]
-    untold = [r.park_id for r in ledger.outcome_unnotified()]  # GitHub #66: tell the chat how the run ended
-    return parked + approved + decided + untold
+    untold = list(ledger.outcome_unnotified())  # GitHub #66: tell the chat how the run ended
+    return [(r.park_id, r.profile) for r in parked + approved + decided + untold]
 
 
 OUTCOME_GIVEUP_STATE = "outcome_giveup_state.json"
@@ -837,7 +876,10 @@ def _gateway_mainpid() -> int | None:
     return pid if pid > 0 else None
 
 
-def _load_proof_alert(ledger_path: str, now: datetime) -> None:
+_PID_UNSET = object()
+
+
+def _load_proof_alert(ledger_path: str, now: datetime, pid=_PID_UNSET) -> None:
     """Defence in depth for ``deploy/plugin_load_check.sh``: alert once when the running gateway has no load
     proof for its own pid (the plugin did not load in it, so no ``pre_tool_call`` hook runs and every tool call
     may be unchecked), and once when it has one again. ``now`` is unused: the proof carries its own pid.
@@ -845,7 +887,8 @@ def _load_proof_alert(ledger_path: str, now: datetime) -> None:
     Known limit: this sweep is a Hermes cron job that runs INSIDE the gateway, so a stopped gateway (for
     example one the start check stopped) cannot alert; the bot going silent is the signal. Unknown MainPID
     (``_gateway_mainpid`` is ``None``): do nothing, change no state."""
-    pid = _gateway_mainpid()
+    if pid is _PID_UNSET:
+        pid = _gateway_mainpid()
     if pid is None:
         return
     directory = os.path.dirname(os.path.abspath(ledger_path))
@@ -862,6 +905,271 @@ def _load_proof_alert(ledger_path: str, now: datetime) -> None:
         print("durable-park: the durable-park plugin is loaded in the running gateway.", flush=True)
         alerted = False
     _save_state(state_path, {"alerted": alerted})
+
+
+_LINE_HEAD = re.compile(r"^durable-park( ALERT)?(?: \(([^)]*)\))?:")
+
+
+def _label_line(line: str, profile: str) -> str:
+    """``durable-park ALERT: x`` -> ``durable-park ALERT (profile sarah): x`` (also keeps an existing
+    ``(still happening, 3 times)`` note: ``(profile sarah, still happening, 3 times)``)."""
+    if not line.strip():
+        return line
+    match = _LINE_HEAD.match(line)
+    if match is None:
+        return f"(profile {profile}) {line}"
+    extra = f", {match.group(2)}" if match.group(2) else ""
+    return f"durable-park{match.group(1) or ''} (profile {profile}{extra}){line[match.end() - 1:]}"
+
+
+class _Labeled:
+    """stdout for one person's checks: every line it prints names the profile."""
+
+    def __init__(self, inner, profile: str):
+        self.inner = inner
+        self.profile = profile
+        self._pending = ""
+
+    def write(self, text: str) -> int:
+        self._pending += text
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            self.inner.write(_label_line(line, self.profile) + "\n")
+        return len(text)
+
+    def flush(self) -> None:
+        self.inner.flush()
+
+    def finish(self) -> None:
+        if self._pending:
+            self.inner.write(_label_line(self._pending, self.profile))
+            self._pending = ""
+        self.inner.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+@contextlib.contextmanager
+def _labeled(profile: str):
+    inner = sys.stdout
+    out = _Labeled(inner, profile)
+    sys.stdout = out
+    try:
+        yield
+    finally:
+        sys.stdout = inner
+        out.finish()
+
+
+def _profile_dirs(root: str) -> list[tuple[str, str]]:
+    """(profile, status directory) for each ``<root>/profiles/<profile>/``: sorted, real directories only, and only
+    names a profile may have. Anything else in there is ignored."""
+    base = os.path.join(root, PROFILES_DIR)
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        path = os.path.join(base, name)
+        if _keys.valid_profile(name) and os.path.isdir(path) and not os.path.islink(path):
+            found.append((name, path))
+    return found
+
+
+def _profile_status_alerts(root: str, pid) -> None:
+    """Run the per-status checks once for every routed person's status directory, each with its own alert-state
+    files there. One failing step never stops the others or the other people (it is one stderr line naming the
+    profile). The checks only use the directory part of the path, so a made-up ``ledger.db`` name stands in."""
+    for profile, directory in _profile_dirs(root):
+        reference = os.path.join(directory, "ledger.db")
+        steps = (("form-check alert", _formcheck_alert), ("breaker alert", _breaker_alert),
+                 ("tool policy alert", _policy_alert), ("lift alert", _lift_check),
+                 ("load proof alert", lambda path, when: _load_proof_alert(path, when, pid)))
+        for name, check in steps:
+            try:
+                with _labeled(profile):
+                    check(reference, datetime.now(timezone.utc))
+            except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+                _err(f"{name} failed for profile {profile} ({type(exc).__name__})")
+
+
+def _stamp_now(now: datetime) -> str:
+    return now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _profile_label(profile) -> str:
+    if _keys.is_default_profile(profile):
+        return "default"
+    return profile if _keys.valid_profile(profile) else "(invalid name)"
+
+
+def _wake_post_alerts(root: str, failures: dict, now: datetime) -> None:
+    """Teams-visible alert for a wake that cannot be posted. ``failures`` maps park id -> (profile label, kind,
+    detail, runs needed) for this sweep: ``http`` (detail = status code), ``error`` (detail = error type) or
+    ``invalid`` (the stored profile name cannot make an address; says nothing of the name). A row is alerted once it
+    failed on enough sweeps in a row, once, and again after 24 hours while it keeps failing. A row that is not
+    failing now (posted fine, or no longer a target) is forgotten."""
+    state_path = os.path.join(root, WAKE_POST_STATE)
+    state = _load_state(state_path)
+    before = state.get("rows") if isinstance(state.get("rows"), dict) else {}
+    rows: dict = {}
+    for park_id, (label, kind, detail, needed) in failures.items():
+        old = before.get(park_id) if isinstance(before.get(park_id), dict) else {}
+        runs = old.get("runs") if isinstance(old.get("runs"), int) and not isinstance(old.get("runs"), bool) else 0
+        runs += 1
+        alerted_at = old.get("alerted_at") if isinstance(old.get("alerted_at"), str) else None
+        last = _parse_stamp(alerted_at)
+        if runs >= needed and (last is None or now - last >= WAKE_POST_REALERT):
+            route = wake_url_for(None if label == "default" else label, "") if kind != "invalid" else ""
+            if kind == "invalid":
+                text = (f"durable-park ALERT: cannot wake {_clean(park_id, 40)}: its stored profile name is not "
+                        "valid, so no wake address can be built and the chat is not told. Check that row's "
+                        "profile in the ledger.")
+            elif kind == "http":
+                where = ("that person's wake route (the route is missing from the Hermes config or the gateway "
+                         f"did not load it): {route}" if detail == 404 and label != "default"
+                         else f"the gateway and the wake route {route}")
+                text = (f"durable-park ALERT: waking {_clean(park_id, 40)} for profile {label} failed with HTTP "
+                        f"{detail} on {runs} sweeps in a row; check {where}.")
+            else:
+                text = (f"durable-park ALERT: waking {_clean(park_id, 40)} for profile {label} failed "
+                        f"({_clean(detail, 60)}) on {runs} sweeps in a row; check that the gateway is running "
+                        f"and listening for the wake route {route}.")
+            print(text, flush=True)
+            alerted_at = _stamp_now(now)
+        rows[park_id] = {"runs": runs, "alerted_at": alerted_at}
+    new_state = {"rows": rows} if rows else {}
+    if new_state != state:
+        _save_state(state_path, new_state)
+
+
+def _key_file_usable(path: str) -> bool:
+    """True when the key file can be read as text and holds something besides whitespace: the rule of the plugin's
+    ``wake.key_file_usable`` (the sweep cannot import the plugin package, so it keeps its own copy; a test proves
+    the two agree). The content is only tested, never printed or logged."""
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode) or not os.access(path, os.R_OK):  # never open a FIFO or device
+            return False
+        with open(path, encoding="utf-8") as handle:
+            return bool(handle.read().strip())
+    except (OSError, ValueError):  # missing, a directory, unreadable, or not text (UnicodeDecodeError)
+        return False
+
+
+def _missing_key_alert(ledger, root: str, default_token_file: str, instances_dir: str, now: datetime) -> None:
+    """Once per row: a ``parked`` or ``approved`` row whose profile has no key file cannot resume (the receiver
+    could not ask withHuman for it), nor can one whose key file is there but empty or unreadable (the plugin's
+    wake refuses it silently; ``unusable:<park id>``). An invalid profile name counts too (no path is built from
+    it). A row is forgotten when its key becomes usable or it leaves those statuses."""
+    state_path = os.path.join(root, MISSING_KEY_STATE)
+    state = _load_state(state_path)
+    said = dict(state.get("said")) if isinstance(state.get("said"), dict) else {}
+    current = set()
+    for row in ledger.list_by_status("parked", "approved"):
+        key = f"nokey:{row.park_id}"
+        try:
+            path = _keys.token_file_for(row.profile, default=default_token_file, instances_dir=instances_dir)
+        except ValueError:
+            path = None
+        if path is not None and os.path.isfile(path):
+            if _key_file_usable(path):
+                continue
+            key = f"unusable:{row.park_id}"  # there, but the plugin cannot use it
+            current.add(key)
+            if key not in said:
+                print(f"durable-park ALERT: the key file for profile {_profile_label(row.profile)} is empty or "
+                      f"unreadable; {_clean(row.park_id, 40)} cannot resume. Check {_clean(path, 200)} "
+                      "(people.sh).", flush=True)
+                said[key] = _stamp_now(now)
+            continue
+        current.add(key)
+        if key in said:
+            continue
+        if path is None:
+            print(f"durable-park ALERT: {_clean(row.park_id, 40)} has a profile name that is not valid, so its "
+                  "key file cannot be found and it cannot resume. Fix the row's profile or remove the person "
+                  "(people.sh).", flush=True)
+        else:
+            print(f"durable-park ALERT: no key file for profile {_profile_label(row.profile)}; "
+                  f"{_clean(row.park_id, 40)} cannot resume. Add the key or remove the person (people.sh).",
+                  flush=True)
+        said[key] = _stamp_now(now)
+    for key in [k for k in said if k.startswith(("nokey:", "unusable:")) and k not in current]:
+        del said[key]
+    if said != (state.get("said") if isinstance(state.get("said"), dict) else {}):
+        state["said"] = said
+        _save_state(state_path, state)
+
+
+def _read_refusals(directory: str):
+    """(entries, problem): the plugin's ``wake_refusals.json`` of one status directory. A missing file is fine."""
+    try:
+        with open(os.path.join(directory, WAKE_REFUSALS), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}, None
+    except OSError as exc:
+        return {}, type(exc).__name__
+    except ValueError:
+        return {}, "not valid JSON"
+    except Exception:  # noqa: BLE001 - for example RecursionError on a file nested absurdly deep
+        return {}, "unexpected format"
+    if not isinstance(data, dict):
+        return {}, "unexpected format"
+    return data, None
+
+
+def _refusal_alert(ledger, root: str, default_token_file: str, instances_dir: str, now: datetime) -> None:
+    """Once per row: withHuman refused a ``parked`` row's key ``REFUSED_ALERT_COUNT`` or more times (the plugin counts
+    them in ``wake_refusals.json``, in the root and each person's status directory). Entries for rows that are
+    unknown or not ``parked`` are ignored. An unreadable file is one alert, until it reads again."""
+    state_path = os.path.join(root, MISSING_KEY_STATE)
+    state = _load_state(state_path)
+    original = state.get("said") if isinstance(state.get("said"), dict) else {}
+    said = dict(original)
+    current = set()
+    unreadable_now = set()
+    for profile, directory in [("default", root), *_profile_dirs(root)]:
+        entries, problem = _read_refusals(directory)
+        ukey = f"unreadable:{profile}"
+        if problem is not None:
+            unreadable_now.add(ukey)
+            if ukey not in said:
+                print(f"durable-park ALERT: {WAKE_REFUSALS} for profile {profile} is unreadable ({problem}), so "
+                      "repeated key refusals cannot be checked there until it reads again.", flush=True)
+                said[ukey] = _stamp_now(now)
+            continue
+        for park_id, entry in entries.items():
+            count = entry.get("count") if isinstance(entry, dict) else None
+            if isinstance(count, bool) or not isinstance(count, int) or count < REFUSED_ALERT_COUNT:
+                continue
+            row = ledger.get(park_id) if isinstance(park_id, str) else None
+            if row is None or row.status != "parked":
+                continue
+            key = f"refused:{park_id}"
+            current.add(key)
+            if key in said:
+                continue
+            label = _profile_label(row.profile)
+            try:
+                token = _keys.token_file_for(row.profile, default=default_token_file, instances_dir=instances_dir)
+            except ValueError:
+                token = "that person's key file"
+            print(f"durable-park ALERT: withHuman refuses the key for profile {label}, so {_clean(park_id, 40)} "
+                  "cannot resume and blocks that chat and restarts. Check that "
+                  f"{_clean(token, 200)} is that person's instance key (people.sh), then the sweep retries.",
+                  flush=True)
+            said[key] = _stamp_now(now)
+    for key in list(said):
+        if key.startswith("unreadable:") and key not in unreadable_now:
+            del said[key]
+        elif key.startswith("refused:") and key not in current and not unreadable_now:
+            del said[key]  # not pruned while a file is unreadable: its entries may come back unchanged
+    if said != original:
+        state["said"] = said
+        _save_state(state_path, state)
 
 
 def _hermes_checkout() -> str:
@@ -946,6 +1254,8 @@ def _sweep(argv=None) -> int:
         _err(f"ledger not found: {args.ledger}")
         return 1
     ledger = _load_ledger_module().Ledger(args.ledger)
+    root = os.path.abspath(args.status_root) if args.status_root else os.path.dirname(os.path.abspath(args.ledger))
+    status_ref = os.path.join(root, os.path.basename(args.ledger))  # the status checks use only its directory
 
     _mark_stale_executing(ledger, datetime.now(timezone.utc))
     try:
@@ -962,25 +1272,29 @@ def _sweep(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
         _err(f"pending approval fallback failed ({type(exc).__name__})")
     try:
-        _formcheck_alert(args.ledger, datetime.now(timezone.utc))
+        _formcheck_alert(status_ref, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the self-check alert must never stop the sweep
         _err(f"form-check alert failed ({type(exc).__name__})")
     try:
-        _breaker_alert(args.ledger, datetime.now(timezone.utc))
+        _breaker_alert(status_ref, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the breaker alert must never stop the sweep
         _err(f"breaker alert failed ({type(exc).__name__})")
     try:
-        _policy_alert(args.ledger, datetime.now(timezone.utc))
+        _policy_alert(status_ref, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the policy alert must never stop the sweep
         _err(f"tool policy alert failed ({type(exc).__name__})")
     try:
-        _lift_check(args.ledger, datetime.now(timezone.utc))
+        _lift_check(status_ref, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the lift alert must never stop the sweep
         _err(f"lift alert failed ({type(exc).__name__})")
     try:
-        _load_proof_alert(args.ledger, datetime.now(timezone.utc))
+        _load_proof_alert(status_ref, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - the load-proof alert must never stop the sweep
         _err(f"load proof alert failed ({type(exc).__name__})")
+    try:
+        _profile_status_alerts(root, _gateway_mainpid())
+    except Exception as exc:  # noqa: BLE001 - the per-person checks must never stop the sweep
+        _err(f"per-profile status alerts failed ({type(exc).__name__})")
     try:
         _pin_alert(args.ledger, datetime.now(timezone.utc))
     except Exception as exc:  # noqa: BLE001 - never stop the sweep, never hide the failure
@@ -990,22 +1304,44 @@ def _sweep(argv=None) -> int:
         _outcome_giveup_alert(ledger, args.ledger)
     except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
         _err(f"outcome give-up alert failed ({type(exc).__name__})")
+    try:
+        _missing_key_alert(ledger, root, args.default_token_file, args.instances_dir, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+        _err(f"missing key alert failed ({type(exc).__name__})")
+    try:
+        _refusal_alert(ledger, root, args.default_token_file, args.instances_dir, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+        _err(f"key refusal alert failed ({type(exc).__name__})")
     status = 0
     targets = _wake_targets(ledger)
-    if targets:
-        secret = _read_secret(args.wake_secret_file)
-        if secret is None:
-            _err(f"wake secret unreadable or empty: {args.wake_secret_file}")
-            status = 1
-        else:
-            for park_id in targets:
-                try:
-                    code = post_wake(park_id, secret, args.wake_url)
-                except Exception as exc:  # noqa: BLE001 - one dead wake must not stop the others
-                    _err(f"wake {park_id} failed ({type(exc).__name__})")
-                    continue
-                if not 200 <= code < 300:
-                    _err(f"wake {park_id} returned HTTP {code}")
+    secret = _read_secret(args.wake_secret_file) if targets else None
+    if targets and secret is None:
+        _err(f"wake secret unreadable or empty: {args.wake_secret_file}")
+        status = 1
+    else:
+        failures: dict = {}
+        for park_id, profile in targets:
+            label = _profile_label(profile)
+            where = "" if _keys.is_default_profile(profile) else f" for profile {label}"
+            try:
+                url = args.wake_url if _keys.is_default_profile(profile) else wake_url_for(profile, args.wake_base)
+            except ValueError:
+                _err(f"wake {park_id} skipped: its stored profile name is not valid")
+                failures[park_id] = (label, "invalid", None, 1)
+                continue
+            try:
+                code = post_wake(park_id, secret, url)
+            except Exception as exc:  # noqa: BLE001 - one dead wake must not stop the others
+                _err(f"wake {park_id}{where} failed ({type(exc).__name__})")
+                failures[park_id] = (label, "error", type(exc).__name__, WAKE_POST_BAD_RUNS)
+                continue
+            if not 200 <= code < 300:
+                _err(f"wake {park_id}{where} returned HTTP {code}")
+                failures[park_id] = (label, "http", code, WAKE_POST_BAD_RUNS)
+        try:
+            _wake_post_alerts(root, failures, datetime.now(timezone.utc))
+        except Exception as exc:  # noqa: BLE001 - one failed step must never stop the sweep
+            _err(f"wake post alert failed ({type(exc).__name__})")
     try:
         _apply_retention(ledger, datetime.now(timezone.utc), args.retention_days)
     except Exception as exc:  # noqa: BLE001 - housekeeping must never stop the sweep

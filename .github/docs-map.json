@@ -37,7 +37,8 @@
         "durable-park/plugin/durable_park/executor.py",
         "durable-park/plugin/durable_park/links.py",
         "durable-park/plugin/durable_park/outcome.py",
-        "durable-park/plugin/durable_park/paylink.py"
+        "durable-park/plugin/durable_park/paylink.py",
+        "durable-park/plugin/durable_park/keys.py"
       ],
       "docs": ["durable-park/docs/architecture.md"]
     },

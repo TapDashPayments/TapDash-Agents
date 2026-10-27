@@ -62,6 +62,10 @@ rule: change either, update the runbook's "Tool policy check failed" and "Open a
 The gateway-start load check (`durable-park/deploy/plugin_load_check.sh`, run by the same drop-in as `ExecStartPost`)
 is covered by the same rule (`deploy/*.sh`): change it, update the runbook's "Gateway will not start: the plugin did
 not load" section.
+The profile rules (`durable-park/plugin/durable_park/keys.py`: which profile names are allowed and which key file each
+profile uses) are mapped to `architecture.md` in the "Plugin wiring, wake, executor, approval calls" rule: change them,
+update "One copy per person" there, and keep the copies of the name rule in `receiver/wake_post.py` and
+`deploy/plugin_load_check.sh` equal.
 The vendored Langfuse plugin (`tracing/tapdash_langfuse/` and `tracing/run_tests.sh`) is mapped to the runbook and to
 `tracing/tapdash_langfuse/PATCHES.md` in the "Tracing plugin (tapdash-langfuse)" rule: every difference from upstream
 goes into `PATCHES.md` in the same commit. Its tests run with `bash tracing/run_tests.sh`, not the durable-park pytest.

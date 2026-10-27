@@ -1,6 +1,7 @@
 """deploy/plugin_load_check.sh (ExecStartPost of the gateway drop-in) and the drop-in that wires it."""
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -16,7 +17,7 @@ ALERT = ("durable-park ALERT: the plugin did not load in this gateway (pid {pid}
          "tool call runs unchecked")
 
 
-def run_check(tmp_path, *, mainpid="4242", proof=None, timeout="2", raw=None, extra_env=None):
+def run_check(tmp_path, *, mainpid="4242", proof=None, timeout="2", raw=None, extra_env=None, cwd=None):
     path = tmp_path / "plugin_load.json"
     if raw is not None:
         path.write_text(raw)
@@ -27,7 +28,7 @@ def run_check(tmp_path, *, mainpid="4242", proof=None, timeout="2", raw=None, ex
     if mainpid is not None:
         env["MAINPID"] = mainpid
     started = time.monotonic()
-    result = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=30, cwd=cwd)
     return result, time.monotonic() - started
 
 
@@ -192,3 +193,256 @@ def test_drop_in_runs_the_check_and_limits_restarts():
     check = "ExecStartPre=-/bin/bash %h/durable-park/deploy/tool_policy_check.sh"
     assert lines.index(rm) < lines.index(check)  # the stale proof is gone before anything else runs
     assert re.search(r"^ExecStartPre=-/bin/bash %h/durable-park/deploy/tool_policy_check\.sh$", conf, re.M)
+
+
+# ---- per-person profiles (Task 4) ----------------------------------------------------------------------------
+
+PROFILE_ALERT = ("durable-park ALERT: the plugin did not load for profile {profile} in this gateway (pid {pid}); "
+                 "stopping the gateway so no tool call runs unchecked")
+ROUTES_ALERT = ("durable-park ALERT: could not read gateway.profile_routes from the Hermes config; stopping the "
+                "gateway so no profile runs unchecked")
+BAD_NAME_ALERT = ("durable-park ALERT: a gateway.profile_routes entry has a profile name that is not valid; "
+                  "stopping the gateway so no profile runs unchecked")
+SYSTEM_PYTHON = "/usr/bin/python3"
+
+
+def has_yaml():
+    return subprocess.run([SYSTEM_PYTHON, "-I", "-c", "import yaml"], capture_output=True).returncode == 0
+
+
+needs_yaml = pytest.mark.skipif(not has_yaml(), reason="the system python has no yaml")
+
+
+def write_profile_proof(tmp_path, name, **kw):
+    folder = tmp_path / "profiles" / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "plugin_load.json").write_text(json.dumps(good(**kw)))
+
+
+def write_root_proof(tmp_path, **kw):
+    (tmp_path / "plugin_load.json").write_text(json.dumps(good(**kw)))
+
+
+def routes(*names):
+    return {"DURABLE_PARK_PROFILES": " ".join(names)}
+
+
+def test_load_check_names_each_profile_without_proof(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah")  # tara has no proof
+    result, took = run_check(tmp_path, timeout="2", extra_env=routes("sarah", "tara"))
+    assert result.returncode == 1
+    assert result.stdout.strip() == PROFILE_ALERT.format(profile="tara", pid=4242)
+    assert "sarah" not in result.stdout
+    assert took >= 1.5  # it waited for the proof, like for the root
+
+
+def test_load_check_passes_when_the_root_and_every_profile_have_a_proof(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah", mode="refusing-policy")
+    write_profile_proof(tmp_path, "tara")
+    result, took = run_check(tmp_path, extra_env=routes("sarah", "tara"))
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [
+        "durable-park plugin loaded (mode=asking, pid=4242)",
+        "durable-park plugin loaded for profile sarah (mode=refusing-policy, pid=4242)",
+        "durable-park plugin loaded for profile tara (mode=asking, pid=4242)"]
+    assert took < 2.5  # no needless wait
+
+
+def test_load_check_fails_naming_everything_that_has_no_proof(tmp_path):
+    result, _ = run_check(tmp_path, timeout="1", extra_env=routes("sarah", "tara"))
+    assert result.returncode == 1
+    assert result.stdout.splitlines() == [ALERT.format(pid=4242), PROFILE_ALERT.format(profile="sarah", pid=4242),
+                                          PROFILE_ALERT.format(profile="tara", pid=4242)]
+
+
+def test_load_check_root_missing_alone_keeps_todays_line(tmp_path):
+    write_profile_proof(tmp_path, "sarah")
+    result, _ = run_check(tmp_path, timeout="1", extra_env=routes("sarah"))
+    assert result.returncode == 1 and result.stdout.strip() == ALERT.format(pid=4242)
+
+
+def test_load_check_profile_proof_from_another_pid_fails(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah", pid=1)  # an earlier gateway process
+    result, _ = run_check(tmp_path, timeout="1", extra_env=routes("sarah"))
+    assert result.returncode == 1 and result.stdout.strip() == PROFILE_ALERT.format(profile="sarah", pid=4242)
+
+
+def test_load_check_waits_for_a_profile_proof_to_appear(tmp_path):
+    write_root_proof(tmp_path)
+    folder = tmp_path / "profiles" / "sarah"
+    folder.mkdir(parents=True)
+    writer = subprocess.Popen(["bash", "-c", f"sleep 1.2; printf '%s' '{json.dumps(good())}' > '{folder}/plugin_load.json'"])
+    try:
+        result, _ = run_check(tmp_path, timeout="6", extra_env=routes("sarah"))
+    finally:
+        writer.wait()
+    assert result.returncode == 0 and "loaded for profile sarah (mode=asking, pid=4242)" in result.stdout
+
+
+def test_load_check_skips_default_names_and_repeats(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah")
+    result, _ = run_check(tmp_path, extra_env=routes("default", "main", "sarah", "sarah"))
+    assert result.returncode == 0
+    assert result.stdout.count("loaded for profile") == 1
+
+
+@pytest.mark.parametrize("name", ["../x", "Sarah", "a b/c", ".hidden", "x;y"])
+def test_load_check_invalid_profile_name_fails_closed(tmp_path, name):
+    write_root_proof(tmp_path)
+    result, took = run_check(tmp_path, timeout="20", extra_env={"DURABLE_PARK_PROFILES": f"sarah,{name}"})
+    assert result.returncode == 1
+    assert result.stdout.strip() == BAD_NAME_ALERT
+    assert took < 5  # a bad name cannot be fixed by waiting
+
+
+def write_config(tmp_path, text):
+    path = tmp_path / "config.yaml"
+    path.write_text(text)
+    return {"DURABLE_PARK_HERMES_CONFIG": str(path)}
+
+
+@needs_yaml
+def test_load_check_reads_the_routed_profiles_from_the_config(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah")
+    env = write_config(tmp_path, (
+        "model:\n  default: x\n"
+        "gateway:\n  multiplex_profiles: true\n  profile_routes:\n"
+        "    - {name: sarah, platform: teams, user_id: u1, guild_id: g, profile: sarah}\n"
+        "    - {name: tara, platform: teams, user_id: u2, guild_id: g, profile: tara}\n"))
+    result, _ = run_check(tmp_path, timeout="1", extra_env=env)
+    assert result.returncode == 1
+    assert result.stdout.strip() == PROFILE_ALERT.format(profile="tara", pid=4242)  # sarah has a proof, tara none
+
+
+@needs_yaml
+@pytest.mark.parametrize("text", ["model:\n  default: x\n", "", "gateway:\n  profile_routes: []\n",
+                                  "gateway:\n  profile_routes:\n"])
+def test_load_check_with_no_routes_in_the_config_is_exactly_todays(tmp_path, text):
+    write_root_proof(tmp_path)
+    result, took = run_check(tmp_path, extra_env=write_config(tmp_path, text))
+    assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
+    assert took < 1.5
+
+
+def test_load_check_with_no_config_file_is_exactly_todays(tmp_path):
+    write_root_proof(tmp_path)
+    result, _ = run_check(tmp_path, extra_env={"DURABLE_PARK_HERMES_CONFIG": str(tmp_path / "nope.yaml")})
+    assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
+
+
+@needs_yaml
+def test_load_check_unparseable_config_with_routes_fails_closed(tmp_path):
+    write_root_proof(tmp_path)
+    env = write_config(tmp_path, "gateway:\n  profile_routes: [unclosed\n")
+    result, took = run_check(tmp_path, timeout="20", extra_env=env)
+    assert result.returncode == 1 and result.stdout.strip() == ROUTES_ALERT
+    assert took < 5
+
+
+def no_yaml_python(tmp_path):
+    """A python that has no yaml (exit 3 for the routes reader) and otherwise is the system python."""
+    stub = tmp_path / "no-yaml-python"
+    stub.write_text(f'#!/bin/sh\ncase "$*" in *yaml*) exit 3 ;; esac\nexec {SYSTEM_PYTHON} "$@"\n')
+    stub.chmod(0o755)
+    return stub
+
+
+@needs_yaml
+def test_load_check_falls_back_to_hermes_own_python_for_the_config(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah")
+    home = tmp_path / "hh"
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    hermes_python = venv / "bin" / "python"
+    hermes_python.write_text(f'#!/bin/sh\nexec {SYSTEM_PYTHON} "$@"\n')
+    hermes_python.chmod(0o755)
+    (home / "installs" / "one").mkdir(parents=True)
+    (home / "installs" / "one" / "facts.json").write_text(json.dumps({"packages": {"venv": {"environment": str(venv)}}}))
+    env = write_config(tmp_path, "gateway:\n  profile_routes:\n    - {profile: sarah}\n")
+    result, _ = run_check(tmp_path, extra_env={**env, "HERMES_HOME": str(home),
+                                               "DURABLE_PARK_PYTHON": str(no_yaml_python(tmp_path))})
+    assert result.returncode == 0
+    assert "loaded for profile sarah (mode=asking, pid=4242)" in result.stdout
+
+
+def test_load_check_no_yaml_anywhere_with_routes_fails_closed(tmp_path):
+    write_root_proof(tmp_path)
+    env = write_config(tmp_path, "gateway:\n  profile_routes:\n    - {profile: sarah}\n")
+    result, took = run_check(tmp_path, timeout="20", extra_env={**env, "HERMES_HOME": str(tmp_path / "none"),
+                                                               "DURABLE_PARK_PYTHON": str(no_yaml_python(tmp_path))})
+    assert result.returncode == 1 and result.stdout.strip() == ROUTES_ALERT
+    assert took < 5
+
+
+def test_load_check_env_override_wins_over_the_config(tmp_path):
+    write_root_proof(tmp_path)
+    env = write_config(tmp_path, "gateway:\n  profile_routes:\n    - {profile: tara}\n")
+    result, _ = run_check(tmp_path, extra_env={**env, "DURABLE_PARK_PROFILES": ""})  # set but empty: no profiles
+    assert result.returncode == 0 and "profile" not in result.stdout
+
+
+# ---- F7: a route name is never a glob, and a config that cannot be read is never "no routes" -----------------
+
+def glob_bait(tmp_path):
+    """A working directory holding files named like valid profiles, each with a proof: if a route name such as ``*``
+    were expanded against it, the check would see two healthy profiles and pass."""
+    write_root_proof(tmp_path)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    for name in ("sarah", "tom"):
+        (cwd / name).write_text("x")
+        write_profile_proof(tmp_path, name)
+    return cwd
+
+
+@pytest.mark.parametrize("name", ["*", "s*", "?arah", "[a-z]arah"])
+def test_load_check_a_glob_in_a_route_name_is_invalid_and_never_expanded(tmp_path, name):
+    cwd = glob_bait(tmp_path)
+    result, took = run_check(tmp_path, timeout="20", cwd=cwd, extra_env={"DURABLE_PARK_PROFILES": name})
+    assert result.returncode == 1 and result.stdout.strip() == BAD_NAME_ALERT
+    assert took < 5
+
+
+def test_load_check_the_glob_check_catches_the_expansion(tmp_path):
+    """The bait works: the same two names, written out, pass."""
+    cwd = glob_bait(tmp_path)
+    result, _ = run_check(tmp_path, cwd=cwd, extra_env=routes("sarah", "tom"))
+    assert result.returncode == 0 and result.stdout.count("loaded for profile") == 2
+
+
+@needs_yaml
+@pytest.mark.parametrize("name", ["*", "s*"])
+def test_load_check_a_glob_in_the_config_is_invalid_and_never_expanded(tmp_path, name):
+    cwd = glob_bait(tmp_path)
+    env = write_config(tmp_path, f'gateway:\n  profile_routes:\n    - {{profile: "{name}"}}\n')
+    result, took = run_check(tmp_path, timeout="20", cwd=cwd, extra_env=env)
+    assert result.returncode == 1 and result.stdout.strip() == BAD_NAME_ALERT
+    assert took < 5
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a chmod 000 file")
+def test_load_check_an_unreadable_config_fails_closed(tmp_path):
+    write_root_proof(tmp_path)
+    env = write_config(tmp_path, "gateway:\n  profile_routes:\n    - {profile: sarah}\n")
+    config = Path(env["DURABLE_PARK_HERMES_CONFIG"])
+    config.chmod(0)
+    try:
+        result, took = run_check(tmp_path, timeout="20", extra_env=env)
+    finally:
+        config.chmod(0o600)
+    assert result.returncode == 1 and result.stdout.strip() == ROUTES_ALERT
+    assert took < 5
+
+
+def test_load_check_grep_finding_nothing_is_still_no_routes(tmp_path):
+    write_root_proof(tmp_path)
+    env = write_config(tmp_path, "model:\n  default: x\n")  # readable, never mentions profile_routes
+    result, took = run_check(tmp_path, extra_env=env)
+    assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
+    assert took < 1.5

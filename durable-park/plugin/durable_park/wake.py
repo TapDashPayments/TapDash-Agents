@@ -11,13 +11,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import os
+import re
+import stat
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import httpx
-from agentapprovalprotocol import AsyncClient
+from agentapprovalprotocol import AsyncClient, CredentialRefused
 
+from . import keys
 from .gatecall import HTTP_TIMEOUT_SECONDS, RETRY_BUDGET_SECONDS
 from .outcome import outcome_text
 from .ledger import Ledger, ParkRow
@@ -26,6 +33,8 @@ log = logging.getLogger("durable_park")
 
 WAKE_ROUTE = "durable-park-wake"
 WAKE_CHAT_NAME = f"webhook/{WAKE_ROUTE}"  # gateway/platforms/webhook.py: chat_name=f"webhook/{route_name}"
+REFUSALS_FILENAME = "wake_refusals.json"  # park id -> {profile, count, first_at}; the sweep reads it
+_REFUSAL_STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
 SKIP_ACTION = {"action": "skip", "reason": "durable-park wake"}
 # pre_gateway_dispatch is NOT bounded by plugins.hook_callback_timeout, so bound the provider read ourselves.
 WAKE_TIMEOUT_SECONDS = 30.0
@@ -58,13 +67,50 @@ OUTCOME_SUFFIX = " Tell the user this in one short message. Do not run anything.
 _ENDED = frozenset({"executed", "failed", "unknown"})
 
 
-def is_wake_event(event: Any) -> bool:
-    """True for an event the webhook platform built for our route (a chat merely *titled* like it is not)."""
+def normalize_profile(profile: str | None) -> str:
+    """One name per profile: None, ``""``, ``"default"`` and ``"main"`` are all the default profile."""
+    return "default" if keys.is_default_profile(profile) or profile == "main" else str(profile)
+
+
+_SESSION_KEY_NAMESPACE = re.compile(r"agent:([^:]+):")
+
+
+def session_key_profile(session_key: str | None) -> str | None:
+    """The profile a Hermes session key belongs to: the ``<ns>`` of ``agent:<ns>:...`` (``main`` and ``default`` are
+    the default profile), else None for a key that does not have that shape (old rows, other platforms)."""
+    match = _SESSION_KEY_NAMESPACE.match(session_key) if isinstance(session_key, str) else None
+    return normalize_profile(match.group(1)) if match else None
+
+
+def wake_chat_name(own_profile: str | None) -> str:
+    """The chat name Hermes gives a wake of this profile: ``webhook/durable-park-wake`` for the default profile,
+    else ``webhook/durable-park-wake-<profile>``."""
+    own = normalize_profile(own_profile)
+    return WAKE_CHAT_NAME if own == "default" else f"{WAKE_CHAT_NAME}-{own}"
+
+
+def _from_webhook(event: Any) -> Any:
+    """The event's source when the webhook platform built it, else None."""
     source = getattr(event, "source", None)
-    if source is None or getattr(source, "chat_name", None) != WAKE_CHAT_NAME:
-        return False
+    if source is None:
+        return None
     platform = getattr(source, "platform", None)
-    return getattr(platform, "value", platform) == "webhook"
+    return source if getattr(platform, "value", platform) == "webhook" else None
+
+
+def is_wake_event(event: Any, own_profile: str | None = None) -> bool:
+    """True for an event the webhook platform built for THIS profile's wake route (a chat merely *titled* like it
+    is not, and neither is another profile's route)."""
+    source = _from_webhook(event)
+    return source is not None and getattr(source, "chat_name", None) == wake_chat_name(own_profile)
+
+
+def is_any_wake_event(event: Any) -> bool:
+    """True for a wake of ANY profile. Only for a copy that does not know its own profile and so refuses to let
+    a wake of any profile reach the agent."""
+    source = _from_webhook(event)
+    name = getattr(source, "chat_name", None) if source is not None else None
+    return isinstance(name, str) and (name == WAKE_CHAT_NAME or name.startswith(WAKE_CHAT_NAME + "-"))
 
 
 def one_line(note: str | None) -> str:
@@ -105,6 +151,90 @@ def make_async_client_factory(base_url: str, token_file: str) -> Callable[[], As
                            http=httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False))
 
     return factory
+
+
+def make_async_client_for_key_file(base_url: str) -> Callable[[str], AsyncClient]:
+    """Like ``make_async_client_factory`` but the key file is named per call (the row's own profile key)."""
+
+    def build(token_file: str) -> AsyncClient:
+        return make_async_client_factory(base_url, token_file)()
+
+    return build
+
+
+def key_file_usable(path: str) -> bool:
+    """True when the key file is a regular file that can be read as UTF-8 text and is not empty (its content is
+    never logged). Anything else (a FIFO or device, which could block the open, a directory) is checked before it
+    is opened. The sweep's ``_key_file_usable`` has the same rule."""
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False
+        with open(path, encoding="utf-8") as handle:
+            return bool(handle.read().strip())
+    except (OSError, ValueError):  # missing, unreadable, or not text (UnicodeDecodeError)
+        return False
+
+
+def _refusals_path(status_dir: str) -> str:
+    return os.path.join(os.path.expanduser(status_dir), REFUSALS_FILENAME)
+
+
+def _read_refusals(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_refusals(path: str, data: dict) -> None:
+    """Atomically (temp file + rename, in the same directory)."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".wake-refusals-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def record_refusal(status_dir: str | None, row: ParkRow) -> None:
+    """The provider refused this profile's key for ``row``: count it in ``wake_refusals.json`` for the sweep.
+    No await inside, so two wakes on the gateway loop never interleave. Never raises."""
+    if not status_dir:
+        return
+    try:
+        path = _refusals_path(status_dir)
+        data = _read_refusals(path)
+        entry = data.get(row.park_id)
+        count = entry.get("count") if isinstance(entry, dict) else None
+        first_at = entry.get("first_at") if isinstance(entry, dict) else None
+        if not isinstance(count, int) or isinstance(count, bool) or not isinstance(first_at, str):
+            count, first_at = 0, datetime.now(timezone.utc).strftime(_REFUSAL_STAMP)
+        data[row.park_id] = {"profile": normalize_profile(row.profile), "count": count + 1, "first_at": first_at}
+        _write_refusals(path, data)
+    except Exception as exc:  # noqa: BLE001 - a failed record must never change what the wake does
+        log.warning("durable-park wake: could not record in %s (%s)", REFUSALS_FILENAME, type(exc).__name__)
+
+
+def clear_refusal(status_dir: str | None, park_id: str) -> None:
+    """Forget a row's refusals (its decision was read, or it is no longer parked). Never raises."""
+    if not status_dir:
+        return
+    try:
+        path = _refusals_path(status_dir)
+        data = _read_refusals(path)
+        if park_id in data:
+            del data[park_id]
+            _write_refusals(path, data)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("durable-park wake: could not update %s (%s)", REFUSALS_FILENAME, type(exc).__name__)
 
 
 class AuditDisabled(Exception):
@@ -191,7 +321,8 @@ async def lookup_decider(request_id: str, audit_client_factory: Callable[[], Any
 
 
 async def _decide_from_provider(row: ParkRow, ledger: Ledger, async_client_factory: Callable[[], Any],
-                                audit_client_factory: Callable[[], Any] | None = None) -> ParkRow | None:
+                                audit_client_factory: Callable[[], Any] | None = None,
+                                status_dir: str | None = None) -> ParkRow | None:
     """Read a parked row's request and record a decision; None when still pending or not decidable."""
     if not row.request_id:
         log.warning("durable-park wake: %s has no approval request yet; left for the sweep", row.park_id)
@@ -199,11 +330,18 @@ async def _decide_from_provider(row: ParkRow, ledger: Ledger, async_client_facto
     client = async_client_factory()
     try:
         request = await asyncio.wait_for(client.get(row.request_id), WAKE_TIMEOUT_SECONDS)
+    except CredentialRefused:
+        # The provider does not accept this profile's key: the row stays parked, the sweep alerts on the record.
+        log.warning("durable-park wake: the provider refused the key of profile %s for %s; left for the sweep",
+                    normalize_profile(row.profile), row.park_id)
+        record_refusal(status_dir, row)
+        return None
     finally:
         close = getattr(client, "aclose", None)
         if close is not None:
             with contextlib.suppress(Exception):
                 await close()
+    clear_refusal(status_dir, row.park_id)  # the read worked, whatever the answer
     status = request.status
     if status == "pending":
         return None
@@ -219,8 +357,43 @@ async def _decide_from_provider(row: ParkRow, ledger: Ledger, async_client_facto
     return ledger.get(row.park_id)
 
 
+def _inside(path: str, directory: str) -> bool:
+    """True when ``path`` is ``directory`` or lies under it, both compared after ``os.path.realpath`` (symlinks
+    resolved; a sibling that merely shares a name prefix is not inside)."""
+    real_path, real_dir = os.path.realpath(path), os.path.realpath(directory)
+    return real_path == real_dir or real_path.startswith(real_dir.rstrip(os.sep) + os.sep)
+
+
+def _own_key_problem(row: ParkRow, token_file: str, own_profile: str | None,
+                     instances_dir: str | None = None) -> str | None:
+    """Why this copy must not use its key for ``row`` (a short reason for the log), or None.
+
+    The row's key file is ``keys.token_file_for(row.profile)``: for the default profile the copy's configured
+    ``token_file``, for a person ``<dir of the configured token_file>/<profile>.token``. It must match the
+    ``token_file`` this copy was given after ``os.path.normpath`` on both, so a copy wired to another person's
+    key never reads for this row. The
+    default profile's ``token_file`` must also not lie inside the instances directory (``instances_dir``, default
+    ``keys.INSTANCES_DIR``; both sides ``realpath``-ed), where only people's keys live: a default copy wired to a
+    person's key file would otherwise read with it. Then the file must exist and hold a key.
+    """
+    try:
+        profile = None if normalize_profile(row.profile) == "default" else row.profile
+        expected = keys.token_file_for(profile, default=token_file, instances_dir=str(Path(token_file).parent))
+    except ValueError:
+        return "the row's profile name is not valid"
+    if os.path.normpath(expected) != os.path.normpath(token_file):
+        return "the configured token_file is not this profile's key file"
+    if profile is None and _inside(token_file, keys.INSTANCES_DIR if instances_dir is None else instances_dir):
+        return "the default profile's token_file lies inside the instances directory (a person's key file)"
+    if not key_file_usable(token_file):
+        return f"its key file {token_file} is missing, empty or unreadable"
+    return None
+
+
 async def _process(event: Any, ledger: Ledger, async_client_factory: Callable[[], Any],
-                   inject: Callable[..., bool], audit_client_factory: Callable[[], Any] | None = None) -> None:
+                   inject: Callable[..., bool], audit_client_factory: Callable[[], Any] | None = None, *,
+                   own_profile: str | None = None, token_file: str | None = None, status_dir: str | None = None,
+                   client_for_key_file: Callable[[str], Any] | None = None) -> None:
     payload = getattr(event, "raw_message", None)  # the parsed JSON body (webhook.py: raw_message=payload)
     park_id = payload.get("park_id") if isinstance(payload, dict) and payload.get("type") == "wake" else None
     if not isinstance(park_id, str) or not park_id:
@@ -230,6 +403,32 @@ async def _process(event: Any, ledger: Ledger, async_client_factory: Callable[[]
     if row is None:
         log.warning("durable-park wake: unknown park_id %.40r ignored", park_id)
         return
+    row_profile, own = normalize_profile(row.profile), normalize_profile(own_profile)
+    if row_profile != own:
+        # Hermes lets a plugin post only into its own profile's chats: never read or tell for another profile.
+        log.warning("durable-park wake: %s belongs to profile %s but this copy serves profile %s; "
+                    "left for the sweep", row.park_id, row_profile, own)
+        return
+    key_profile = session_key_profile(row.session_key)
+    if key_profile is not None and key_profile != own:
+        # The row's profile says this copy, but the chat it would be told in belongs to another profile (the profile
+        # came from the turn's environment, the session key from the routing): never read or tell for it.
+        log.warning("durable-park wake: %s says profile %s but its session key belongs to profile %s, and this copy "
+                    "serves profile %s; left for the sweep", row.park_id, row_profile, key_profile, own)
+        return
+    if row.status != "parked":
+        clear_refusal(status_dir, row.park_id)
+    if token_file is not None and row.status in ("parked", "approved"):
+        problem = _own_key_problem(row, token_file, own_profile)
+        if problem is not None:
+            log.warning("durable-park wake: %s of profile %s not resumed: %s; left for the sweep",
+                        row.park_id, row_profile, problem)
+            return
+        if client_for_key_file is not None:
+            key_file = token_file
+
+            def async_client_factory() -> Any:  # noqa: F811 - the client of the row's own key file
+                return client_for_key_file(key_file)
     if row.status in _ENDED:
         # GitHub #66: the run ended but the chat was not told (the executor's own post did not happen or did not
         # work). No await: the check, the inject and the mark run together on the gateway loop.
@@ -242,7 +441,7 @@ async def _process(event: Any, ledger: Ledger, async_client_factory: Callable[[]
             log.warning("durable-park wake: gateway did not accept the outcome of %s; left untold", row.park_id)
         return
     if row.status == "parked":
-        row = await _decide_from_provider(row, ledger, async_client_factory, audit_client_factory)
+        row = await _decide_from_provider(row, ledger, async_client_factory, audit_client_factory, status_dir)
         if row is None:
             return
     # No await below: on the gateway loop the check, the inject and mark_notified run atomically, so two
@@ -261,23 +460,36 @@ async def _process(event: Any, ledger: Ledger, async_client_factory: Callable[[]
 
 async def handle_wake(event: Any, *, ledger: Ledger, async_client_factory: Callable[[], Any],
                       inject: Callable[..., bool],
-                      audit_client_factory: Callable[[], Any] | None = None) -> dict | None:
+                      audit_client_factory: Callable[[], Any] | None = None,
+                      own_profile: str | None = None, token_file: str | None = None,
+                      status_dir: str | None = None,
+                      client_for_key_file: Callable[[str], Any] | None = None) -> dict | None:
     """``pre_gateway_dispatch`` body. Returns None for any event that is not ours; for a wake it always
-    returns the skip directive, even on failure (the row stays unnotified and the sweep re-wakes it)."""
-    if not is_wake_event(event):
+    returns the skip directive, even on failure (the row stays unnotified and the sweep re-wakes it).
+
+    ``own_profile`` is the profile this copy serves (None = the default profile): it only treats its own wake
+    route as a wake and only handles rows of its own profile. ``token_file`` is this copy's key file: when given,
+    a parked or approved row is resumed only if that file is the row's profile key and holds a key, and the
+    decision is read with a client from ``client_for_key_file(token_file)`` (else ``async_client_factory``).
+    ``status_dir`` (optional) is where ``wake_refusals.json`` goes."""
+    if not is_wake_event(event, own_profile):
         return None
     try:
-        await _process(event, ledger, async_client_factory, inject, audit_client_factory)
+        await _process(event, ledger, async_client_factory, inject, audit_client_factory, own_profile=own_profile,
+                       token_file=token_file, status_dir=status_dir, client_for_key_file=client_for_key_file)
     except Exception as exc:  # noqa: BLE001 - never let a wake reach the agent or crash the gateway
         log.warning("durable-park wake failed (%s); the sweep will retry", type(exc).__name__)
     return dict(SKIP_ACTION)
 
 
-def drop_wake_hook():
-    """A ``pre_gateway_dispatch`` hook for when the ledger is unavailable: still keep wakes from the agent."""
+def drop_wake_hook(own_profile: str | None = None, *, any_profile: bool = False):
+    """A ``pre_gateway_dispatch`` hook for when the ledger is unavailable: still keep wakes from the agent.
+    It drops this profile's wake route; ``any_profile=True`` (the profile setting is unusable) drops every
+    profile's."""
+    matches = is_any_wake_event if any_profile else (lambda event: is_wake_event(event, own_profile))
 
     async def durable_park_drop_wake(event=None, **_kw):
-        if is_wake_event(event):
+        if matches(event):
             log.warning("durable-park wake dropped: ledger unavailable")
             return dict(SKIP_ACTION)
         return None
