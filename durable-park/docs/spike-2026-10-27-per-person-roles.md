@@ -4,6 +4,8 @@
 
 **Verdict after the re-run: `OPTION = R`, but `INJECT_CROSS_PROFILE = no`, which is the plan's own example of a blocker. By the plan's STOP rule, stop before Tasks 3 and 4 until the wake design is changed. See "Re-run" and "Does any answer block the design?".**
 
+**Task 1b (Oct 27, 9:00 to 9:17 AM ET): `WAKE_ROUTE_PER_PROFILE = yes`. Sending each wake to the person's own profile fixes that blocker. See "Task 1b: per-profile wake" at the end.**
+
 Linear [TAP2-27](https://linear.app/tapdash/issue/TAP2-27). Plan: [docs/plans/2026-10-26-per-person-roles.md](../../docs/plans/2026-10-26-per-person-roles.md), Task 1.
 Spec: [docs/specs/2026-10-26-per-person-roles-design.md](../../docs/specs/2026-10-26-per-person-roles-design.md), section 8.
 
@@ -119,8 +121,11 @@ archived (0 live instances); `hermes_pin.sh check` as `hermes` in a login shell:
 | `LLM_KEY_SOURCE` | The profile had **no** `auth.json` and an empty `.env`. Hermes used the **global** `~/.hermes/auth.json` (Nous login) as a read-only fallback (`hermes_cli/auth.py`: "profile first, then the global root"). The model answered (provider `nous`). The profile's secret set held only `DURABLE_PARK_WH_TOKEN`: **no** `TEAMS_*`, `TELEGRAM_*` or `BWS_*` keys |
 | `TEAMS_USER_ID_SHAPE` | Entra object ID: a 36-character lowercase GUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`), same as `TEAMS_ALLOWED_USERS`. Route `guild_id` = tenant ID, also a 36-character GUID. The route with `user_id` + `guild_id` matched. (The chat ID is a different thing: `a:` plus a long text) |
 | `SLUG_SEPARATOR` | not tested (only needed for option P) |
+| `WAKE_ROUTE_PER_PROFILE` | **yes** (Task 1b). A wake posted to `/p/spike/webhooks/durable-park-wake-spike` (route copied from `durable-park-wake` plus `profile: spike`) returned `202`, reached the spike profile's copy, which read the decision with the spike key (no `CredentialRefused`) and posted the result in Yaakov's Teams chat with no typing from him. Park `P-B80D1348`; withHuman requests `593a5e20` (park) and `51686024` (gateway). Needs the `is_wake_event` change (Task 4) |
 
 ## Does any answer block the design?
+
+**Update after Task 1b: the blocker below is cleared. A per-person wake route works (`WAKE_ROUTE_PER_PROFILE = yes`), see "Task 1b: per-profile wake".**
 
 **Yes. After the re-run, `INJECT_CROSS_PROFILE = no`, and the plan names exactly that as a blocker. STOP before
 Tasks 3 and 4 until the wake design is changed.** `OPTION = R` is settled. The text below the line is the first
@@ -186,3 +191,100 @@ From the first run:
 3. The park hook's one-at-a-time rule opens a withHuman request for the second call and then cancels it, but the
    cancelled ledger row does not save that request's ID (`098c70f5` is only findable in withHuman). Not harmful (nothing runs), just good to know when reading records.
 
+## Task 1b: per-profile wake (Oct 27, 9:00 to 9:17 AM ET, 13:00 to 13:17Z)
+
+**Result: `WAKE_ROUTE_PER_PROFILE = yes`.** A wake posted to the person's own route reached that person's profile.
+That profile's copy of durable-park read the decision with its own key, posted into its own chat, and the result
+reached Yaakov's Teams chat with no typing from him. This clears the `INJECT_CROSS_PROFILE = no` blocker above.
+Fully cleaned up. Plan: Task 1b. Spec: section 6.4 and section 8, item 9.
+
+Times below are US Eastern (ET) on the morning of 2026-10-27, with UTC in brackets.
+
+### What was set up (all removed again)
+
+- withHuman agent `spike-c` (kind `service`), instances `spike-c-1` (`4830593c-...`) and `spike-c-2` (`eb839f2d-...`).
+  The `spike-c-1` key went straight to `/etc/durable-park/instances/spike.token` (root:hermes 640, never printed).
+- Grant: `spike-c` on QuickBooks **sandbox**, `get_customer` and `create_customer` only.
+- Blank profile `spike` (same settings as Task 1: model, `mcp_servers.wh`, durable-park with
+  `token_file: /etc/durable-park/instances/spike.token` and the shared ledger, no own bots, secrets helper that prints
+  only `DURABLE_PARK_WH_TOKEN`). `hermes_tool_policy.py apply` and `check` passed for the profile.
+- The profile's `plugins/durable-park` pointed at a **throwaway worktree** of `main` (`141f0a0`), never the live
+  clone. In that copy only, `is_wake_event` (`wake.py:61-67`) also accepted `webhook/durable-park-wake-spike`.
+  This code change was not committed; the real change belongs in Task 4 (spec 6.4).
+- In the default profile's `config.yaml`:
+  - the Teams route `{name: spike, platform: teams, user_id: <Yaakov>, guild_id: <tenant>, profile: spike}`;
+  - the wake route below. `gateway.multiplex_profiles: true` was already set (it is needed for `/p/<profile>/`).
+- One restart at 9:00:22 AM (13:00:22Z): 0 active ledger rows before, `:3978` count 1 after. Log:
+  `[webhook] Listening on 127.0.0.1:8644 — routes: durable-park-wake, durable-park-wake-spike`.
+
+**Route settings that worked** (a copy of `durable-park-wake` plus `profile`):
+
+```yaml
+platforms:
+  webhook:
+    extra:
+      routes:
+        durable-park-wake-spike:
+          secret: ${DURABLE_PARK_WAKE_SECRET}   # same secret reference as durable-park-wake
+          events: [wake]
+          deliver: log
+          prompt: "durable-park wake event. The durable-park plugin handles it; if you see this, reply only: ignored."
+          profile: spike
+```
+
+Wake address: `http://127.0.0.1:8644/p/spike/webhooks/durable-park-wake-spike`.
+
+### What happened
+
+1. 9:06 AM (13:06:33Z): Yaakov sent "Look up customer 1" in Teams. It ran in the spike profile
+   (session `agent:spike:teams:dm:...`) and parked: `parked P-B80D1348 tool=mcp__wh__quickbooks__get_customer`.
+   Ledger row `profile=spike`. withHuman park request `593a5e20-fa79-5390-9361-ec8ae37ac86a`.
+2. Yaakov approved it in withHuman. The spike key read it: `200`, `approved`. The ledger row stayed `parked`:
+   no wake reached any route on its own (the receiver still posts only to the old address, as the plan expected).
+3. 9:09:03 AM (13:09:03Z): wake posted by hand, as `hermes`, with `post_wake("P-B80D1348", <secret read from
+   /etc/durable-park/wake_secret, never printed>, "http://127.0.0.1:8644/p/spike/webhooks/durable-park-wake-spike")`.
+   **HTTP status `202`.**
+4. The wake landed in the **spike** profile's log, not the default's (default log: only the access line
+   `"POST /p/spike/webhooks/durable-park-wake-spike HTTP/1.1" 202`):
+
+   ```text
+   13:09:04,011 [webhook] POST event=wake route=durable-park-wake-spike prompt_len=98
+   13:09:04,174 GET .../api/aap/v1/requests/593a5e20-... "HTTP/1.1 200 OK"        (spike key)
+   13:09:04,333 pre_gateway_dispatch skip: reason=durable-park wake platform=webhook
+   13:09:04,341 Plugin message injection admitted: plugin=durable-park session=agent:spike:teams:dm:...
+   13:09:04,351 inbound message: ... msg='[durable-park] P-B80D1348 was APPROVED in withHuman by Yaakov Y Trout (web) ...'
+   ```
+
+   No `CredentialRefused` anywhere in the spike profile's log (count 0).
+5. The bot called `parked_action_execute`. The gateway step asked once more (withHuman request
+   `51686024-4aec-5a09-b970-3e533c1ce78a`, tool `get_customer`); Yaakov approved it.
+6. 9:09:52 AM (13:09:52Z): `executed P-B80D1348`, then
+   `plugin_message plugin=durable-park op=post platform=teams ... ok=True` (Teams `201 Created`), and the bot's
+   own answer at 13:10:03 (`201 Created`). Ledger row `executed`, `outcome_notified_at` set. Yaakov typed nothing
+   after his first message.
+
+Both withHuman requests show agent `spike-c` and the same instance `spike-c-1` (`4830593c-...`), so
+`INSTANCE_ON_BOTH_RECORDS = yes` again.
+
+### Clean up (9:15 to 9:17 AM ET, 13:15 to 13:17Z)
+
+- `config.yaml` restored byte-for-byte from its backup (Teams route and wake route gone); 0 active ledger rows;
+  restart at 13:15:05Z; `:3978` count 1; log: `routes: durable-park-wake` only.
+- `hermes profile delete -y spike` (the gateway kept running; it logged `Profile 'spike' unserved`). Hermes leaves
+  its own marker `~/.hermes/profiles/.deleted/spike`.
+- Throwaway worktree removed (`git worktree remove --force`, `git worktree prune`); live clone untouched and clean.
+- `spike.token` shredded and the empty `instances` folder removed; secrets helper, the ID file, the temporary
+  `~/.spike` folder and the config backup deleted.
+- withHuman: grant set to `none` (revision 2), both instances `disabled`, `spike-c` archived; no pending
+  `spike-c` requests.
+- `hermes_pin.sh check`: OK, Hermes on the pinned v0.22.3 (`5b147ab`), update block on, passive update check off.
+- No ledger rows were written by hand. `P-B80D1348` (`executed`) stays until the 30-day cleanup.
+
+### What this means for later tasks
+
+- Task 4 can use the per-profile wake as specified in 6.4. Its file list must include the `is_wake_event` change
+  (the default copy accepts `webhook/durable-park-wake`; a person's copy accepts only
+  `webhook/durable-park-wake-<its own profile>`). Without it the wake is ignored.
+- The receiver and the sweep must post to `/p/<profile>/webhooks/durable-park-wake-<profile>` (here it was done by
+  hand).
+- A lookup still asks twice (park, then gateway), as in Task 1.
