@@ -15,7 +15,7 @@ and the gateway delivers model-named files (``MEDIA:`` paths) only from the Herm
 Run inside Hermes's own Python environment, as the hermes user (deploy/configure_hermes.sh does that):
 
     <hermes env python> -I deploy/hermes_tool_policy.py apply [--allow-file PATH]
-    <hermes env python> -I deploy/hermes_tool_policy.py check [--allow-file PATH] [--status-file PATH]
+    <hermes env python> -I deploy/hermes_tool_policy.py check [--allow-file PATH] [--status-file PATH] [--expect-no-tools]
 
 Opening a toolset: the root-owned file ``ALLOW_FILE`` (/etc/durable-park/allowed_toolsets) lists extra
 toolsets, one per line (``#`` comments), that are taken out of ``agent.disabled_toolsets`` and added to every
@@ -23,6 +23,12 @@ platform list. Empty or missing = the v1 lockdown above, unchanged. Toolsets wit
 access (``PHASE2_TOOLSETS``) are refused until Clean Setup Phase 2. Exit codes: 0 ok, 1 check failed,
 2 usage error or invalid allow file (message on stderr, nothing applied). ``check --status-file`` writes
 ``{"ok", "checked_at", "problems", "allowed"}`` atomically, also when the check fails or crashes.
+
+``check --expect-no-tools`` is for the ``not-set-up`` profile of the per-person roles (deploy/tool_policy_check.sh
+passes it for that one profile): the chat platforms must have no tool at all, in the catalog or the model's list
+(``parked_action_execute`` is not required), the postures and media delivery are judged as usual, and the report also
+carries ``"has_tools"`` (false only when the check ran to the end and found none on the chat platforms; the
+command-line postures are judged but do not count as "has tools"). deploy/profile_keys_check.py reads that flag.
 
 Policy, three layers (Hermes v0.22.2, ~/.hermes/hermes-agent):
 1. ``platform_toolsets.<platform> = [durable_park, clarify, wh]`` for EVERY platform key an agent can run
@@ -419,6 +425,51 @@ def config_ledger_path(config: dict) -> str | None:
     return (entry.get("settings") or {}).get("ledger_path")
 
 
+def _check_postures(extra: set[str] | frozenset[str], problems: list[str]) -> None:
+    """Judge the sessions that take no toolsets from ``platform_toolsets`` (``POSTURES``): every tool they would get
+    must be an allowed one. Appends to *problems*."""
+    for posture, enabled in POSTURES.items():
+        for platform in ("cli", "tui", "desktop", "acp", "telegram"):
+            found = tool_problems(effective_tools(platform, enabled, assemble=False),
+                                  effective_tools(platform, enabled), extra)
+            # a posture session gets none of the platform lists: its own tools must still all be allowed, but it
+            # need not carry the executor (``MISSING`` is judged per platform above)
+            found = [p for p in found if not p.startswith("MISSING ")]
+            problems += [f"{posture}@{platform}: {p}" for p in found]
+            if found:
+                print(f"{posture}@{platform}: {', '.join(found)}")
+
+
+def _check_media(problems: list[str]) -> None:
+    """Judge model-named file delivery (``media_check``). Appends to *problems*."""
+    media = media_check()
+    for problem in media:
+        print(f"media: {problem}")
+    problems += [f"media: {p}" for p in media]
+    if not media:
+        print("media: ok (strict, no recency trust; wake_secret, ledger and a fresh file are not deliverable)")
+
+
+def check_no_tools(problems: list[str], seen: list[str]) -> int:
+    """The ``not-set-up`` profile's check: no chat platform may have a tool at all (the catalog and the model's
+    list are both empty); the postures and media delivery are judged as in ``check``. Every tool found is appended
+    to *seen* (once) and to *problems* as ``<platform>: has tool <name>``. Returns 1 on any problem."""
+    _plugin_toolsets()  # discovery registers plugin tools, as at agent start
+    for platform in _platforms():
+        names = sorted(set(effective_tools(platform)) | set(effective_tools(platform, assemble=False)))
+        seen += [n for n in names if n not in seen]
+        problems += [f"{platform}: has tool {n}" for n in names]
+        print(f"{platform}: " + (", ".join(names) or "(none)") + ("  has tools" if names else ""))
+    _check_postures(frozenset(), problems)
+    _check_media(problems)
+    if problems:
+        print(f"tool policy: FAILED, {len(problems)} problem(s): a tool is reachable in a profile that must have "
+              "none, or media delivery is open", file=sys.stderr)
+        return 1
+    print(f"tool policy: ok on {len(_platforms())} platform keys (no tools at all)")
+    return 0
+
+
 def check(allowed: list[str] | None = None, problems: list[str] | None = None) -> int:
     """Print each platform's tools; return 1 on a leak. Every problem is also appended to *problems*."""
     allowed = list(allowed or [])
@@ -440,24 +491,10 @@ def check(allowed: list[str] | None = None, problems: list[str] | None = None) -
         if problem:
             problems.append(f"skills: {problem} (skill_manage must stay denied while skills is open)")
             print(f"skills: LEAK {problem}")
-    for posture, enabled in POSTURES.items():
-        for platform in ("cli", "tui", "desktop", "acp", "telegram"):
-            found = tool_problems(effective_tools(platform, enabled, assemble=False),
-                                  effective_tools(platform, enabled), extra)
-            # a posture session gets none of the platform lists: its own tools must still all be allowed, but it
-            # need not carry the executor (``MISSING`` is judged per platform above)
-            found = [p for p in found if not p.startswith("MISSING ")]
-            problems += [f"{posture}@{platform}: {p}" for p in found]
-            if found:
-                print(f"{posture}@{platform}: {', '.join(found)}")
+    _check_postures(extra, problems)
     print(f"postures ({', '.join(POSTURES)}) on cli/tui/desktop/acp/telegram: "
           + ("ok" if not problems else "see LEAK lines"))
-    media = media_check()
-    for problem in media:
-        print(f"media: {problem}")
-    problems += [f"media: {p}" for p in media]
-    if not media:
-        print("media: ok (strict, no recency trust; wake_secret, ledger and a fresh file are not deliverable)")
+    _check_media(problems)
     if problems:
         print(f"tool policy: FAILED, {len(problems)} problem(s): forbidden tool reachable, {REQUIRED_TOOL} missing "
               "or media delivery open", file=sys.stderr)
@@ -470,10 +507,11 @@ def check(allowed: list[str] | None = None, problems: list[str] | None = None) -
     return 0
 
 
-def write_status(path: str, ok: bool, problems: list[str], allowed: list[str]) -> None:
-    """Write the check result as JSON, atomically (temp file in the same directory, then rename)."""
+def write_status(path: str, ok: bool, problems: list[str], allowed: list[str], **extra) -> None:
+    """Write the check result as JSON, atomically (temp file in the same directory, then rename). *extra* adds
+    keys to the report (``has_tools`` for ``check --expect-no-tools``)."""
     status = {"ok": ok, "checked_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "problems": problems, "allowed": allowed}
+              "problems": problems, "allowed": allowed, **extra}
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".status-", suffix=".tmp")
     try:
@@ -500,6 +538,8 @@ def _parser() -> argparse.ArgumentParser:
         p.add_argument("--allow-file", default=ALLOW_FILE, metavar="PATH")
         if name == "check":
             p.add_argument("--status-file", default=None, metavar="PATH")
+            p.add_argument("--expect-no-tools", action="store_true",
+                           help="the profile must have no tools at all (the not-set-up profile)")
     return parser
 
 
@@ -521,6 +561,7 @@ def main(argv: list[str]) -> int:
         return 2
     status_file = getattr(args, "status_file", None)
     problems: list[str] = []
+    report_extra: dict = {}
     if status_file:  # replace any earlier pass first: a crash or a failed final write must not leave a stale ok
         try:
             write_status(status_file, False, ["check did not finish"], allowed)
@@ -531,7 +572,12 @@ def main(argv: list[str]) -> int:
         _bootstrap()
         if args.command == "apply":
             return apply(allowed)
-        rc = check(allowed, problems)
+        if getattr(args, "expect_no_tools", False):
+            seen: list[str] = []
+            rc = check_no_tools(problems, seen)
+            report_extra["has_tools"] = bool(seen)  # only when the check ran to the end
+        else:
+            rc = check(allowed, problems)
     except Exception as exc:  # noqa: BLE001 - a crashed check must still leave a failing status file
         if not status_file:
             raise
@@ -543,7 +589,7 @@ def main(argv: list[str]) -> int:
             write_status(status_file, False, ["check interrupted"], allowed)
         raise
     if status_file:
-        write_status(status_file, rc == 0, problems, allowed)
+        write_status(status_file, rc == 0, problems, allowed, **report_extra)
     return rc
 
 

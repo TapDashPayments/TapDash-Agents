@@ -384,7 +384,8 @@ def _run_wrapper_with_stub(tmp_path, stub_body, *, existing=None):
 
 
 STUB_FAILS = "exit 1\n"
-STUB_PASSES = ('while [ $# -gt 0 ]; do [ "$1" = --status-file ] && f=$2; shift; done\n'
+STUB_PASSES = ('case "$2" in *profile_keys_check.py) exit 0 ;; esac\n'  # the profile helpers: nothing to list, no problems
+               'while [ $# -gt 0 ]; do [ "$1" = --status-file ] && f=$2; shift; done\n'
                'printf \'{"ok": true, "checked_at": "2099-01-01T00:00:00Z", "problems": [], "allowed": []}\\n\' > "$f"\n')
 OLD_PASS = '{"ok": true, "checked_at": "2020-01-01T00:00:00Z", "problems": [], "allowed": []}'
 
@@ -637,3 +638,289 @@ def test_configure_sets_restart_drain_timeout():
     text = SCRIPT.read_text()
     assert "set_cfg agent.restart_drain_timeout 45" in text
     assert 45 <= GATEWAY_TIMEOUT_STOP_SEC - 15
+
+
+# ---- the secrets helper: one program, one key file per profile ---------------------------------------------
+
+def _helper(tmp_path, etc):
+    """The helper exactly as configure_hermes.sh would install it (the heredoc, expanded by bash with ETC set)."""
+    text = SCRIPT.read_text()
+    marker = 'cat >"$helper" <<HELPER\n'
+    start = text.index(marker) + len(marker)
+    body = text[start:text.index("\nHELPER\n", start)]
+    expanded = subprocess.run(["bash", "-c", f"ETC={etc}\ncat <<HELPER\n{body}\nHELPER\n"],
+                              capture_output=True, text=True, check=True).stdout
+    path = tmp_path / "hermes-secrets"
+    path.write_text(expanded)
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture
+def secrets_etc(tmp_path):
+    etc = tmp_path / "etc"
+    (etc / "instances").mkdir(parents=True)
+    (etc / "wake_secret").write_text("WAKE-SECRET\nsecond line\n")
+    return etc
+
+
+def _run_helper(tmp_path, etc, *args):
+    helper = _helper(tmp_path, etc)
+    return subprocess.run([str(helper), *args], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+
+
+def test_helper_without_an_argument_is_unchanged(tmp_path, secrets_etc):
+    (secrets_etc / "instance_token").write_text("DEFAULT-KEY\nignored\n")
+    result = _run_helper(tmp_path, secrets_etc)
+    assert result.returncode == 0
+    assert result.stdout == "DURABLE_PARK_WAKE_SECRET=WAKE-SECRET\nDURABLE_PARK_WH_TOKEN=DEFAULT-KEY\n"
+
+
+def test_helper_without_an_argument_and_without_a_key_prints_only_the_wake_secret(tmp_path, secrets_etc):
+    result = _run_helper(tmp_path, secrets_etc)
+    assert result.returncode == 0 and result.stdout == "DURABLE_PARK_WAKE_SECRET=WAKE-SECRET\n"
+
+
+def test_helper_without_an_argument_fails_when_the_wake_secret_is_missing(tmp_path, secrets_etc):
+    (secrets_etc / "wake_secret").unlink()
+    assert _run_helper(tmp_path, secrets_etc).returncode != 0
+
+
+def test_helper_with_a_profile_prints_only_that_persons_key(tmp_path, secrets_etc):
+    (secrets_etc / "instance_token").write_text("DEFAULT-KEY\n")
+    (secrets_etc / "instances" / "sarah.token").write_text("SARAH-KEY\nsecond\n")
+    (secrets_etc / "instances" / "tara.token").write_text("TARA-KEY\n")
+    result = _run_helper(tmp_path, secrets_etc, "sarah")
+    assert result.returncode == 0
+    assert result.stdout == "DURABLE_PARK_WH_TOKEN=SARAH-KEY\n"
+    for secret in ("WAKE-SECRET", "DEFAULT-KEY", "TARA-KEY", "second"):
+        assert secret not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("make", [None, "empty", "directory"])
+def test_helper_with_a_profile_whose_key_is_missing_prints_nothing_and_succeeds(tmp_path, secrets_etc, make):
+    target = secrets_etc / "instances" / "sarah.token"
+    if make == "empty":
+        target.write_text("")
+    elif make == "directory":
+        target.mkdir()
+    result = _run_helper(tmp_path, secrets_etc, "sarah")
+    assert result.returncode == 0 and result.stdout == ""
+
+
+@pytest.mark.parametrize("name", ["default", "main", "", "../x", "x/y", "Sarah", "a b", "-x", "_x", "x.y", "x\ny",
+                                  "a" * 64, "*", "x;y", "$(id)"])
+def test_helper_refuses_a_bad_profile_name(tmp_path, secrets_etc, name):
+    (secrets_etc / "instance_token").write_text("DEFAULT-KEY\n")
+    (secrets_etc / "instances" / "x.token").write_text("X-KEY\n")
+    result = _run_helper(tmp_path, secrets_etc, name)
+    assert result.returncode == 2 and result.stdout == ""
+
+
+def test_helper_refuses_two_arguments(tmp_path, secrets_etc):
+    (secrets_etc / "instances" / "sarah.token").write_text("SARAH-KEY\n")
+    result = _run_helper(tmp_path, secrets_etc, "sarah", "tara")
+    assert result.returncode == 2 and result.stdout == ""
+
+
+def test_helper_accepts_the_longest_allowed_name(tmp_path, secrets_etc):
+    name = "a" * 63
+    (secrets_etc / "instances" / f"{name}.token").write_text("LONG-KEY\n")
+    assert _run_helper(tmp_path, secrets_etc, name).stdout == "DURABLE_PARK_WH_TOKEN=LONG-KEY\n"
+
+
+def test_helper_name_rule_matches_keys_py():
+    """The shell rule and the Python rule must say the same thing about the same names."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("durable_park_keys", SCRIPT.parents[1] / "plugin" / "durable_park" / "keys.py")
+    keys = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(keys)
+    assert keys.PROFILE_PATTERN == r"[a-z0-9][a-z0-9_-]{0,62}"
+    assert keys.RESERVED_PROFILES == {"default", "main"}
+
+
+# ---- tool_policy_check.sh: every installed profile, then the key check -------------------------------------
+
+WRAPPER_STUB = r"""#!/bin/sh
+# a fake Hermes python: -I SCRIPT ARGS...; logs every call to $STUB_LOG, writes reports like the real checks
+script=$2
+case "$script" in
+*hermes_tool_policy.py)
+    shift 2
+    f=""
+    flags=""
+    while [ $# -gt 0 ]; do
+        case "$1" in --status-file) f=$2 ;; --expect-no-tools) flags="no-tools" ;; esac
+        shift
+    done
+    printf 'policy|%s|%s|%s\n' "$HERMES_HOME" "$f" "$flags" >> "$STUB_LOG"
+    # like the real check: it cannot write its report into a folder that does not exist
+    if [ ! -d "$(dirname "$f")" ]; then echo "cannot write status file $f" >&2; exit 1; fi
+    if [ -z "$STUB_POLICY_SILENT" ]; then
+        printf '{"ok": true, "checked_at": "2099-01-01T00:00:00Z", "problems": [], "allowed": []}\n' > "$f"
+    fi
+    exit 0
+    ;;
+*profile_keys_check.py)
+    shift 2
+    printf 'keys|%s\n' "$*" >> "$STUB_LOG"
+    case "$1" in
+    list) cat "$STUB_PROFILES"; exit "${STUB_LIST_RC:-0}" ;;
+    check)
+        if [ -n "$STUB_KEYS_MARK" ]; then  # like the real check with a problem: every report rewritten as failing
+            more=""
+            [ "$STUB_KEYS_MARK" = "default" ] || more=$(sed "s|.*|$5/profiles/&/tool_policy_status.json|" "$STUB_PROFILES")
+            for r in "$5/tool_policy_status.json" $more; do
+                printf '{"ok": false, "checked_at": "2099-01-01T00:00:00Z", "problems": ["profile x: no key file"], "allowed": []}\n' > "$r"
+            done
+        fi
+        exit "${STUB_KEYS_RC:-0}" ;;
+    esac
+    ;;
+esac
+exit 99
+"""
+
+
+def _wrapper_run(tmp_path, profiles=(), *, list_rc=0, keys_rc=0, policy_silent=False, existing=(), keys_mark=""):
+    """The wrapper against a fake Hermes home with the profile folders in *profiles*; returns a small namespace."""
+    home = tmp_path / "hermes"
+    (home / "installs" / "x").mkdir(parents=True)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    stub = venv / "bin" / "python"
+    stub.write_text(WRAPPER_STUB)
+    stub.chmod(0o755)
+    (home / "installs" / "x" / "facts.json").write_text(json.dumps({"packages": {"venv": {"environment": str(venv)}}}))
+    for name in profiles:
+        (home / "profiles" / name).mkdir(parents=True)
+        (home / "profiles" / name / "config.yaml").write_text("{}")
+    state = tmp_path / "state"
+    state.mkdir()
+    for rel in existing:  # files that exist before the run
+        (state / rel).parent.mkdir(parents=True, exist_ok=True)
+        (state / rel).write_text("old")
+    (tmp_path / "profiles.txt").write_text("".join(f"{name}\n" for name in profiles))
+    log = tmp_path / "calls.log"
+    log.write_text("")
+    result = subprocess.run(["bash", str(POLICY_WRAPPER)], capture_output=True, text=True, env={
+        "PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "HERMES_HOME": str(home),
+        "DURABLE_PARK_POLICY_STATUS": str(state / "tool_policy_status.json"),
+        "DURABLE_PARK_PLUGIN_LOAD": str(state / "plugin_load.json"),
+        "STUB_LOG": str(log), "STUB_PROFILES": str(tmp_path / "profiles.txt"), "STUB_LIST_RC": str(list_rc),
+        "STUB_KEYS_RC": str(keys_rc), **({"STUB_POLICY_SILENT": "1"} if policy_silent else {}),
+        **({"STUB_KEYS_MARK": keys_mark} if keys_mark else {})})
+    calls = [line.split("|") for line in log.read_text().splitlines()]
+    return type("Run", (), {"result": result, "home": home, "state": state, "calls": calls})
+
+
+def _report(run, *parts):
+    return json.loads(run.state.joinpath(*parts, "tool_policy_status.json").read_text())
+
+
+def test_wrapper_checks_each_profile_with_its_own_home_and_report(tmp_path):
+    run = _wrapper_run(tmp_path, ["sarah", "tara"])
+    assert run.result.returncode == 0
+    policy_calls = [c for c in run.calls if c[0] == "policy"]
+    assert policy_calls == [
+        ["policy", str(run.home), str(run.state / "tool_policy_status.json"), ""],
+        ["policy", str(run.home / "profiles" / "sarah"), str(run.state / "profiles" / "sarah" / "tool_policy_status.json"), ""],
+        ["policy", str(run.home / "profiles" / "tara"), str(run.state / "profiles" / "tara" / "tool_policy_status.json"), ""]]
+    for parts in ((), ("profiles", "sarah"), ("profiles", "tara")):
+        assert _report(run, *parts)["ok"] is True
+
+
+def test_wrapper_with_no_profiles_is_exactly_the_old_run(tmp_path):
+    run = _wrapper_run(tmp_path)
+    assert run.result.returncode == 0
+    assert [c[0] for c in run.calls] == ["policy", "keys", "keys"]  # root check, list, key check
+    assert not (run.state / "profiles").exists()
+
+
+def test_wrapper_runs_not_set_up_with_no_tools_expected(tmp_path):
+    run = _wrapper_run(tmp_path, ["not-set-up", "sarah"])
+    flags = {Path(c[1]).name: c[3] for c in run.calls if c[0] == "policy" and c[3] is not None}
+    assert flags == {"hermes": "", "not-set-up": "no-tools", "sarah": ""}
+
+
+def test_wrapper_lists_the_profiles_then_runs_the_key_check_last(tmp_path):
+    run = _wrapper_run(tmp_path, ["sarah"])
+    keys = [c[1] for c in run.calls if c[0] == "keys"]
+    assert keys[0] == f"list --hermes-home {run.home}"
+    assert keys[1] == f"check --hermes-home {run.home} --status-root {run.state}"
+    assert [c[0] for c in run.calls] == ["policy", "keys", "policy", "keys"]
+
+
+def test_wrapper_key_problems_leave_the_reports_to_the_key_check_and_still_exit_0(tmp_path):
+    run = _wrapper_run(tmp_path, ["sarah"], keys_rc=1, keys_mark="all")
+    assert run.result.returncode == 0
+    for parts in ((), ("profiles", "sarah")):  # the key check's own failing reports are left as it wrote them
+        assert _report(run, *parts)["ok"] is False and _report(run, *parts)["problems"] == ["profile x: no key file"]
+    assert "found a key problem" in run.result.stderr
+
+
+def test_wrapper_does_not_trust_exit_1_when_the_reports_were_not_failed(tmp_path):
+    """Python exits 1 for a crash it did not catch (a broken script): that must not pass for "problems found"."""
+    run = _wrapper_run(tmp_path, ["sarah", "tara"], keys_rc=1)  # the stub exits 1 and rewrites nothing
+    assert run.result.returncode == 0
+    for parts in ((), ("profiles", "sarah"), ("profiles", "tara")):
+        report = _report(run, *parts)
+        assert report["ok"] is False and report["problems"] == ["the key check did not finish"], parts
+    assert "did not fail every report" in run.result.stderr
+
+
+def test_wrapper_does_not_trust_exit_1_when_only_the_default_report_was_failed(tmp_path):
+    run = _wrapper_run(tmp_path, ["sarah"], keys_rc=1, keys_mark="default")
+    assert run.result.returncode == 0
+    for parts in ((), ("profiles", "sarah")):
+        assert _report(run, *parts)["problems"] == ["the key check did not finish"], parts
+
+
+@pytest.mark.parametrize("rc", [2, 3, 124, 137])
+def test_wrapper_key_check_that_did_not_finish_fails_every_report(tmp_path, rc):
+    run = _wrapper_run(tmp_path, ["sarah", "tara"], keys_rc=rc)
+    assert run.result.returncode == 0
+    for parts in ((), ("profiles", "sarah"), ("profiles", "tara")):
+        report = _report(run, *parts)
+        assert report["ok"] is False and report["problems"] == ["the key check did not finish"], parts
+
+
+def test_wrapper_profile_check_that_writes_nothing_gets_a_failing_report(tmp_path):
+    run = _wrapper_run(tmp_path, ["sarah"], policy_silent=True)
+    assert run.result.returncode == 0
+    assert _report(run, "profiles", "sarah")["ok"] is False
+    assert _report(run, "profiles", "sarah")["problems"] == ["the tool policy check did not write a report"]
+
+
+def test_wrapper_that_cannot_list_the_profiles_fails_every_report_it_can_find(tmp_path):
+    run = _wrapper_run(tmp_path, ["sarah"], list_rc=1,
+                       existing=["profiles/sarah/tool_policy_status.json", "profiles/old/tool_policy_status.json"])
+    assert run.result.returncode == 0
+    for parts in ((), ("profiles", "sarah"), ("profiles", "old")):
+        report = _report(run, *parts)
+        assert report["ok"] is False and report["problems"] == ["could not list the Hermes profiles"], parts
+    assert not [c for c in run.calls if c[0] == "keys" and c[1].startswith("check")]  # nothing to check without a list
+
+
+def test_wrapper_removes_each_profiles_old_load_proof_before_the_gateway_starts(tmp_path):
+    run = _wrapper_run(tmp_path, ["sarah"], existing=[
+        "plugin_load.json", "profiles/sarah/plugin_load.json", "profiles/gone/plugin_load.json",
+        "profiles/sarah/breaker_status.json"])
+    assert not (run.state / "profiles" / "sarah" / "plugin_load.json").exists()
+    assert not (run.state / "profiles" / "gone" / "plugin_load.json").exists()
+    assert (run.state / "profiles" / "sarah" / "breaker_status.json").exists()  # only the proofs
+    assert (run.state / "plugin_load.json").exists()  # the root proof is the unit's own ExecStartPre
+
+
+def test_wrapper_without_python_leaves_the_profile_folders_alone(tmp_path):
+    code, status = _run_wrapper(tmp_path, python_ok=False)
+    assert code == 0 and not (status.parent / "profiles").exists()
+
+
+def test_wrapper_makes_the_profiles_report_folder_before_the_check_runs(tmp_path):
+    """The real check fails to write into a folder that is not there; a profile's status folder does not exist
+    before its plugin first loads, so the wrapper makes it (the stub refuses a missing folder like the real check)."""
+    run = _wrapper_run(tmp_path, ["sarah"])
+    assert (run.state / "profiles" / "sarah").is_dir()
+    assert _report(run, "profiles", "sarah")["ok"] is True
+    assert "cannot write" not in run.result.stderr

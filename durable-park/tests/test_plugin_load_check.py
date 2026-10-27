@@ -131,7 +131,8 @@ def test_the_wait_is_at_least_the_timeout_whatever_the_second_phase(tmp_path, fr
     # Regression: counting whole $SECONDS gave up up to ~1 s early when the wait began late in a second (CI saw 1.05 s
     # for TIMEOUT=2). A python that takes 0.3 s per call and fails makes the boundary crossing deterministic.
     slow_fail = tmp_path / "slow-fail-python"
-    slow_fail.write_text("#!/bin/sh\nsleep 0.3\nexit 1\n")
+    # (the profile lister gets the real python: only the proof reader is slow and failing)
+    slow_fail.write_text('#!/bin/sh\ncase "$*" in *profile_keys_check*) exec /usr/bin/python3 "$@" ;; esac\nsleep 0.3\nexit 1\n')
     slow_fail.chmod(0o755)
     _wait_for_second_fraction(fraction)
     result, took = run_check(tmp_path, proof=good(), timeout="2", extra_env={"DURABLE_PARK_PYTHON": str(slow_fail)})
@@ -446,3 +447,122 @@ def test_load_check_grep_finding_nothing_is_still_no_routes(tmp_path):
     result, took = run_check(tmp_path, extra_env=env)
     assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
     assert took < 1.5
+
+
+# ---- every installed profile folder is waited for, routed or not (per-person roles, Task 5) ----------------
+
+LIST_ALERT = ("durable-park ALERT: could not list the Hermes profiles; stopping the gateway so no profile runs "
+              "unchecked")
+
+
+def make_home(tmp_path, *names, marker="config.yaml"):
+    home = tmp_path / "hh"
+    for name in names:
+        folder = home / "profiles" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        if marker:
+            (folder / marker).write_text("{}")
+    home.mkdir(exist_ok=True)
+    return {"HERMES_HOME": str(home)}
+
+
+def test_load_check_waits_for_a_profile_folder_that_is_not_routed(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah")  # tara has a folder and no proof
+    env = make_home(tmp_path, "sarah", "tara")
+    result, took = run_check(tmp_path, timeout="2", extra_env=env)
+    assert result.returncode == 1
+    assert result.stdout.strip() == PROFILE_ALERT.format(profile="tara", pid=4242)
+    assert took >= 1.5
+
+
+def test_load_check_passes_when_every_profile_folder_has_a_proof(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah")
+    write_profile_proof(tmp_path, "tara", mode="refusing-policy")
+    result, took = run_check(tmp_path, extra_env=make_home(tmp_path, "sarah", "tara"))
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [
+        "durable-park plugin loaded (mode=asking, pid=4242)",
+        "durable-park plugin loaded for profile sarah (mode=asking, pid=4242)",
+        "durable-park plugin loaded for profile tara (mode=refusing-policy, pid=4242)"]
+    assert took < 2.5
+
+
+def test_load_check_names_the_not_set_up_profile_too(tmp_path):
+    write_root_proof(tmp_path)
+    result, _ = run_check(tmp_path, timeout="1", extra_env=make_home(tmp_path, "not-set-up"))
+    assert result.returncode == 1
+    assert result.stdout.strip() == PROFILE_ALERT.format(profile="not-set-up", pid=4242)
+
+
+def test_load_check_does_not_wait_for_a_parked_profile(tmp_path):
+    write_root_proof(tmp_path)
+    env = make_home(tmp_path, "asleep")
+    (tmp_path / "hh" / "profiles" / "asleep" / "gateway.parked").write_text("")
+    result, took = run_check(tmp_path, extra_env=env)
+    assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
+    assert took < 1.5
+
+
+def test_load_check_does_not_wait_for_a_standalone_profile(tmp_path):
+    """Hermes does not serve a gateway.standalone profile from this gateway: no copy of the plugin loads for it."""
+    write_root_proof(tmp_path)
+    env = make_home(tmp_path, "alone")
+    (tmp_path / "hh" / "profiles" / "alone" / "config.yaml").write_text('{"gateway": {"standalone": true}}')
+    result, took = run_check(tmp_path, extra_env=env)
+    assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
+    assert took < 1.5
+
+
+def test_load_check_ignores_deleted_and_marker_less_folders_and_bad_names(tmp_path):
+    write_root_proof(tmp_path)
+    env = make_home(tmp_path, "gone", "Shouting", ".hidden")
+    make_home(tmp_path, "ghost", marker=None)
+    (tmp_path / "hh" / "profiles" / ".deleted").mkdir(exist_ok=True)
+    (tmp_path / "hh" / "profiles" / ".deleted" / "gone").write_text("x")
+    result, took = run_check(tmp_path, extra_env=env)
+    assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
+    assert took < 1.5
+
+
+def test_load_check_override_replaces_the_folder_scan(tmp_path):
+    write_root_proof(tmp_path)
+    env = {**make_home(tmp_path, "sarah"), "DURABLE_PARK_PROFILES": ""}  # set but empty: no profiles at all
+    result, _ = run_check(tmp_path, extra_env=env)
+    assert result.returncode == 0 and "profile" not in result.stdout
+
+
+def test_load_check_a_missing_profiles_folder_is_no_profiles(tmp_path):
+    write_root_proof(tmp_path)
+    result, _ = run_check(tmp_path, extra_env={"HERMES_HOME": str(tmp_path / "hh")})
+    assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
+
+
+def failing_lister(tmp_path):
+    """A python that runs everything normally except the profile lister, which fails."""
+    stub = tmp_path / "python-without-lister"
+    stub.write_text(f'#!/bin/sh\ncase "$*" in *profile_keys_check*) exit 1 ;; esac\nexec {SYSTEM_PYTHON} "$@"\n')
+    stub.chmod(0o755)
+    return stub
+
+
+def test_load_check_that_cannot_list_the_profiles_fails_closed_at_once(tmp_path):
+    write_root_proof(tmp_path)
+    env = {**make_home(tmp_path, "sarah"), "DURABLE_PARK_PYTHON": str(failing_lister(tmp_path))}
+    result, took = run_check(tmp_path, timeout="20", extra_env=env)
+    assert result.returncode == 1 and result.stdout.strip() == LIST_ALERT
+    assert took < 5  # waiting cannot fix it
+
+
+@needs_yaml
+def test_load_check_needs_both_the_routed_and_the_installed_profiles(tmp_path):
+    write_root_proof(tmp_path)
+    write_profile_proof(tmp_path, "sarah")  # installed, has a proof; tara is routed only, no proof
+    env = {**make_home(tmp_path, "sarah"), **write_config(tmp_path, "gateway:\n  profile_routes:\n    - {profile: tara}\n")}
+    result, _ = run_check(tmp_path, timeout="1", extra_env=env)
+    assert result.returncode == 1
+    assert result.stdout.strip() == PROFILE_ALERT.format(profile="tara", pid=4242)
+    write_profile_proof(tmp_path, "tara")
+    result, _ = run_check(tmp_path, extra_env=env)
+    assert result.returncode == 0 and "for profile sarah" in result.stdout and "for profile tara" in result.stdout

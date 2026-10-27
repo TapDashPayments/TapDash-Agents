@@ -10,12 +10,16 @@
 # checked once more at or after the deadline. Mode refusing-* counts as loaded: the plugin is live and refusing, as
 # designed. Never prints secrets.
 #
-# Per-person profiles: every routed profile (gateway.profile_routes in the Hermes config) loads its own copy of the
-# plugin in the same gateway process, a few seconds after start and before any message, and writes its own proof in
-# <proof directory>/profiles/<profile>/. The gateway start then also waits (the same time) for a matching proof of
-# EVERY routed profile and names each profile that has none. With no profile_routes this is exactly the check above.
-# A config that cannot be read, or a route with a profile name that is not valid, fails closed.
+# Per-person profiles: every profile Hermes serves loads its own copy of the plugin in the same gateway process, a
+# few seconds after start and before any message, and writes its own proof in <proof directory>/profiles/<profile>/.
+# The gateway start then also waits (the same time) for a matching proof of EVERY such profile and names each
+# profile that has none. Those are the routed profiles (gateway.profile_routes in the Hermes config) AND every
+# profile folder Hermes serves under <HERMES_HOME>/profiles, routed or not (deploy/profile_keys_check.py list
+# --serving: the folders Hermes itself lists, without the ones an admin parked). With no routes and no profile
+# folder this is exactly the check above. A config that cannot be read, a route with a profile name that is not
+# valid, or a profile folder list that cannot be made, fails closed.
 set -u
+export LC_ALL=C  # the [a-z0-9] ranges below must mean the same everywhere
 
 HERMES_HOME=${HERMES_HOME:-${HOME:-/nonexistent}/.hermes}
 PROOF=${DURABLE_PARK_PLUGIN_LOAD:-$HERMES_HOME/plugin-data/durable-park/plugin_load.json}
@@ -25,7 +29,8 @@ PYTHON=${DURABLE_PARK_PYTHON:-/usr/bin/python3}  # overridable for tests
 CONFIG=${DURABLE_PARK_HERMES_CONFIG:-$HERMES_HOME/config.yaml}
 PROOF_DIR=$(dirname -- "$PROOF")
 PROOF_NAME=$(basename -- "$PROOF")
-PROFILES=()  # routed profile names (filled by load_profiles)
+HERE=$(cd -- "$(dirname -- "$0")" && pwd)
+PROFILES=()  # routed and installed profile names (filled by load_profiles)
 
 if [[ ! $TIMEOUT =~ ^[0-9]+$ ]]; then
     TIMEOUT=30
@@ -96,16 +101,33 @@ read_routes() {
     routes_with "$py"
 }
 
-# Fills PROFILES (default-profile names and repeats dropped). Returns 1 after printing the alert when the routes
-# cannot be read or a name is not one a profile may have (the same rule as keys.py).
+# The profile folders Hermes serves, one name per line (deploy/profile_keys_check.py list --serving). Without a
+# python there is nothing to read a proof with, so no list is made: the missing root proof then stops the gateway
+# (below). A missing helper script, or one that fails, exits 1 (the caller fails closed).
+read_installed() {
+    command -v "$PYTHON" >/dev/null 2>&1 || return 0
+    [[ -f $HERE/profile_keys_check.py ]] || return 1
+    timeout 20 "$PYTHON" -I "$HERE/profile_keys_check.py" list --hermes-home "$HERMES_HOME" --serving 2>/dev/null
+}
+
+# Fills PROFILES (default-profile names and repeats dropped) from the routes and from the profile folders. Returns 1
+# after printing the alert when the routes cannot be read, a route name is not one a profile may have (the same
+# rule as keys.py), or the profile folders cannot be listed. A folder name only has to be a name Hermes accepts
+# (one character longer than ours): profile_keys_check.py check reports the ones the key rule does not allow.
 load_profiles() {
-    local list name
+    local list installed="" name
     PROFILES=()
     if [[ -n ${DURABLE_PARK_PROFILES+x} ]]; then  # a test (or an admin) names them directly
         list=${DURABLE_PARK_PROFILES//,/ }
-    elif ! list=$(read_routes); then
-        printf 'durable-park ALERT: could not read gateway.profile_routes from the Hermes config; stopping the gateway so no profile runs unchecked\n'
-        return 1
+    else
+        if ! list=$(read_routes); then
+            printf 'durable-park ALERT: could not read gateway.profile_routes from the Hermes config; stopping the gateway so no profile runs unchecked\n'
+            return 1
+        fi
+        if ! installed=$(read_installed); then
+            printf 'durable-park ALERT: could not list the Hermes profiles; stopping the gateway so no profile runs unchecked\n'
+            return 1
+        fi
     fi
     set -f  # the names are split from $list below: a name such as * must stay a (bad) name, never expand to files
     # shellcheck disable=SC2086  # split on purpose; globbing is off (set -f)
@@ -114,6 +136,15 @@ load_profiles() {
         if [[ ! $name =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
             set +f
             printf 'durable-park ALERT: a gateway.profile_routes entry has a profile name that is not valid; stopping the gateway so no profile runs unchecked\n'
+            return 1
+        fi
+        [[ " ${PROFILES[*]:-} " == *" $name "* ]] || PROFILES+=("$name")
+    done
+    # shellcheck disable=SC2086  # split on purpose; globbing is off (set -f)
+    for name in $installed; do
+        if [[ ! $name =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]]; then
+            set +f
+            printf 'durable-park ALERT: could not list the Hermes profiles; stopping the gateway so no profile runs unchecked\n'
             return 1
         fi
         [[ " ${PROFILES[*]:-} " == *" $name "* ]] || PROFILES+=("$name")

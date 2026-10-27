@@ -660,3 +660,90 @@ def test_every_allowed_server_is_in_the_include_list_the_scope_regex_and_the_pol
     assert regex.split("|") == hermes_slugs
     assert policy.ALLOWED_TOOL_PREFIXES == tuple(f"mcp__wh__{slug}__" for slug in hermes_slugs)
     assert {"acceptblue", "authnet"} <= set(gateway_slugs)
+
+
+# --- check --expect-no-tools: the `not-set-up` profile (per-person roles, Task 5) ------------------------------
+
+def _no_tools_check(monkeypatch, tmp_path, tools, *, media=(), argv_extra=()):
+    """Run `check --expect-no-tools`; *tools* is ``f(platform, enabled, assemble)`` -> the names Hermes would give."""
+    monkeypatch.setattr(policy, "_bootstrap", lambda: None)
+    monkeypatch.setattr(policy, "_plugin_toolsets", lambda: [])
+    monkeypatch.setattr(policy, "_platforms", lambda: ["cli", "teams"])
+    monkeypatch.setattr(policy, "allowed_tool_names", lambda allowed: set())
+    monkeypatch.setattr(policy, "effective_tools", tools)
+    monkeypatch.setattr(policy, "media_check", lambda: list(media))
+    out = tmp_path / "status.json"
+    rc = policy.main(["check", "--expect-no-tools", "--allow-file", str(tmp_path / "none"), "--status-file", str(out),
+                      *argv_extra])
+    return rc, json.loads(out.read_text())
+
+
+def _nothing(platform, enabled="config", assemble=True):
+    return []
+
+
+def test_expect_no_tools_passes_when_nothing_is_visible_and_says_so(tmp_path, monkeypatch, capsys):
+    rc, status = _no_tools_check(monkeypatch, tmp_path, _nothing)
+    assert rc == 0 and status["ok"] is True and status["problems"] == []
+    assert status["has_tools"] is False
+    assert "no tools" in capsys.readouterr().out
+
+
+def test_expect_no_tools_does_not_ask_for_the_executor(tmp_path, monkeypatch):
+    rc, status = _no_tools_check(monkeypatch, tmp_path, _nothing)
+    assert not any("MISSING" in p for p in status["problems"])
+
+
+def test_expect_no_tools_fails_when_a_tool_is_visible(tmp_path, monkeypatch):
+    def tools(platform, enabled="config", assemble=True):
+        return ["clarify"] if platform == "teams" and enabled == "config" and assemble else []
+    rc, status = _no_tools_check(monkeypatch, tmp_path, tools)
+    assert rc == 1 and status["ok"] is False and status["has_tools"] is True
+    assert status["problems"] == ["teams: has tool clarify"]
+
+
+def test_expect_no_tools_fails_when_a_tool_is_only_in_the_catalog(tmp_path, monkeypatch):
+    def tools(platform, enabled="config", assemble=True):
+        return ["parked_action_execute"] if enabled == "config" and not assemble else []
+    rc, status = _no_tools_check(monkeypatch, tmp_path, tools)
+    assert rc == 1 and status["has_tools"] is True
+    assert status["problems"] == ["cli: has tool parked_action_execute", "teams: has tool parked_action_execute"]
+
+
+def test_expect_no_tools_still_judges_the_postures(tmp_path, monkeypatch):
+    def tools(platform, enabled="config", assemble=True):
+        return ["terminal"] if enabled is None else []
+    rc, status = _no_tools_check(monkeypatch, tmp_path, tools)
+    assert rc == 1 and "all-toolsets@cli: LEAK terminal" in status["problems"]
+    assert status["has_tools"] is False  # a leak in a posture session is not a tool of the chat platforms
+
+
+def test_expect_no_tools_ignores_the_executor_in_postures(tmp_path, monkeypatch):
+    def tools(platform, enabled="config", assemble=True):
+        return ["clarify"] if enabled is not None and enabled != "config" else []
+    rc, status = _no_tools_check(monkeypatch, tmp_path, tools)
+    assert rc == 0 and status["problems"] == []
+
+
+def test_expect_no_tools_still_judges_media_delivery(tmp_path, monkeypatch):
+    rc, status = _no_tools_check(monkeypatch, tmp_path, _nothing, media=["gateway.strict is False, want True"])
+    assert rc == 1 and status["problems"] == ["media: gateway.strict is False, want True"]
+    assert status["has_tools"] is False
+
+
+def test_expect_no_tools_crash_leaves_a_failing_report_that_claims_nothing(tmp_path, monkeypatch):
+    def boom(platform, enabled="config", assemble=True):
+        raise RuntimeError("boom")
+    rc, status = _no_tools_check(monkeypatch, tmp_path, boom)
+    assert rc == 1 and status["ok"] is False and "boom" in status["problems"][0]
+    assert "has_tools" not in status
+
+
+def test_the_normal_check_report_has_no_has_tools_key(tmp_path, monkeypatch):
+    rc, status = _check_with(monkeypatch, tmp_path, CATALOG, ["clarify", *BRIDGE])
+    assert rc == 0 and "has_tools" not in status
+
+
+def test_apply_does_not_take_expect_no_tools(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy, "_bootstrap", lambda: (_ for _ in ()).throw(AssertionError("must not start Hermes")))
+    assert policy.main(["apply", "--expect-no-tools"]) == 2

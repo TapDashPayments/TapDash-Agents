@@ -204,13 +204,32 @@ PAYLINK_ORIGIN="https://$(tailscale status --json | python3 -c 'import json,sys;
 
 # Hermes `command` secret source helper: KEY=VALUE lines on stdout, read by Hermes at every start (as hermes;
 # Hermes discards the helper's stderr). The instance token line appears only once provisioning wrote the file.
+# With no argument (the default profile) it prints the wake secret and that key. With one argument, a person's
+# profile name (per-person roles; their profile config says `hermes-secrets <profile>`), it prints only that
+# person's key, from $ETC/instances/<profile>.token: no wake secret, no other key. A name that is not a valid
+# profile name (the rule of plugin/durable_park/keys.py) prints nothing and exits 2; a missing or empty key file
+# prints nothing and exits 0 (deploy/profile_keys_check.py reports it at every gateway start).
 helper=$(mktemp)
 cat >"$helper" <<HELPER
 #!/bin/sh
 # durable-park secrets for Hermes (secrets.command). Written by deploy/configure_hermes.sh; edits are overwritten.
-/usr/bin/sed -n '1s/^/DURABLE_PARK_WAKE_SECRET=/p' $ETC/wake_secret || exit 1
-if [ -r $ETC/instance_token ]; then
-    /usr/bin/sed -n '1s/^/DURABLE_PARK_WH_TOKEN=/p' $ETC/instance_token || exit 1
+# No argument: the default profile. One argument: a person's profile, which gets only its own key.
+LC_ALL=C
+export LC_ALL
+if [ \$# -eq 0 ]; then
+    /usr/bin/sed -n '1s/^/DURABLE_PARK_WAKE_SECRET=/p' $ETC/wake_secret || exit 1
+    if [ -r $ETC/instance_token ]; then
+        /usr/bin/sed -n '1s/^/DURABLE_PARK_WH_TOKEN=/p' $ETC/instance_token || exit 1
+    fi
+    exit 0
+fi
+[ \$# -eq 1 ] || exit 2
+# 1 to 63 characters of a-z 0-9 - _, starting with a letter or digit; never default or main
+case "\$1" in
+    default|main|''|[!a-z0-9]*|*[!a-z0-9_-]*|????????????????????????????????????????????????????????????????*) exit 2 ;;
+esac
+if [ -f "$ETC/instances/\$1.token" ] && [ -r "$ETC/instances/\$1.token" ]; then
+    /usr/bin/sed -n '1s/^/DURABLE_PARK_WH_TOKEN=/p' "$ETC/instances/\$1.token" || exit 1
 fi
 exit 0
 HELPER

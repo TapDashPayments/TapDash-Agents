@@ -797,7 +797,9 @@ mcp_servers:
 ```
 
 The token never goes into `config.yaml` or `.env`. `/opt/durable-park/libexec/hermes-secrets` (Hermes's
-`command` secret source) prints `DURABLE_PARK_WH_TOKEN` from `instance_token` at each Hermes start. The script
+`command` secret source) prints `DURABLE_PARK_WH_TOKEN` from `instance_token` at each Hermes start. A person's profile
+runs it with their profile name (`hermes-secrets sarah`), and then it prints only that person's key, from
+`/etc/durable-park/instances/sarah.token` (never the wake secret, never another key). The script
 then restarts `hermes-gateway` and waits until `mcp__wh__quickbooks__get_company_info` is registered.
 
 The `include` filter also keeps the gateway's built-in `withhuman__*` management tools away from the model.
