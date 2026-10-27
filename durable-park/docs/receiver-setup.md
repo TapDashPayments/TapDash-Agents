@@ -63,7 +63,10 @@ The webhook route's secret in `config.yaml` is the reference `${DURABLE_PARK_WAK
 `command` secret source (`secrets.command.command: /opt/durable-park/libexec/hermes-secrets`, a root-owned
 helper written by configure_hermes.sh) supplies the value at every Hermes start, so the secret exists at rest
 only in `/etc/durable-park/wake_secret`. Once `instance_token` exists the same helper also prints
-`DURABLE_PARK_WH_TOKEN` for the `wh` MCP server (deploy/hermes_mcp.sh). These variables are in the gateway's
+`DURABLE_PARK_WH_TOKEN` for the `wh` MCP server (deploy/hermes_mcp.sh). Run with a person's profile name
+(`hermes-secrets sarah`, in that profile's own config) it prints only that person's key, from
+`/etc/durable-park/instances/sarah.token`; a bad profile name prints nothing and exits 2, and a missing or empty key
+file prints nothing and exits 0 (the start check reports it). These variables are in the gateway's
 environment and Hermes does not strip custom names from terminal-tool children; that exposes nothing new on
 this VM (if the agent ever got a terminal, `hermes` could read both files).
 Side effect: every `hermes` CLI command prints `Command helper: applied N secrets`.
@@ -221,7 +224,8 @@ missing file gives the lockdown exactly as described here. A name that is not a 
 `terminal`, `file`, `code_execution`, `delegation`, `cronjob`, `skills`, `computer_use` (these stay off until
 Clean Setup Phase 2), makes the script print the reason on stderr and exit 2 without writing anything.
 `check --status-file PATH` also writes `{"ok", "checked_at", "problems", "allowed"}` as JSON (atomically,
-also when the check fails or crashes) for the gateway-start check. Exit codes: 0 ok, 1 check failed, 2 usage
+also when the check fails or crashes) for the gateway-start check. `check --expect-no-tools` is for the `not-set-up`
+profile: no chat platform may have any tool, and the report also says `"has_tools"`. Exit codes: 0 ok, 1 check failed, 2 usage
 error or invalid allow file. How to open one: [runbook](runbook.md#open-a-toolset).
 
 `check` fails (and the deploy with it) if any tool other than `parked_action_execute`, `clarify`,

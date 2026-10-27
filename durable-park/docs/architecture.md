@@ -158,6 +158,7 @@ flowchart LR
     recv["receiver<br/>127.0.0.1:8790 - user aaprecv"]
     bridge["bridge<br/>127.0.0.1:8791 (held by systemd) - user dpbridge<br/>keeps no state"]
     sweep["sweep<br/>cron every 5 min"]
+    startchk["start checks (every gateway start)<br/>tool_policy_check.sh, profile_keys_check.py,<br/>plugin_load_check.sh"]
     tunnel["wh-tunnel container<br/>QuickBooks MCP server<br/>+ Maverick MCP server<br/>+ accept.blue and Authorize.net MCP servers"]
     funnelA{{"Funnel /aap/events"}}
     funnelB{{"Funnel /wh/bridge"}}
@@ -214,6 +215,9 @@ flowchart LR
   sweep -->|"re-wakes a person's row<br/>at that person's route"| proute
   sweep -->|"reads the root folder and<br/>every folder under profiles"| pstat
   sweep -->|"alerts if the key file<br/>is missing"| pkey
+  startchk -->|"policy report and key check<br/>for every profile folder"| pstat
+  startchk -->|"checks that each profile has its own key<br/>(a hash only, never printed)"| pkey
+  startchk -->|"checks"| dkey
   selfck -->|"writes"| fstatus
   sweep -->|"reads"| fstatus
   sweep -->|"reads"| bstatus
@@ -233,7 +237,8 @@ has always run). Every person gets the same set of things in their own box: thei
 own withHuman key, their own status folder and their own wake route. All copies use **one shared ledger**; each row
 says whose call it is (its `profile` column). Details: [One copy per person](#one-copy-per-person). Until people
 exist (Tasks 7 and 8 of the [per-person plan](../../docs/plans/2026-10-26-per-person-roles.md)) the person's box is
-empty and nothing changes for the default profile.
+empty and nothing changes for the default profile. Before every gateway start the start checks (`startchk`) look at
+every profile folder Hermes serves, routed to a person or not ([Gateway start](#gateway-start)).
 
 | Part | Code | What it does |
 |---|---|---|
@@ -313,8 +318,8 @@ the environment, so a row can never disagree with the session key of the copy th
 stores the environment's value.
 
 **Status files.** Each status folder holds: `plugin_load.json` (the load proof), `tool_policy_load.json`,
-`tool_policy_status.json` (the plugin reads it from here; the start check that writes one per person comes with
-Task 5), `breaker_status.json`, `lift_status.json`, `formcheck_status.json` and `wake_refusals.json`. The sweep's
+`tool_policy_status.json` (the plugin reads it from here; `tool_policy_check.sh` writes one for every profile at
+each gateway start), `breaker_status.json`, `lift_status.json`, `formcheck_status.json` and `wake_refusals.json`. The sweep's
 own `*_alert_state.json` files (what it already said) sit next to the file they belong to. The default profile's
 folder is the root. A person's folder is `<root>/profiles/<profile>/`.
 
@@ -368,24 +373,40 @@ The `token_file` is checked at load too, before any request can be opened: a per
 approval request is ever opened with the wrong key. Fix the `token_file` line in that profile's plugin settings and
 restart.
 
-**Known limits (until Task 5).** Hermes serves every profile folder under `~/.hermes/profiles` when it multiplexes,
-routed or not. In Task 4 the gateway load check looks only at routed profiles (`gateway.profile_routes`) and the sweep
-only at profiles that already have a status folder. A profile folder with no route is covered by Task 5's start
-checks, which look at every served profile. Also, the sweep notices a missing key file only for a row that is already
-`parked` or `approved`. A new call from a profile whose key is missing fails through the breaker instead: it is
-refused, its row is `cancelled`, and after 3 such calls the sweep says "withHuman could not be reached". Task 5's start
-check reports a missing key at start.
+**What the start checks cover (Task 5).** Hermes serves every profile folder under `~/.hermes/profiles` when it
+multiplexes, routed to a person or not (it lists a folder when it has one of Hermes's identity files and no tombstone
+in `profiles/.deleted`). So at every gateway start, three checks go through **every** such folder:
 
-**At gateway start.** `deploy/plugin_load_check.sh` also waits for the proof of every routed profile (the list comes
-from `gateway.profile_routes` in the Hermes config) and names each profile that has none ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)).
+- **Tool policy** (`deploy/tool_policy_check.sh`): the same policy check as for the default profile, once per
+  profile, with that profile's own home. Its report goes in that profile's own status folder. The `not-set-up`
+  profile is checked with `--expect-no-tools`: it must have no tool at all.
+- **Keys** (`deploy/profile_keys_check.py check`, run by the same script after the profile checks): a profile with
+  tools needs its own key file, a secrets command that names that same profile, and a key nobody else uses. One
+  problem makes **every** profile's report failing, so every copy of durable-park refuses every tool call until an
+  admin fixes it and restarts the gateway. The gateway itself still starts, so alerts keep working.
+- **Load proof** (`deploy/plugin_load_check.sh`): waits for each profile's own proof, as above.
+
+The sweep reports a missing key at the start check too, but it still looks at rows already `parked` or `approved`
+only while the gateway runs. A new call from a profile whose key goes missing later fails through the breaker
+instead: it is refused, its row is `cancelled`, and after 3 such calls the sweep says \"withHuman could not be
+reached\". A profile with `gateway.standalone: true` is not supported (Hermes does not serve it from this gateway);
+the key check names it.
+
+**At gateway start.** `deploy/plugin_load_check.sh` waits for the proof of every routed profile and every installed
+profile folder (the list comes from `gateway.profile_routes` in the Hermes config and from
+`deploy/profile_keys_check.py list --serving`) and names each profile that has none ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)).
 
 ### Gateway start
 
 1. systemd runs the drop-in `50-durable-park-policy.conf`'s `ExecStartPre=-` (`deploy/tool_policy_check.sh`, as
-   `hermes`): it finds Hermes's Python the way `configure_hermes.sh` does, runs `hermes_tool_policy.py check
-   --status-file`, and leaves `tool_policy_status.json` next to the ledger. It always exits 0 (the `-` and the
-   script both ensure the gateway starts), writing a failing report itself when there is no Python or the check left
-   no new report.
+   `hermes`): it deletes every profile's old load proof, finds Hermes's Python the way `configure_hermes.sh` does,
+   runs `hermes_tool_policy.py check --status-file`, and leaves `tool_policy_status.json` next to the ledger. Then it
+   lists the installed profiles (`profile_keys_check.py list`), runs the same check for each one with that profile's
+   own home (`HERMES_HOME=~/.hermes/profiles/<name>`; `not-set-up` with `--expect-no-tools`), leaving each report in
+   `profiles/<name>/` next to the ledger, and finally runs the key check (`profile_keys_check.py check`), which
+   fails every report when a profile has no key, names the wrong secrets command or shares a key. It always exits 0
+   (the `-` and the script both ensure the gateway starts), writing a failing report itself when there is no Python,
+   the profiles cannot be listed, the key check did not finish, or a check left no new report.
 2. Hermes loads the plugin. `register` validates the settings, then reads that report. A problem (missing, failed,
    written more than 15 minutes before this process started, unreadable or future-dated `checked_at`) registers the fail-closed hook (`POLICY_MESSAGE`; only the default exempt tools pass, never the configured list), the wake
    dropper, and an executor that refuses without touching the ledger; nothing else is opened.
@@ -412,7 +433,7 @@ from `gateway.profile_routes` in the Hermes config) and names each profile that 
    wall-clock deadline of `DURABLE_PARK_LOAD_TIMEOUT` real seconds (default 30, never cut short by whole-second rounding; Hermes's own load deadline is 10 s and the live load takes about 2 s), for a `plugin_load.json` whose `pid` is the unit's `$MAINPID`.
    Found (any mode, `refusing-*` included: the plugin is live and refusing) it prints one line and exits 0. Not found
    it prints `durable-park ALERT: the plugin did not load in this gateway ...` and exits 1, so systemd stops the
-   gateway and no tool call runs unchecked. With routed people it also waits for each person's own proof (`profiles/<profile>/plugin_load.json`) and names every profile without one ([One copy per person](#one-copy-per-person)). The drop-in's `StartLimitIntervalSec=600` / `StartLimitBurst=3` stop the
+   gateway and no tool call runs unchecked. It also waits for each profile's own proof (`profiles/<profile>/plugin_load.json`): every profile in `gateway.profile_routes` **and** every profile folder Hermes serves under `~/.hermes/profiles`, routed or not (a folder an admin parked is left out: Hermes does not serve it). It names every profile without one ([One copy per person](#one-copy-per-person)). The drop-in's `StartLimitIntervalSec=600` / `StartLimitBurst=3` stop the
    restart loop after 3 starts in 10 minutes (manual and graceful restarts count too).
 
 The proof is written only when this load was not abandoned (`ctx._load_abandoned`, set by Hermes's
@@ -420,7 +441,8 @@ The proof is written only when this load was not abandoned (`ctx._load_abandoned
 `plugins.py:1100-1121`) and one of the plugin's own `pre_tool_call` callbacks is in `ctx._manager.iter_hook_callbacks`
 (`plugins_dispatch.py:523`); an unreadable registry means no proof. The one remaining window is a load that finishes
 between Hermes's `is_alive()` check and its dispose step (microseconds). Before each start the drop-in's first
-`ExecStartPre` deletes the old proof, so one left by an earlier process with a reused pid cannot match. The sweep
+`ExecStartPre` deletes the old proof, so one left by an earlier process with a reused pid cannot match. `tool_policy_check.sh` deletes each profile's old
+proof the same way. The sweep
 runs as a Hermes cron inside the gateway, so a gateway the check stopped cannot alert (the bot going silent is the
 signal).
 
@@ -922,7 +944,7 @@ the repo) and never printed by any script.
 | File | Mode | Read by | Used for |
 |---|---|---|---|
 | `instance_token` | 0640 root:hermes | plugin, Hermes (`wh` MCP server via the secrets helper) | withHuman instance credential: approval requests and the gateway |
-| `instances/<profile>.token` (the folder `instances` is root:hermes 0750) | 0640 root:hermes | that person's copy of the plugin (and the sweep, which only checks that the file exists) | One person's withHuman instance key. Never read for another person's rows. Added when a person is added (`people.sh`, Task 7) |
+| `instances/<profile>.token` (the folder `instances` is root:hermes 0750) | 0640 root:hermes | that person's copy of the plugin, that person's `wh` connection (the secrets helper run with their profile name), the start key check (a hash of its first line, never printed) and the sweep (which only checks that the file exists) | One person's withHuman instance key. Never read for another person's rows. Added when a person is added (`people.sh`, Task 7) |
 | `receiver.json` | 0600 aaprecv | receiver | withHuman webhook signing secret + the receiver's own credential copy |
 | `wake_secret` | 0640 root:dpwake | receiver, sweep, Hermes (via the secrets helper) | signs the local wake to Hermes |
 | `bridge_secret` | 0600 root:root | bridge (systemd reads it as root and hands the bridge a private copy: `LoadCredential`) | verifies withHuman's pipeline webhook signature. The bot cannot read it |
@@ -935,7 +957,7 @@ the repo) and never printed by any script.
 
 The Langfuse keys are not in this folder. Since 2026-10-22/23 they are in **Bitwarden Secrets Manager** with the other agent keys (`TEAMS_CLIENT_ID`, `TEAMS_CLIENT_SECRET`, `TEAMS_TENANT_ID`, `TELEGRAM_BOT_TOKEN`, `HERMES_LANGFUSE_PUBLIC_KEY`, `HERMES_LANGFUSE_SECRET_KEY`). Hermes pulls them at every start with its built-in `secrets bitwarden` support. The one key left in `~hermes/.hermes/.env` for this is `BWS_ACCESS_TOKEN`, which opens the Bitwarden project "TapDash Agents" ([runbook](runbook.md#secrets-bitwarden)). The Langfuse key pair gives full read and write access to the project's traces, and with capture mode `full` the traces hold all conversations, so treat the keys like the other secrets: never in chat, rotated before production.
 
-**Trust boundary:** durable-park's own secrets (the files in the table above and the `command` secret source `/opt/durable-park/libexec/hermes-secrets`, 2 secrets) are deliberately **not** in the agent's Bitwarden project. So the agent's access token cannot read them, and a leak of that token does not reach the approval system. The owner keeps copies of them in his personal password vault.
+**Trust boundary:** durable-park's own secrets (the files in the table above and the `command` secret source `/opt/durable-park/libexec/hermes-secrets`: 2 secrets for the default profile; with a person's profile name as its argument, only that person's own key) are deliberately **not** in the agent's Bitwarden project. So the agent's access token cannot read them, and a leak of that token does not reach the approval system. The owner keeps copies of them in his personal password vault.
 
 Which of these files an agent could still read if it ever got a terminal or file tool is in
 [section 0](#0-how-strong-is-it-today). See also backlog items 0 and 7.
