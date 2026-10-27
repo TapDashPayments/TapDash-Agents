@@ -154,9 +154,9 @@ So Tasks 3 and 4 should not start on a guess about these two. Yaakov decides whe
 One short re-run of Task 1 steps 2 to 5: the same throwaway setup and the same full cleanup, about 15 minutes, with
 Yaakov's OK and a quiet window. One change: after Yaakov approves the lookup in withHuman, the stuck ledger row is
 marked `approved` by hand, after reading his approval with the spike key (one manual ledger write; this is the
-"option A" offered on Oct 26). The default profile's wake can then resume the call. That shows:
+"option A" offered on Oct 26). The default profile's wake can then announce the approval in the original chat (the wake only posts a message; the agent then runs the call with `parked_action_execute`). That shows:
 
-- whether the call resumes in the routed profile and its answer reaches his Teams chat (`INJECT_CROSS_PROFILE`;
+- whether the approval is announced in the routed profile's chat, so the agent there runs the call and its answer reaches his Teams chat (`INJECT_CROSS_PROFILE`;
   spec 8 items 3 and 5);
 - whether the resumed call's gateway request in withHuman shows the same spike instance (`INSTANCE_ON_BOTH_RECORDS`,
   and then `OPTION`).
