@@ -83,6 +83,14 @@ Facts these rows rely on (checked 2026-10-26 against Hermes v0.22.3 code and doc
 - Hermes: "Sender routing selects a profile; it is not deny-by-default authorization." So the allowlist stays on.
 - Hermes keeps one plugin manager per profile and loads durable-park separately for each profile
   (`hermes_cli/plugins.py:1589-1592`). Each profile has its own MCP connections.
+- **A plugin may only post into chats of its own profile** (Hermes refuses anything else on purpose:
+  `gateway/run_plugin_injection.py`, "belongs to profile ..., not the plugin's profile ..."). Found by the Task 1
+  test (`durable-park/docs/spike-2026-10-27-per-person-roles.md`). So each person's own profile must handle the news
+  that their call was approved.
+- Hermes's webhook receiver can hand an incoming message to a **named profile**: a route can name its profile
+  (`profile: <name>`), and the address `/p/<profile>/webhooks/<route>` runs it in that profile
+  (`gateway/platforms/webhook.py`, `_resolve_request_profile`, `_route_allows_profile`; documented as "URL prefix
+  (`/p/<profile>/`) for HTTP platforms" on the multi-profile gateways page).
 - withHuman rules can see only the tool, server, arguments, the agent's slug and name, and earlier blocks' results.
   They cannot see which chat user typed. That is why the role travels with the agent.
 - **Keys are for knowing who asked, not for walls between people.** All profiles run in one process as the `hermes`
@@ -111,8 +119,9 @@ Everything else in this design is the same for both. The plan picks one after th
 2. Sarah's profile reaches withHuman with Sarah's key, so withHuman lists only the tools her role has.
 3. Before each tool call, Sarah's copy of durable-park asks withHuman with Sarah's key. The rules decide: run,
    refuse, or ask Yaakov.
-4. If Yaakov must decide, he approves in withHuman. The decision is read **with Sarah's key** (the key of the
-   ledger row's profile), the parked call runs once in Sarah's profile, the bridge checks it is the same person's
+4. If Yaakov must decide, he approves in withHuman. The "it was decided" message (the wake) is sent to **Sarah's own
+   profile** through her own wake route, so Sarah's copy of durable-park reads the decision with Sarah's key, the
+   parked call runs once in Sarah's profile, the bridge checks it is the same person's
    approved call, and the result is posted in Sarah's chat.
 
 ## 6. Changes
@@ -188,7 +197,7 @@ Everything else in this design is the same for both. The plan picks one after th
 | One copy per profile | Hermes loads durable-park once per profile. Each copy uses its own profile's `token_file`. |
 | Files | **Shared:** the ledger (one fixed path for every profile). **Per profile:** the status files that sit next to the ledger today (load proof, tool policy load, breaker, lift status, form check), so one profile's copy never overwrites another's. The sweep reads every profile's status files. |
 | Who asked | Already there: ledger rows store `profile` and `user_id` (`ledger.py:55-56`, filled from `HERMES_SESSION_PROFILE` in `park_hook.py:157-163`). Use them. |
-| Decisions and wakes | Wakes arrive at the default profile's copy. It reads the decision with the key of the **row's** profile, found by the naming rule (`/etc/durable-park/instances/<profile>.token`), and the call resumes in that profile's session. The sweep and the start check use the same rule. A missing key file: the row is not resumed and the sweep alerts. |
+| Decisions and wakes | Every wake goes to the profile that made the call. Each person gets a wake route in the default profile's webhook settings, `durable-park-wake-<profile>` with `profile: <profile>` and the same wake secret, and the receiver and the sweep post that person's wakes to `/p/<profile>/webhooks/durable-park-wake-<profile>` (the profile comes from the row, or from the session key `agent:<profile>:...` the receiver already gets; `agent:main:...` means the default profile, which keeps today's route). That profile's own copy of durable-park then reads the decision with its own key and posts in its own chat. A missing route or key file: the row is not resumed and the sweep alerts. |
 | Start checks | `tool_policy_check.sh` checks every profile, `not-set-up` included. A profile with tools but no key file, a profile whose secrets command does not name itself, or two profiles sharing a key: the check fails, the gateway still starts (so alerts keep working, as today) but **every** copy of durable-park refuses every tool call, and the sweep's Teams alert names the profile. `not-set-up` needs no key: the check requires it to have no tools at all. |
 
 ### 6.5 New admin command `durable-park/deploy/people.sh` (run by an admin with `sudo`)
@@ -198,9 +207,9 @@ Hermes's files as the `hermes` user.
 
 | Command | What it does |
 |---|---|
-| `people.sh add <name> <teams-user-id> <role>` | Creates the person's withHuman key (written straight to its key file, root:hermes 640, never printed), the blank profile from the template, the route and the allowlist entry. Restarts the gateway only when no ledger row is `parked`, `approved` or `executing`: it waits up to 10 minutes, saying so; on time-out it undoes everything and exits with an error. |
+| `people.sh add <name> <teams-user-id> <role>` | Creates the person's wake route (`durable-park-wake-<name>`, bound to their profile), the person's withHuman key (written straight to its key file, root:hermes 640, never printed), the blank profile from the template, the route and the allowlist entry. Restarts the gateway only when no ledger row is `parked`, `approved` or `executing`: it waits up to 10 minutes, saying so; on time-out it undoes everything and exits with an error. |
 | `people.sh move <name> <role>` | Refused while that person has a row `parked`, `approved` or `executing` (the old key must finish them). Then: new key under the new role, written to both places, old key disabled, and a gateway restart under the same rule as `add` (the gateway connection reads its key only when it connects). Until the restart the person's calls are refused (their old key is disabled), with a Teams alert. |
-| `people.sh remove <name>` | Same refusal while rows are active. Then: key disabled, route and allowlist entry removed, gateway restart under the same rule as `add`, chat history kept for the retention period. |
+| `people.sh remove <name>` | Same refusal while rows are active. Then: key disabled, route, wake route and allowlist entry removed, gateway restart under the same rule as `add`, chat history kept for the retention period. |
 | `people.sh sync-role <role>` | Option P only: re-copies the role's tool list to every person in that role. |
 | `people.sh list` | Name, role, Teams ID, last seen. |
 
@@ -233,6 +242,9 @@ Every step is checked; on any failure it undoes what it did, says what failed, a
 7. Does each routed profile's copy of durable-park load when the gateway starts, or only on that profile's first
    message? (Decides what the start check waits for.)
 8. How does a routed profile get the AI model's key without also getting the Teams and Telegram bot keys?
+9. (Added after the Task 1 test found the blocker.) Does a wake posted to `/p/<profile>/webhooks/<route>` (a route
+   with `profile: <profile>`) reach that profile's copy of durable-park, read the decision with that profile's key,
+   and post the result in that person's chat?
 
 **Acceptance (sandbox accounts only):**
 - Viewer: one lookup **per server** runs without asking (both decision steps pass); a change is refused without

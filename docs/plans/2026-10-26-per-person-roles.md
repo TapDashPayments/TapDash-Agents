@@ -50,6 +50,38 @@
 - [ ] **Step 5: Clean up.** Remove the route, ledger check, restart, port check; `hermes profile delete spike`; delete the key file and the temporary helper; remove the grant; disable the instances; archive `spike-a`. Verify: the bot answers Yaakov as before, `hermes_pin.sh check` passes, no `spike` row is active.
 - [ ] **Step 6: Commit the record** (`git commit -m "docs: per-person roles spike record"`), send Yaakov the decisions table, and **stop** if an answer blocks the design (for example `INJECT_CROSS_PROFILE=no`).
 
+### Task 1b: Short test of the per-profile wake (spec section 8, item 9)
+
+Why: Task 1 found `INJECT_CROSS_PROFILE = no` (a plugin may only post into its own profile's chats). The fix in the
+spec: send each wake to the profile that made the call, through a webhook route bound to that profile. This test
+proves it before Task 4 is built. Same safety as Task 1: Yaakov's OK, a quiet window, full clean-up.
+
+**Files:**
+- Modify: `durable-park/docs/spike-2026-10-27-per-person-roles.md` (new section "Task 1b: per-profile wake", and a new
+  row in the decisions table)
+
+**Interfaces:**
+- Produces: decisions-table row `WAKE_ROUTE_PER_PROFILE` (yes/no), plus the exact route settings that worked.
+
+- [ ] **Step 1: Get Yaakov's OK and a quiet window** (about 15 minutes; his Teams account routed to a throwaway
+  profile again; one approval tap in withHuman).
+- [ ] **Step 2: Same throwaway setup as Task 1** (new agent `spike-c`, blank profile `spike`, own key file, secrets
+  helper, the two-tool QuickBooks sandbox grant, the Teams route). One addition in the default profile's
+  `config.yaml`: a webhook route `durable-park-wake-spike` copied from `durable-park-wake` (same events, `deliver:
+  log`, prompt and secret reference) with `profile: spike`. Ledger check, restart, port check.
+- [ ] **Step 3:** From Teams, ask for one customer lookup; it parks in the spike profile. Yaakov approves it in
+  withHuman.
+- [ ] **Step 4: Post the wake by hand** (the receiver still posts to the old address): as `hermes`, run
+  `post_wake("<park id>", <wake secret read from its file, never printed>, "http://127.0.0.1:8644/p/spike/webhooks/durable-park-wake-spike")`
+  from `durable-park/receiver/wake_post.py`. Record: HTTP status; which profile's log shows the wake; whether the
+  spike profile's durable-park read the decision with the spike key (no `CredentialRefused`); whether the result
+  reached his Teams chat with no typing from him. If the gateway step asks a second time, he taps it; if it times
+  out, record it and do not retry.
+- [ ] **Step 5: Clean up exactly as Task 1** (route, wake route, profile, key file, helper, grant, instances,
+  agent), port check, `hermes_pin.sh check`.
+- [ ] **Step 6: Commit the record** (`docs: per-profile wake test (Task 1b)`). **STOP** and tell Yaakov if
+  `WAKE_ROUTE_PER_PROFILE = no`.
+
 ### Task 2: Viewer read lists (data; Yaakov approves the lists)
 
 **Files:**
@@ -119,17 +151,18 @@ def test_old_single_expected_agent_flag_still_works(): ...
 - Create: `durable-park/plugin/durable_park/keys.py`
 - Modify: `durable-park/plugin/durable_park/__init__.py` (lines 335-461: new setting `status_dir`; all status files under it)
 - Modify: `durable-park/plugin/durable_park/wake.py` (`make_async_client_factory` line 98, `_decide_from_provider` 193, `_process` 222)
+- Modify: `durable-park/receiver/wake_post.py` (new `wake_url_for`), `durable-park/receiver/app.py` (`make_resumer`, line 101: URL per profile)
 - Modify: `durable-park/scripts/durable_park_sweep.py` (per-profile status dirs; missing-key check)
 - Modify: `durable-park/deploy/plugin_load_check.sh`
 - Test: `tests/test_keys.py`, `tests/test_wake.py`, `tests/test_sweep.py`, `tests/test_plugin_load_check.py`
 - Docs: `architecture.md` (files table, project map), `runbook.md` (alerts)
 
 **Interfaces:**
-- Consumes: Task 1 `PLUGIN_LOADS_AT_BOOT`, `INJECT_CROSS_PROFILE`.
+- Consumes: Task 1 `PLUGIN_LOADS_AT_BOOT`; Task 1b `WAKE_ROUTE_PER_PROFILE` and its route settings.
 - Produces:
   - `keys.INSTANCES_DIR = "/etc/durable-park/instances"`; `keys.valid_profile(name: str) -> bool` (`^[a-z0-9][a-z0-9_-]{0,62}$` and not `default`); `keys.token_file_for(profile: str | None, *, default: str = DEFAULT_TOKEN_FILE, instances_dir: str = INSTANCES_DIR) -> str` (None, "" or "default" → `default`; invalid → `ValueError`; else `<instances_dir>/<profile>.token`).
   - Plugin setting `status_dir` (default: the ledger's directory, so the default profile is unchanged). Routed profiles set `<ledger dir>/profiles/<profile>`. Every status file (`plugin_load.json`, `tool_policy_load.json`, `tool_policy_status.json` default path, `breaker_status.json`, lift status, `formcheck_status.json`) goes under `status_dir`.
-  - Wake: `make_async_client_factory(base_url: str, token_file_for_row: Callable[[str | None], str])`; `_process` reads the decision with `token_file_for(row.profile)`.
+  - Wake: every wake is handled by the copy of durable-park in the row's own profile (Hermes lets a plugin post only into its own profile's chats). `wake_post.wake_url_for(profile: str | None, base: str = "http://127.0.0.1:8644") -> str`: None, "", "default" or "main" → `DEFAULT_WAKE_URL`; a valid profile → `<base>/p/<profile>/webhooks/durable-park-wake-<profile>`; invalid → `ValueError`. The receiver's `make_resumer` takes the profile from the handle's `session_key` (`agent:<profile>:...`) and posts there; the sweep uses `row.profile`. In the plugin, a wake for a row of another profile is refused with a log line and left for the sweep (never posted cross-profile). The decision is still read with `token_file_for(row.profile)` (a safety check: it equals the copy's own `token_file`).
   - Sweep: `--status-root` (default: ledger dir); runs each per-status alert for the root and for every `profiles/*/` directory, naming the profile in the line. New check: for each row `parked` or `approved`, if `token_file_for(row.profile)` does not exist → `durable-park ALERT: no key file for profile <p>; <park id> cannot resume. Add the key or remove the person (people.sh).` (once per row, state file `missing_key_alert_state.json`). Second new check (found in the Task 1 spike, where a refused key left a row `parked` with only a log warning): the wake writes each `CredentialRefused` it gets for a row into `wake_refusals.json` under the row's `status_dir` (park id, count, first time); when one `parked` row has 3 or more → `durable-park ALERT: withHuman refuses the key for profile <p>, so <park id> cannot resume and blocks that chat and restarts. Check that /etc/durable-park/instances/<p>.token is that person's instance key (people.sh), then the sweep retries.` (once per row, same state file).
   - `plugin_load_check.sh`: if `PLUGIN_LOADS_AT_BOOT=yes`, waits (same 30 s) for a matching proof in the root and in every routed profile's status dir (profile list from `gateway.profile_routes`); if `no`, waits for the default only, and the sweep alerts for a routed profile with no proof 2 minutes after a ledger row of that profile appears.
 
@@ -142,6 +175,9 @@ def test_token_file_for_empty_is_default(): assert token_file_for("") == DEFAULT
 @pytest.mark.parametrize("bad", ["../x", "Sarah", "a"*64, "x/y"])
 def test_token_file_for_bad_name_raises(bad): pytest.raises(ValueError, token_file_for, bad)
 def test_wake_reads_decision_with_row_profile_key(): ...       # row.profile="sarah" -> client built from sarah's file
+def test_wake_url_for(): assert wake_url_for("sarah") == "http://127.0.0.1:8644/p/sarah/webhooks/durable-park-wake-sarah" and wake_url_for("main") == DEFAULT_WAKE_URL
+def test_receiver_posts_wake_to_the_row_profile(): ...         # handle session_key agent:sarah:teams:dm:x -> sarah's URL
+def test_wake_for_another_profiles_row_is_not_posted(): ...    # copy of profile "tom" gets a "sarah" row -> no inject, log line
 def test_wake_missing_key_file_does_not_resume(): ...          # no inject; row stays approved
 def test_status_files_go_to_status_dir(tmp_path): ...          # every status file lands under status_dir
 def test_sweep_alerts_per_profile_status(tmp_path): ...        # failing formcheck in profiles/sarah -> line names "sarah"
@@ -241,16 +277,17 @@ def test_unknown_agent_still_asks(): ...
 - Produces:
   - `restart_when_quiet.sh [--wait-minutes N] [--check-only]` (default 10; `--check-only` waits for a quiet moment and exits 0 without restarting): polls the ledger every 15 s; when no row is `parked|approved|executing`, restarts `hermes-gateway`, waits 25 s, checks `is-active` and that exactly one listener holds `:3978`; exit 0 ok, 3 timed out (nothing restarted), 1 restart problem (message says which).
   - `people.sh init`: creates `/etc/durable-park/instances` (root:hermes 750) and `/etc/durable-park/provisioners` (root 700); creates profile `not-set-up` from the template with no tools and `SOUL.not-set-up.md`; adds the Teams catch-all route `{platform: teams, profile: not-set-up}`; creates `platforms.teams.extra.allow_admin_from` and `group_allow_admin_from` if absent, filled with the Teams IDs of people already added as `admin` (empty until the first `add ... admin`; Hermes gating turns on as soon as one admin is listed). Idempotent.
-  - `people.sh add <name> <teams-user-id> <role>`: validates (`keys.valid_profile`, role in `admin|ops|viewer`, Teams ID is a UUID); creates the withHuman instance of the role agent with `/etc/durable-park/provisioners/<role>.token`, writing the shown key straight to `/etc/durable-park/instances/<name>.token` (root:hermes 640); `hermes profile create <name>` (blank) as `hermes`; applies the template: `model.*` copied from the default profile, the model key per `LLM_KEY_SOURCE`, `mcp_servers.wh` as in `deploy/hermes_mcp.sh`, `secrets.command.enabled: true`, `secrets.command.override_existing: true`, `secrets.command.command: /opt/durable-park/libexec/hermes-secrets <name>`, `plugins.entries.durable-park` enabled in the profile's config file before the profile is served (never `hermes plugins enable` on the running gateway) with `token_file`, the shared `ledger_path`, `status_dir: <ledger dir>/profiles/<name>`, the `paylink_*` settings copied; `platforms.*.enabled: false`; then `hermes_tool_policy.py apply` with that `HERMES_HOME`; adds the route (`guild_id` from `TEAMS_TENANT_ID`); adds the Teams ID to `TEAMS_ALLOWED_USERS` in the default profile's `~/.hermes/.env` (atomic rewrite of that one line, no other line printed); for `admin`, adds the ID to both admin lists; runs `profile_keys_check.py`; then `restart_when_quiet.sh`. Any failure → undo every earlier step in reverse, exit 1 with the step name.
+  - `people.sh add <name> <teams-user-id> <role>`: validates (`keys.valid_profile`, role in `admin|ops|viewer`, Teams ID is a UUID); creates the withHuman instance of the role agent with `/etc/durable-park/provisioners/<role>.token`, writing the shown key straight to `/etc/durable-park/instances/<name>.token` (root:hermes 640); `hermes profile create <name>` (blank) as `hermes`; applies the template: `model.*` copied from the default profile, the model key per `LLM_KEY_SOURCE`, `mcp_servers.wh` as in `deploy/hermes_mcp.sh`, `secrets.command.enabled: true`, `secrets.command.override_existing: true`, `secrets.command.command: /opt/durable-park/libexec/hermes-secrets <name>`, `plugins.entries.durable-park` enabled in the profile's config file before the profile is served (never `hermes plugins enable` on the running gateway) with `token_file`, the shared `ledger_path`, `status_dir: <ledger dir>/profiles/<name>`, the `paylink_*` settings copied; `platforms.*.enabled: false`; then `hermes_tool_policy.py apply` with that `HERMES_HOME`; adds the route (`guild_id` from `TEAMS_TENANT_ID`); adds the wake route `platforms.webhook.extra.routes.durable-park-wake-<name>` (copy of `durable-park-wake` with `profile: <name>`, same secret reference); adds the Teams ID to `TEAMS_ALLOWED_USERS` in the default profile's `~/.hermes/.env` (atomic rewrite of that one line, no other line printed); for `admin`, adds the ID to both admin lists; runs `profile_keys_check.py`; then `restart_when_quiet.sh`. Any failure → undo every earlier step in reverse, exit 1 with the step name.
   - `people.sh move <name> <role>`: exit 1 if the person has a row `parked|approved|executing`. Then **first** waits for a quiet moment (`restart_when_quiet.sh --check-only`, same 10 minutes; on time-out exit 1 with nothing changed). Then: new instance under the new role (key file replaced in place), old instance disabled with `/etc/durable-park/wh_admin_key` (a withHuman org key with agent write rights, made by Yaakov in the app), admin lists updated, restart. If the restart itself fails: exit 1, the person's calls are refused (old key disabled) and the message tells Yaakov to restart by hand. Test that a call with a disabled key is refused **and** produces a sweep line (breaker or refusal).
-  - `people.sh remove <name>`: same active-row refusal; disable the instance, remove route, allowlist entry and admin-list entries, delete the key file, `restart_when_quiet.sh`; the profile folder (chat history) is kept and listed for deletion after the 365-day retention.
+  - `people.sh remove <name>`: same active-row refusal; disable the instance, remove route, wake route, allowlist entry and admin-list entries, delete the key file, `restart_when_quiet.sh`; the profile folder (chat history) is kept and listed for deletion after the 365-day retention.
   - `people.sh list`: name, role, Teams ID (shortened), instance status. `people.sh sync-role <role>`: option P only.
   - Exit codes: 0 ok, 1 refused or failed (message says why), 2 usage.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_add_creates_everything_and_never_prints_the_key(capsys): ...
+def test_add_creates_everything_and_never_prints_the_key(capsys): ...   # includes the wake route bound to the profile
+def test_remove_deletes_the_wake_route(): ...
 def test_add_rolls_back_when_a_step_fails(): ...                  # fail at "route": instance disabled, key file, profile, allowlist entry gone
 def test_add_rolls_back_when_restart_times_out(): ...             # restart_when_quiet exits 3 -> everything undone, exit 1
 def test_admin_goes_into_both_admin_lists(): ...
