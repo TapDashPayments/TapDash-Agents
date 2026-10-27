@@ -505,6 +505,16 @@ def test_load_check_does_not_wait_for_a_parked_profile(tmp_path):
     assert took < 1.5
 
 
+def test_load_check_does_not_wait_for_a_standalone_profile(tmp_path):
+    """Hermes does not serve a gateway.standalone profile from this gateway: no copy of the plugin loads for it."""
+    write_root_proof(tmp_path)
+    env = make_home(tmp_path, "alone")
+    (tmp_path / "hh" / "profiles" / "alone" / "config.yaml").write_text('{"gateway": {"standalone": true}}')
+    result, took = run_check(tmp_path, extra_env=env)
+    assert result.returncode == 0 and result.stdout.strip() == "durable-park plugin loaded (mode=asking, pid=4242)"
+    assert took < 1.5
+
+
 def test_load_check_ignores_deleted_and_marker_less_folders_and_bad_names(tmp_path):
     write_root_proof(tmp_path)
     env = make_home(tmp_path, "gone", "Shouting", ".hidden")

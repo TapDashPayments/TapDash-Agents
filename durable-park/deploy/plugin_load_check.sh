@@ -19,6 +19,7 @@
 # folder this is exactly the check above. A config that cannot be read, a route with a profile name that is not
 # valid, or a profile folder list that cannot be made, fails closed.
 set -u
+export LC_ALL=C  # the [a-z0-9] ranges below must mean the same everywhere
 
 HERMES_HOME=${HERMES_HOME:-${HOME:-/nonexistent}/.hermes}
 PROOF=${DURABLE_PARK_PLUGIN_LOAD:-$HERMES_HOME/plugin-data/durable-park/plugin_load.json}

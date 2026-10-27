@@ -4,7 +4,9 @@
 Two commands, both for the gateway start (deploy/tool_policy_check.sh, deploy/plugin_load_check.sh):
 
     profile_keys_check.py list  --hermes-home H [--serving]
-        The installed profile names, one per line. Stdlib only. ``--serving`` leaves out the ones an admin parked.
+        The installed profile names, one per line. ``--serving`` leaves out the ones the host gateway does not serve:
+        parked ones and ``gateway.standalone`` ones (it reads each config.yaml for that, with PyYAML or ruamel.yaml;
+        a config it cannot read counts as served, as in Hermes). Exit 3: could not list (see stderr).
     profile_keys_check.py check --hermes-home H [--status-root DIR] [--instances-dir DIR] [--default-key FILE]
                                 [--dry-run]
         Prints one problem per line, never key text; exits 0 (none) or 1 (problems). With problems it also rewrites
@@ -47,7 +49,11 @@ def _load_keys():
     return module
 
 
-_keys = _load_keys()
+try:
+    _keys = _load_keys()
+except Exception as exc:  # noqa: BLE001 - a missing or broken keys.py must exit 3 ("did not finish"), never 1 ("problems found")
+    print(f"profile_keys_check: cannot load plugin/durable_park/keys.py ({type(exc).__name__})", file=sys.stderr)
+    sys.exit(3)
 
 DEFAULT = "default"
 NOT_SET_UP = "not-set-up"
@@ -56,7 +62,7 @@ STATUS_FILE = "tool_policy_status.json"
 PROFILES_DIR = "profiles"
 DEFAULT_STATUS_SUBDIR = os.path.join("plugin-data", "durable-park")
 # What Hermes itself accepts as a profile name (hermes_constants.PROFILE_ID_RE; one character longer than our own rule).
-HERMES_PROFILE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+HERMES_PROFILE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")  # used with .match, as Hermes does: "$" also lets a trailing newline through
 # A directory is a profile only when one of these is in it (hermes_constants._PROFILE_IDENTITY_MARKERS).
 IDENTITY_MARKERS = ("config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db")
 TRUE_WORDS = frozenset({"1", "true", "yes", "on", "y", "t"})  # a ``gateway.standalone`` written as text
@@ -146,20 +152,39 @@ def _has_identity(folder: Path) -> bool:
     return any((folder / marker).is_file() or (folder / marker).is_symlink() for marker in IDENTITY_MARKERS)
 
 
+def _hermes_standalone(value: object) -> bool:
+    """``gateway.standalone`` exactly as Hermes reads it (hermes_cli/profiles.py ``_standalone_truthy``): a string
+    is on for 1/true/yes/on, anything else by Python truth."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _is_standalone(config_path: Path) -> bool:
+    """True when this profile's config opts it out of the host gateway. A config that cannot be read counts as NOT
+    standalone, as in Hermes (``profile_is_standalone``): such a profile is still expected to load."""
+    try:
+        gateway = read_yaml(config_path).get("gateway")
+    except Exception:  # noqa: BLE001 - missing file, bad YAML, no yaml module: not standalone
+        return False
+    return isinstance(gateway, dict) and _hermes_standalone(gateway.get("standalone"))
+
+
 def installed_profiles(hermes_home: str | os.PathLike, *, serving_only: bool = False) -> list[InstalledProfile]:
     """The profile folders Hermes would list, sorted by name. Raises ``OSError`` when the folder cannot be read;
-    a missing ``profiles`` folder is simply no profiles."""
+    a missing ``profiles`` folder is simply no profiles. With *serving_only*, the folders the host gateway does not
+    serve are left out too: parked ones and ``gateway.standalone`` ones (hermes_cli/profiles.py ``profiles_to_serve``)."""
     root = Path(hermes_home) / PROFILES_DIR
     if not root.is_dir():
         return []
     found = []
     for entry in sorted(root.iterdir()):
         name = entry.name
-        if (not entry.is_dir() or name == DEFAULT or not HERMES_PROFILE_ID.fullmatch(name)
+        if (not entry.is_dir() or name == DEFAULT or not HERMES_PROFILE_ID.match(name)
                 or not _has_identity(entry) or (root / ".deleted" / name).exists()):
             continue
         parked = (entry / "gateway.parked").exists()
-        if serving_only and parked:
+        if serving_only and (parked or _is_standalone(entry / "config.yaml")):
             continue
         found.append(InstalledProfile(name, entry, parked))
     return found
@@ -208,7 +233,10 @@ def _key_state(path: str | os.PathLike) -> tuple[str | None, bool]:
 
 
 def _truthy(value: object) -> bool:
-    return value is True or (isinstance(value, str) and value.strip().lower() in TRUE_WORDS)
+    """Wider than Hermes on purpose (also y/t): the key check may only over-report, never miss a standalone profile."""
+    if isinstance(value, str):
+        return value.strip().lower() in TRUE_WORDS
+    return bool(value)
 
 
 def _read_config(path: Path, read_config: Callable[[Path], dict]) -> dict | None:
@@ -336,6 +364,9 @@ def _run_list(args) -> int:
         names = [p.name for p in installed_profiles(args.hermes_home, serving_only=args.serving)]
     except OSError as exc:
         print(f"profile_keys_check: cannot list the profiles ({type(exc).__name__})", file=sys.stderr)
+        return 3
+    if any("\n" in name for name in names):  # Hermes accepts such a folder name; one line per name cannot hold it
+        print("profile_keys_check: a profile folder name has a line break; cannot list the profiles", file=sys.stderr)
         return 3
     for name in names:
         print(name)

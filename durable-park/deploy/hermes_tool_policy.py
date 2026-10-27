@@ -27,8 +27,8 @@ access (``PHASE2_TOOLSETS``) are refused until Clean Setup Phase 2. Exit codes: 
 ``check --expect-no-tools`` is for the ``not-set-up`` profile of the per-person roles (deploy/tool_policy_check.sh
 passes it for that one profile): the chat platforms must have no tool at all, in the catalog or the model's list
 (``parked_action_execute`` is not required), the postures and media delivery are judged as usual, and the report also
-carries ``"has_tools"`` (false only when the check ran to the end and found none). deploy/profile_keys_check.py
-reads that flag.
+carries ``"has_tools"`` (false only when the check ran to the end and found none on the chat platforms; the
+command-line postures are judged but do not count as "has tools"). deploy/profile_keys_check.py reads that flag.
 
 Policy, three layers (Hermes v0.22.2, ~/.hermes/hermes-agent):
 1. ``platform_toolsets.<platform> = [durable_park, clarify, wh]`` for EVERY platform key an agent can run

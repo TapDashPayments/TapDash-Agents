@@ -388,13 +388,25 @@ in `profiles/.deleted`). So at every gateway start, three checks go through **ev
 
 The sweep reports a missing key at the start check too, but it still looks at rows already `parked` or `approved`
 only while the gateway runs. A new call from a profile whose key goes missing later fails through the breaker
-instead: it is refused, its row is `cancelled`, and after 3 such calls the sweep says \"withHuman could not be
-reached\". A profile with `gateway.standalone: true` is not supported (Hermes does not serve it from this gateway);
-the key check names it.
+instead: it is refused, its row is `cancelled`, and after 3 such calls the sweep says "withHuman could not be
+reached". A profile with `gateway.standalone: true` is not supported (Hermes does not serve it from this gateway,
+so it would run in its own gateway, unchecked): the key check names it and every report fails. The load check does
+not wait for it, because the host gateway never loads a copy of the plugin for it.
+
+What the checks assume, and what they cannot see:
+
+- Hermes multiplexes: `gateway.multiplex_profiles: true`, and no per-profile gateway still running (Hermes switches
+  multiplexing off at boot when one is). The load check waits for a proof from every installed profile folder; if
+  multiplexing were off, none would load and the gateway would stop with a named alert (a loud stop, never a silent one).
+- The `has_tools` flag of `not-set-up` counts the chat platforms only. Its command-line postures are still judged by
+  the policy check; they just do not count as "has tools".
+- A folder whose name ends in a line break is accepted by Hermes (its name rule ends in `$`) but not by ours: the key
+  check reports `name is not allowed` (every report fails) and `list` refuses (the load check stops the gateway).
 
 **At gateway start.** `deploy/plugin_load_check.sh` waits for the proof of every routed profile and every installed
 profile folder (the list comes from `gateway.profile_routes` in the Hermes config and from
-`deploy/profile_keys_check.py list --serving`) and names each profile that has none ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)).
+`deploy/profile_keys_check.py list --serving`, which leaves out the folders Hermes does not serve: parked ones and
+`gateway.standalone` ones) and names each profile that has none ([runbook](runbook.md#gateway-will-not-start-the-plugin-did-not-load)).
 
 ### Gateway start
 
@@ -404,9 +416,12 @@ profile folder (the list comes from `gateway.profile_routes` in the Hermes confi
    lists the installed profiles (`profile_keys_check.py list`), runs the same check for each one with that profile's
    own home (`HERMES_HOME=~/.hermes/profiles/<name>`; `not-set-up` with `--expect-no-tools`), leaving each report in
    `profiles/<name>/` next to the ledger, and finally runs the key check (`profile_keys_check.py check`), which
-   fails every report when a profile has no key, names the wrong secrets command or shares a key. It always exits 0
-   (the `-` and the script both ensure the gateway starts), writing a failing report itself when there is no Python,
-   the profiles cannot be listed, the key check did not finish, or a check left no new report.
+   fails every report when a profile has no key, names the wrong secrets command or shares a key. The script trusts
+   the key check's "problems found" (exit 1) only after it sees that every report was rewritten as failing by that
+   run; any other exit, or an exit 1 that left a report alone (a crashed script), makes it fail every report itself
+   (`the key check did not finish`). It always exits 0 (the `-` and the script both ensure the gateway starts),
+   writing a failing report itself when there is no Python, the profiles cannot be listed, the key check did not
+   finish, or a check left no new report.
 2. Hermes loads the plugin. `register` validates the settings, then reads that report. A problem (missing, failed,
    written more than 15 minutes before this process started, unreadable or future-dated `checked_at`) registers the fail-closed hook (`POLICY_MESSAGE`; only the default exempt tools pass, never the configured list), the wake
    dropper, and an executor that refuses without touching the ledger; nothing else is opened.

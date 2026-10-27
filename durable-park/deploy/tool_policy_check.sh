@@ -18,6 +18,7 @@
 # removes each profile's load proof from the earlier gateway process, so a stale proof (a reused pid) can never
 # satisfy plugin_load_check.sh.
 set -u
+export LC_ALL=C  # the [a-z0-9] ranges below must mean the same everywhere
 
 HERMES_HOME=${HERMES_HOME:-$HOME/.hermes}
 STATUS=${DURABLE_PARK_POLICY_STATUS:-$HERMES_HOME/plugin-data/durable-park/tool_policy_status.json}
@@ -116,9 +117,15 @@ fail_all() {
     done
 }
 
+# True when the report $1 was rewritten at or after the epoch second $2 and says ok:false (what the key check does
+# to a report when it finds a problem; the same JSON spelling as write_failing above).
+report_marked_failing() {
+    [[ -f $1 && $(stat -c %Y -- "$1" 2>/dev/null || echo 0) -ge $2 ]] && grep -q '"ok": false' -- "$1" 2>/dev/null
+}
+
 # Every installed profile's own check, then the key check across all of them.
 check_profiles() {
-    local py=$1 name rc=0
+    local py=$1 name rc=0 start unmarked=0
     if ! list_profiles "$py"; then
         log "could not list the Hermes profiles"
         fail_all "could not list the Hermes profiles"
@@ -133,11 +140,23 @@ check_profiles() {
                 " for profile $name"
         fi
     done
+    start=$(date +%s)
     timeout 60 "$py" -I "$REPO/deploy/profile_keys_check.py" check --hermes-home "$HERMES_HOME" \
         --status-root "$STATUS_DIR" || rc=$?
     case $rc in
         0) ;;
-        1) log "the profile key check found a key problem; the plugin will refuse tool calls in every profile" ;;
+        1)  # Python also exits 1 for a crash it did not catch (a broken script): trust "problems found" only when
+            # every report really was rewritten as failing by this run.
+            report_marked_failing "$STATUS" "$start" || unmarked=1
+            for name in "${PROFILES[@]+"${PROFILES[@]}"}"; do
+                report_marked_failing "$STATUS_DIR/profiles/$name/$PROFILE_STATUS_NAME" "$start" || unmarked=1
+            done
+            if [[ $unmarked -eq 0 ]]; then
+                log "the profile key check found a key problem; the plugin will refuse tool calls in every profile"
+            else
+                log "the profile key check exited 1 but did not fail every report (a crash?)"
+                fail_all "the key check did not finish"
+            fi ;;
         *) log "the profile key check did not finish (exit $rc)"; fail_all "the key check did not finish" ;;
     esac
 }

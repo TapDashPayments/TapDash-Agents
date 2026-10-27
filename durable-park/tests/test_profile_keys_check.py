@@ -186,6 +186,53 @@ def test_parked_profiles_are_listed_but_flagged(tmp_path):
     assert names(tmp_path, serving_only=True) == ["awake"]
 
 
+def json_configs(monkeypatch):
+    """The test environment has no YAML module: read the configs (written as JSON, which is YAML) with json."""
+    def read(path):
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    monkeypatch.setattr(pkc, "read_yaml", read)
+
+
+def write_gateway(folder, standalone):
+    (folder / "config.yaml").write_text(json.dumps({"gateway": {"standalone": standalone}}))  # JSON is YAML
+
+
+@pytest.mark.parametrize("value", [True, "true", "yes", "on", "1", 1])
+def test_a_standalone_profile_is_not_served_by_the_host_gateway(tmp_path, monkeypatch, value):
+    json_configs(monkeypatch)
+    write_gateway(make_profile(tmp_path, "alone"), value)
+    make_profile(tmp_path, "hosted")
+    assert names(tmp_path, serving_only=True) == ["hosted"]
+    assert names(tmp_path) == ["alone", "hosted"]  # still installed: the key check looks at it
+
+
+@pytest.mark.parametrize("value", [False, "false", "no", "off", "0", 0, None, "maybe"])
+def test_a_profile_that_is_not_standalone_is_served(tmp_path, monkeypatch, value):
+    json_configs(monkeypatch)
+    write_gateway(make_profile(tmp_path, "hosted"), value)
+    assert names(tmp_path, serving_only=True) == ["hosted"]
+
+
+def test_a_config_that_cannot_be_read_counts_as_served(tmp_path, monkeypatch):
+    json_configs(monkeypatch)
+    """Hermes treats an unreadable gateway.standalone as off (profile_is_standalone): the profile is still expected to load."""
+    (make_profile(tmp_path, "broken") / "config.yaml").write_text("{not json")
+    assert names(tmp_path, serving_only=True) == ["broken"]
+
+
+def test_the_standalone_rule_is_the_same_as_hermes():
+    for value in (True, "true", "yes", "on", "1", " ON ", 1, [1], {"a": 1}):
+        assert pkc._hermes_standalone(value) is True, value
+    for value in (False, "false", "no", "off", "0", "y", "t", "", 0, None, [], {}):
+        assert pkc._hermes_standalone(value) is False, value
+
+
+def test_the_key_check_names_a_standalone_value_hermes_would_not_serve(tmp_path):
+    """The problem text is wider than the serving rule (y/t too): it may only over-report."""
+    assert pkc._truthy("y") and pkc._truthy("t") and pkc._truthy(1) and not pkc._truthy("no")
+
+
 def test_a_64_character_name_is_a_hermes_profile(tmp_path):
     make_profile(tmp_path, "a" * 64)
     assert names(tmp_path) == ["a" * 64]
@@ -500,6 +547,31 @@ def test_list_that_cannot_read_the_folder_exits_3(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(pkc.Path, "iterdir", lambda self: (_ for _ in ()).throw(PermissionError("no")))
     assert pkc.main(["list", "--hermes-home", str(tmp_path)]) == 3
     assert "cannot list" in capsys.readouterr().err
+
+
+def test_list_cannot_hold_a_folder_name_with_a_line_break(tmp_path, capsys):
+    """Hermes's name rule ends in ``$``, which lets a trailing newline through; one line per name cannot carry it."""
+    make_profile(tmp_path, "sarah\n")
+    assert pkc.main(["list", "--hermes-home", str(tmp_path), "--serving"]) == 3
+    assert "line break" in capsys.readouterr().err
+
+
+def test_a_folder_name_with_a_line_break_is_a_key_problem(tmp_path):
+    make_profile(tmp_path, "sarah\n")
+    facts, extra = pkc.gather(tmp_path, instances_dir=str(tmp_path / "i"), default_key=str(tmp_path / "k"),
+                              status_root=tmp_path / "s", read_config=lambda p: {})
+    assert extra == ["profile sarah\n: name is not allowed"]
+
+
+def test_a_missing_keys_module_exits_3_not_1(tmp_path):
+    """A crash before main() must not look like "problems found" (exit 1): copied away from plugin/, the script exits 3."""
+    import subprocess
+    copy = tmp_path / "deploy" / "profile_keys_check.py"
+    copy.parent.mkdir()
+    copy.write_text((DEPLOY / "profile_keys_check.py").read_text())
+    result = subprocess.run([sys.executable, "-I", str(copy), "list", "--hermes-home", str(tmp_path)],
+                            capture_output=True, text=True)
+    assert result.returncode == 3 and "keys.py" in result.stderr and "Traceback" not in result.stderr
 
 
 def test_usage_errors_exit_2(capsys):

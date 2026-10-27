@@ -273,7 +273,8 @@ PY
    before. The new secrets helper (`hermes-secrets <profile>`) is installed the next time `configure_hermes.sh` runs;
    until a person exists nothing calls it with a name. Before the first start with it, try it without changing
    anything: `profile_keys_check.py check --hermes-home ~/.hermes --dry-run` and `deploy/plugin_load_check.sh` with
-   `MAINPID` set to the running gateway's pid (both only read).
+   `MAINPID` set to the running gateway's pid (both only read). The drop-in now also sets `TimeoutStartSec=300`;
+   `configure_hermes.sh` installs it and runs `daemon-reload`.
 
 3. **Verify**: run the [health check](#health-check). After a gateway restart the form self-check writes a fresh
    `formcheck_status.json` within about a minute.
@@ -449,8 +450,8 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 | `no tool policy report` | The drop-in is not installed (re-run `deploy/configure_hermes.sh`, but check the ledger and stop `hermes-gateway` first: see [Before you run the configure script](#before-you-run-the-configure-script)), or the status directory is not writable by `hermes` | `ls ~/.config/systemd/user/hermes-gateway.service.d/`; `systemctl --user daemon-reload`; check the directory's owner |
 | `hermes python not found` | Not exactly one `~/.hermes/installs/*/facts.json`, or its Python is missing | Check that directory; the same lookup is `hermes_python()` in `deploy/configure_hermes.sh` |
 | `the tool policy check did not write a report` | The check was killed (the 60 s timeout), crashed, or could not write its report; the wrapper then wrote this failing report itself | `journalctl --user -u hermes-gateway` for `tool_policy_check:` lines; run `deploy/hermes_tool_policy.py check --status-file /tmp/x.json` by hand as `hermes` in Hermes's Python and read the error |
-| `could not list the Hermes profiles` | `profile_keys_check.py list` failed (the profiles folder cannot be read, or the helper is missing or crashed). The default profile's report and every report found are failing | Run `profile_keys_check.py list --hermes-home ~/.hermes` by hand as `hermes` and read the error; fix the folder's permissions, then restart the gateway |
-| `the key check did not finish` | `profile_keys_check.py check` crashed, was killed (60 s) or could not write a report. Every report is failing | Run it by hand with `--dry-run` (above) and read the error; look for `tool_policy_check:` lines in `journalctl --user -u hermes-gateway` |
+| `could not list the Hermes profiles` | `profile_keys_check.py list` failed (the profiles folder cannot be read, a folder name has a line break, or the helper is missing or crashed). The default profile's report and every report folder under `profiles/` (also the ones of removed profiles) are failing | Run `profile_keys_check.py list --hermes-home ~/.hermes` by hand as `hermes` and read the error; fix the folder's permissions, then restart the gateway |
+| `the key check did not finish` | `profile_keys_check.py check` crashed, was killed (60 s), could not write a report, or exited 1 without having failed every report (a crashed script; the journal says `exited 1 but did not fail every report`). Every report is failing | Run it by hand with `--dry-run` (above) and read the error; look for `tool_policy_check:` lines in `journalctl --user -u hermes-gateway` |
 | `profile sarah: no key file` | A profile with tools has no `/etc/durable-park/instances/sarah.token` (a typo in the name, or the key was never written). For `default` it is `/etc/durable-park/instance_token` | Add the person's key with `people.sh` (never by hand into chat), or remove the person; restart the gateway |
 | `profile sarah: key file is empty or unreadable` | The file is there but empty, not text, not a plain file, or `hermes` cannot read it | `ls -l /etc/durable-park/instances/sarah.token` (mode 640, owner `root`, group `hermes`; never print the content) |
 | `profile sarah: secrets command does not name sarah` | `secrets.command.command` in Sarah's `config.yaml` is missing or names another profile (it must be `/opt/durable-park/libexec/hermes-secrets sarah`), so her `wh` connection would use someone else's key | Fix that one line in `~/.hermes/profiles/sarah/config.yaml`; restart the gateway |
@@ -459,7 +460,7 @@ and once (`durable-park: the tool policy check passed when the plugin loaded.`) 
 | `profiles sarah, tara share a key` | Two profiles read the same key (this includes the default profile's) | Each person needs their own key (`people.sh`); never copy one |
 | `profile not-set-up: has tools` (and `<platform>: has tool <name>`) | The profile that answers "you are not set up" has a tool. It must have none | Fix its toolsets in `~/.hermes/profiles/not-set-up/config.yaml` (`people.sh init` makes it right) |
 | `profile sarah: config cannot be read` | The profile's `config.yaml` is not valid YAML or cannot be read; the check treats it as a profile with tools and no secrets command | Read the file as `hermes` and fix the syntax |
-| `profile sarah: gateway.standalone is on; this setup does not support it` | Hermes does not serve a `standalone` profile from this gateway; its own gateway would run it unchecked | Remove `gateway.standalone` from that profile's config |
+| `profile sarah: gateway.standalone is on; this setup does not support it` | Hermes does not serve a `standalone` profile from this gateway (so the load check does not wait for it, and the gateway still starts); its own gateway would run it unchecked. Every report fails until it is fixed | Remove `gateway.standalone` from that profile's config |
 | `profile <name>: name is not allowed` | A folder name Hermes accepts (up to 64 characters, or `main`) that our rule does not (up to 63, never `default` or `main`) | Rename or delete the folder (`hermes profile delete`, with the gateway stopped and the ledger empty) |
 | `invalid allow file: <reason>` | `/etc/durable-park/allowed_toolsets` has a Phase 2 or unknown name, or `hermes` cannot read it | Fix the file as in [Open a toolset](#open-a-toolset) (step 2), then restart the gateway |
 | a toolset or tool problem | `hermes_tool_policy.py check` found the config drifted (a Hermes upgrade, a manual change) | Run `apply` then `check` as in [Open a toolset](#open-a-toolset) |
@@ -480,6 +481,8 @@ instead, so the sweep no longer fills `errors.log` every few minutes. Every othe
 
 Before go-live, time the check once on the VM (`time bash deploy/tool_policy_check.sh` as `hermes`): it must
 finish well under 60 s (the check's own timeout; systemd also has a start timeout, `TimeoutStartSec`, to stay inside).
+Each profile adds one policy check of about 4 s, so the drop-in sets `TimeoutStartSec=300` (systemd's default is 90 s,
+too short from about ten profiles). With very many profiles, raise it in `deploy/hermes-gateway-policy.conf`.
 
 Fix it, then `systemctl --user restart hermes-gateway` (only when nothing is waiting or running): the check runs
 again at the start. (The same drop-in also stops the gateway when the plugin did not load: see
@@ -537,7 +540,7 @@ Symptom: `systemctl --user status hermes-gateway` shows `failed` or `start-limit
 The drop-in's `ExecStartPost=` (`deploy/plugin_load_check.sh`, no `-`) fails the unit when no `plugin_load.json` for
 the gateway's pid appears within `DURABLE_PARK_LOAD_TIMEOUT` seconds of real time (default 30, always waited in full: the
 deadline is a wall-clock one; Hermes's own load deadline is 10 s and
-the live gateway loads the plugin in about 2 s, well inside systemd's default 90 s start timeout).
+the live gateway loads the plugin in about 2 s, well inside the drop-in's `TimeoutStartSec=300`).
 
 1. Find the reason in the journal: `journalctl --user -u hermes-gateway -n 200 --no-pager | grep -i -E "durable|plugin"`.
    Look for `Failed to load plugin 'durable-park': ...` (an import error, a missing dependency or `_vendor`, or a
@@ -572,7 +575,11 @@ journal lines:
 | `durable-park ALERT: a gateway.profile_routes entry has a profile name that is not valid; stopping the gateway so no profile runs unchecked` | A route's `profile` breaks the [name rule](architecture.md#one-copy-per-person) (lower-case letters, digits, `-` and `_`, up to 63, never `default` or `main`) or is not text. A name such as `*` is not expanded into file names; it is simply an invalid name. | Fix the name in the route. |
 | `durable-park ALERT: could not list the Hermes profiles; stopping the gateway so no profile runs unchecked` | `profile_keys_check.py list` failed or printed a name Hermes would not accept as a profile name, so the check cannot know which profiles must have loaded. It fails closed. | Run `/usr/bin/python3 -I ~/durable-park/deploy/profile_keys_check.py list --hermes-home ~/.hermes --serving` as `hermes` and read the error (a folder it cannot read, or the script missing from the checkout) |
 
-Two environment variables change what the check reads (for tests, or when an admin must): `DURABLE_PARK_PROFILES`
+The check assumes Hermes multiplexes (`gateway.multiplex_profiles: true`, no per-profile gateway running): with it
+off no profile folder would load a copy and the gateway would stop with one alert per profile.
+
+Two environment variables change what the check reads (for tests, or when an admin must; never set them in the
+gateway unit: an empty `DURABLE_PARK_PROFILES` makes the check wait for nobody): `DURABLE_PARK_PROFILES`
 (a list of profile names separated by commas or spaces, used **instead of** reading the config) and
 `DURABLE_PARK_HERMES_CONFIG` (the config file to read, default `$HERMES_HOME/config.yaml`). The names `default` and
 `main` and repeated names are skipped.
@@ -643,8 +650,9 @@ missing key file is reported at start (`profile sarah: no key file`, every profi
   whose key file goes missing while the gateway runs fails through the breaker instead: the call is refused, its row
   is `cancelled`, and after 3 such calls the sweep says `durable-park ALERT: withHuman could not be reached ...`
   ([that section](#withhuman-could-not-be-reached)).
-- A profile an admin parked (`gateway.parked`) is checked for policy and keys but not waited for at load: Hermes does
-  not serve it.
+- A profile an admin parked (`gateway.parked`) or that has `gateway.standalone: true` is checked for policy and keys
+  but not waited for at load: the host gateway does not serve it (a standalone one also fails every report, see
+  the key check table).
 
 **The sweep's options** (the cron wrapper `~hermes/.hermes/scripts/durable_park_sweep.sh` passes none of the new ones,
 so the defaults apply; they are for tests and a different layout):

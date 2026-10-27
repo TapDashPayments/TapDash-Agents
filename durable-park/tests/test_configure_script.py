@@ -766,7 +766,15 @@ case "$script" in
     printf 'keys|%s\n' "$*" >> "$STUB_LOG"
     case "$1" in
     list) cat "$STUB_PROFILES"; exit "${STUB_LIST_RC:-0}" ;;
-    check) exit "${STUB_KEYS_RC:-0}" ;;
+    check)
+        if [ -n "$STUB_KEYS_MARK" ]; then  # like the real check with a problem: every report rewritten as failing
+            more=""
+            [ "$STUB_KEYS_MARK" = "default" ] || more=$(sed "s|.*|$5/profiles/&/tool_policy_status.json|" "$STUB_PROFILES")
+            for r in "$5/tool_policy_status.json" $more; do
+                printf '{"ok": false, "checked_at": "2099-01-01T00:00:00Z", "problems": ["profile x: no key file"], "allowed": []}\n' > "$r"
+            done
+        fi
+        exit "${STUB_KEYS_RC:-0}" ;;
     esac
     ;;
 esac
@@ -774,7 +782,7 @@ exit 99
 """
 
 
-def _wrapper_run(tmp_path, profiles=(), *, list_rc=0, keys_rc=0, policy_silent=False, existing=()):
+def _wrapper_run(tmp_path, profiles=(), *, list_rc=0, keys_rc=0, policy_silent=False, existing=(), keys_mark=""):
     """The wrapper against a fake Hermes home with the profile folders in *profiles*; returns a small namespace."""
     home = tmp_path / "hermes"
     (home / "installs" / "x").mkdir(parents=True)
@@ -800,7 +808,8 @@ def _wrapper_run(tmp_path, profiles=(), *, list_rc=0, keys_rc=0, policy_silent=F
         "DURABLE_PARK_POLICY_STATUS": str(state / "tool_policy_status.json"),
         "DURABLE_PARK_PLUGIN_LOAD": str(state / "plugin_load.json"),
         "STUB_LOG": str(log), "STUB_PROFILES": str(tmp_path / "profiles.txt"), "STUB_LIST_RC": str(list_rc),
-        "STUB_KEYS_RC": str(keys_rc), **({"STUB_POLICY_SILENT": "1"} if policy_silent else {})})
+        "STUB_KEYS_RC": str(keys_rc), **({"STUB_POLICY_SILENT": "1"} if policy_silent else {}),
+        **({"STUB_KEYS_MARK": keys_mark} if keys_mark else {})})
     calls = [line.split("|") for line in log.read_text().splitlines()]
     return type("Run", (), {"result": result, "home": home, "state": state, "calls": calls})
 
@@ -843,10 +852,28 @@ def test_wrapper_lists_the_profiles_then_runs_the_key_check_last(tmp_path):
 
 
 def test_wrapper_key_problems_leave_the_reports_to_the_key_check_and_still_exit_0(tmp_path):
-    run = _wrapper_run(tmp_path, ["sarah"], keys_rc=1)
+    run = _wrapper_run(tmp_path, ["sarah"], keys_rc=1, keys_mark="all")
     assert run.result.returncode == 0
-    assert _report(run)["ok"] is True and _report(run, "profiles", "sarah")["ok"] is True  # the stub key check wrote nothing
-    assert "key problem" in run.result.stderr
+    for parts in ((), ("profiles", "sarah")):  # the key check's own failing reports are left as it wrote them
+        assert _report(run, *parts)["ok"] is False and _report(run, *parts)["problems"] == ["profile x: no key file"]
+    assert "found a key problem" in run.result.stderr
+
+
+def test_wrapper_does_not_trust_exit_1_when_the_reports_were_not_failed(tmp_path):
+    """Python exits 1 for a crash it did not catch (a broken script): that must not pass for "problems found"."""
+    run = _wrapper_run(tmp_path, ["sarah", "tara"], keys_rc=1)  # the stub exits 1 and rewrites nothing
+    assert run.result.returncode == 0
+    for parts in ((), ("profiles", "sarah"), ("profiles", "tara")):
+        report = _report(run, *parts)
+        assert report["ok"] is False and report["problems"] == ["the key check did not finish"], parts
+    assert "did not fail every report" in run.result.stderr
+
+
+def test_wrapper_does_not_trust_exit_1_when_only_the_default_report_was_failed(tmp_path):
+    run = _wrapper_run(tmp_path, ["sarah"], keys_rc=1, keys_mark="default")
+    assert run.result.returncode == 0
+    for parts in ((), ("profiles", "sarah")):
+        assert _report(run, *parts)["problems"] == ["the key check did not finish"], parts
 
 
 @pytest.mark.parametrize("rc", [2, 3, 124, 137])
