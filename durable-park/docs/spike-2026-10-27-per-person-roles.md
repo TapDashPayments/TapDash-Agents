@@ -8,11 +8,14 @@ Times are US Eastern (ET) on the evening of 2026-10-26, with UTC (2026-10-27) in
 
 ## In plain words
 
-We built a pretend "second person" for the Ops bot and sent Yaakov's own Teams messages to it for half an hour.
+We built a pretend "second person" for the Ops bot and sent Yaakov's own Teams messages to it for about 35 minutes.
 His lookup was caught and sent to withHuman for approval, with the right test key on it. He approved it.
 But the bot never got the answer back: the part that picks up approvals still uses the main key, and withHuman
 said "no, that is not yours" (403). That is exactly the gap plan Task 4 is meant to fix. Yaakov chose to stop
 there (option "B"), so the write test was not done. Everything was then removed. Nothing ran in QuickBooks.
+
+So the test answered some of the plan's questions, not all. Two answers are still missing, and one of them is the
+plan's own example of a possible blocker. The design is **not cleared yet** (see "Does any answer block the design?").
 
 ## What was set up (all removed again, see "Clean up")
 
@@ -51,11 +54,11 @@ row blocks new calls in that chat and blocks restarts (ledger rule). So it neede
 | Step | Done | Check |
 |---|---|---|
 | Cancel `P-2F1A8021` | With durable-park's own `Ledger.transition("parked" -> "cancelled")` (the same call the sweep and park hook use), with a note saying why. `notified_at` was set in the same write, so the sweep does not try to announce it into the deleted profile's chat (Yaakov was told on WhatsApp) | 0 rows `parked`, `approved` or `executing` |
-| Remove the route | `config.yaml` put back byte for byte from the copy taken just before the route was added | no `gateway.profile_routes`; the route matcher returns no route for Yaakov's Teams ID, so he goes to the default profile |
+| Remove the route | `config.yaml` put back byte for byte from the copy taken just before the route was added | no `gateway.profile_routes`; the route matcher returns no route for Yaakov's Teams ID, so he goes to the default profile. Not checked with a real Teams message (we chose not to ask him to send one), so his next message is the last check of plan step 5's "the bot answers Yaakov as before" |
 | Restart | 0 active rows, then restart at 10:43 PM (02:43Z) | `sudo ss -ltnp \| grep -c ':3978 '` = 1; Teams connected; no errors in `gateway.log` since |
 | Delete the profile | `hermes profile delete -y spike` | gateway log: `[MULTIPLEX] Profile 'spike' unserved — 0 adapter(s) stopped and unrouted`; `hermes profile list` shows only `default`; the main gateway kept running (same PID, 0 restarts) |
 | Delete files | key file (shredded), `/etc/durable-park/instances/`, the helper, `/root/.spike-ids.json`, `/home/hermes/.spike/` (held the tenant ID and the policy report), the config copy | all gone |
-| withHuman | grant set to mode `none` (revision 2; this is how the app removes access), both instances `disabled`, `spike-a` archived | `spike-a` status `archived`, 0 live instances |
+| withHuman | grant set to mode `none` with no tools (revision 2), both instances `disabled`, `spike-a` archived | `spike-a` status `archived`, 0 live instances |
 | Pin | `deploy/hermes_pin.sh check` as `hermes` in a login shell | all OK (v0.22.3, update block on, passive check off) |
 
 Left on purpose (not live): withHuman keeps archived agents and old requests (`611043a2` approved but never
@@ -66,11 +69,11 @@ Hermes left its own 8-byte marker `~/.hermes/profiles/.deleted/spike`.
 
 | Key | Answer |
 |---|---|
-| `OPTION` | **R, not fully proven.** The park request carries the right instance. The gateway request was never reached, so that half is untested. Task 3 can build on R; if Task 4's live test shows the gateway request without the instance, switch to P |
-| `INSTANCE_ON_BOTH_RECORDS` | **Park request: yes** (both spike requests show `agent_instance_id` = `spike-a-1`). **Gateway request: not tested — Task 4** (no write got past the park) |
+| `OPTION` | **Not decided yet: P by the plan's rule until the gateway half is checked.** The plan sets `R` only if *both* withHuman records carry the right instance, else `P`. The park request did; the gateway request was never reached, so spec 8 item 1 (the question that decides R or P) is still open. R is still the likely answer. If Task 3 is built for R before this is checked, it stays safe (a gateway record with no instance goes to a person and never runs: `test_gateway_record_missing_from_listing_goes_to_a_person`), but it may have to be redone. Yaakov decides: re-run first (recommended, see "How to get the missing answers") or build R and accept the rework risk |
+| `INSTANCE_ON_BOTH_RECORDS` | **Park request: yes** (both spike requests, `611043a2` and `098c70f5`, are park requests and show `agent_instance_id` = `spike-a-1`). **Gateway request: not tested** (no call got past the park). No task before the live rollout (Task 8) tests it; Task 4 has no live step |
 | `PLUGIN_LOADS_AT_BOOT` | **yes** for the routed profile: its own log shows `durable-park loaded` 4 seconds after the restart, minutes before the first message. (There is no separate per-profile `plugin_load.json` yet; Task 4 adds `status_dir`) |
 | `SESSION_PROFILE` | **yes**: ledger rows have `profile=spike`; session key `agent:spike:teams:dm:...` |
-| `INJECT_CROSS_PROFILE` | **not tested — Task 4** (the wake failed before it could inject) |
+| `INJECT_CROSS_PROFILE` | **not tested** (the wake failed before it could resume the call). Task 4 *uses* this answer to build the wake and has no live step, so it cannot find it out itself. The plan's own example of a blocker is `INJECT_CROSS_PROFILE = no` |
 | `DEFAULT_KEY_READS_OTHER_INSTANCE` | **no**: the main proto-agents key got `403 Forbidden` on the spike request (logged `CredentialRefused` at 10:15:25 PM ET); the spike key read the same request with `200`, `approved` |
 | `LLM_KEY_SOURCE` | The profile had **no** `auth.json` and an empty `.env`. Hermes used the **global** `~/.hermes/auth.json` (Nous login) as a read-only fallback (`hermes_cli/auth.py`: "profile first, then the global root"). The model answered (provider `nous`). The profile's secret set held only `DURABLE_PARK_WH_TOKEN`: **no** `TEAMS_*`, `TELEGRAM_*` or `BWS_*` keys |
 | `TEAMS_USER_ID_SHAPE` | Entra object ID: a 36-character lowercase GUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`), same as `TEAMS_ALLOWED_USERS`. Route `guild_id` = tenant ID, also a 36-character GUID. The route with `user_id` + `guild_id` matched. (The chat ID is a different thing: `a:` plus a long text) |
@@ -78,21 +81,40 @@ Hermes left its own 8-byte marker `~/.hermes/profiles/.deleted/spike`.
 
 ## Does any answer block the design?
 
-**No.** `DEFAULT_KEY_READS_OTHER_INSTANCE = no` is the gap Task 4 was written for: Task 4 makes the wake read
-each decision with the key of the row's own profile (`token_file_for(row.profile)`). The answer also shows
-withHuman keeps instances apart, which the design wants. The plan's example blocker, `INJECT_CROSS_PROFILE = no`,
-was not seen (it was not tested). Two things stay open and must be proven live in Task 4 before relying on them:
-the gateway request's instance (`INSTANCE_ON_BOTH_RECORDS`, which `OPTION` depends on) and the cross-profile
-inject.
+**No answer we got blocks it, but the design is not cleared yet.** The plan says to stop if an answer blocks the
+design. Here is where each answer stands:
+
+- `DEFAULT_KEY_READS_OTHER_INSTANCE = no` does **not** block. It is the gap Task 4 was written for: Task 4 makes the
+  wake read each decision with the key of the row's own profile (`token_file_for(row.profile)`). It also shows
+  withHuman keeps instances apart, which the design wants.
+- Two answers are **missing**. Missing is not the same as fine:
+  - `INJECT_CROSS_PROFILE` is the plan's own example of a blocker. If it is "no", the default profile's wake cannot
+    resume a routed person's call, and Task 4's wake design has to change.
+  - The gateway request's instance (`INSTANCE_ON_BOTH_RECORDS`) decides `OPTION`, and so how Task 3 is built.
+
+So Tasks 3 and 4 should not start on a guess about these two. Yaakov decides whether to re-run first.
+
+## How to get the missing answers
+
+One short re-run of Task 1 steps 2 to 5: the same throwaway setup and the same full cleanup, about 15 minutes, with
+Yaakov's OK and a quiet window. One change: after Yaakov approves the lookup in withHuman, the stuck ledger row is
+marked `approved` by hand, after reading his approval with the spike key (one manual ledger write; this is the
+"option A" offered on Oct 26). The default profile's wake can then resume the call. That shows:
+
+- whether the call resumes in the routed profile and its answer reaches his Teams chat (`INJECT_CROSS_PROFILE`;
+  spec 8 items 3 and 5);
+- whether the resumed call's gateway request in withHuman shows the same spike instance (`INSTANCE_ON_BOTH_RECORDS`,
+  and then `OPTION`).
 
 ## Gaps found (for Task 4 and the runbook)
 
 1. A key that withHuman **refuses** (403) leaves a row `parked` forever: the sweep re-wakes every 5 minutes, logs
-   a warning, and nobody is alerted; the chat and restarts stay blocked. Task 4's new check only covers a
-   **missing** key file. Task 4 should also alert (and say what to do) when the wake keeps getting
-   `CredentialRefused`.
+   a warning, and nobody is alerted; the chat and restarts stay blocked. Task 4's check only covered a
+   **missing** key file, so this PR adds a second check to plan Task 4: alert (and say what to do) when the wake
+   keeps getting `CredentialRefused`, with a test.
 2. `deploy/hermes_pin.sh check` run over plain `ssh` (not a login shell) falsely says
-   `FAIL passive update check is on`, because `hermes` is not on the PATH there. Run it as
-   `bash -lc 'deploy/hermes_pin.sh check'`. (The runbook now says so.)
-3. The park hook's one-at-a-time rule opens a withHuman request for the second call and then cancels it, so the
-   cancelled ledger row has no request ID. Not harmful (nothing runs), just good to know when reading records.
+   `FAIL passive update check is on`, because `hermes` is not on the PATH there. Run it as `hermes` in a login
+   shell from the durable-park folder: `sudo -u hermes -H bash -lc 'cd /home/hermes/durable-park && deploy/hermes_pin.sh check'`.
+   (The runbook now says so.) The script itself should say "could not run hermes" instead (follow-up).
+3. The park hook's one-at-a-time rule opens a withHuman request for the second call and then cancels it, but the
+   cancelled ledger row does not save that request's ID (`098c70f5` is only findable in withHuman). Not harmful (nothing runs), just good to know when reading records.
