@@ -22,6 +22,8 @@ NOW = datetime(2026, 10, 22, 12, 0, 0, tzinfo=timezone.utc)
 SERVER = "quickbooks"
 TOOL = "create-payment"
 AGENT = "proto-agents"
+PERSON = "inst-A"  # the withHuman instance (one per person in the per-person setup)
+OTHER_PERSON = "inst-B"
 PARK_TOOL = "mcp__wh__quickbooks__create_payment"
 PARK_SERVER = "park:quickbooks"
 # What the gateway delivers carries withhuman_scope; what the model sent (and the park holds) does not.
@@ -35,7 +37,7 @@ def iso(moment):
 
 def call(**overrides):
     fields = dict(request_id="gw-1", server=SERVER, tool=TOOL, arguments=copy.deepcopy(GATEWAY_ARGS),
-                  agent_slug=AGENT)
+                  agent_slug=AGENT, person=PERSON)
     fields.update(overrides)
     return verify.GatewayCall(**fields)
 
@@ -44,7 +46,8 @@ def park(**overrides):
     """An approved, consumed park request, consumed 10 s ago."""
     consumed = NOW - timedelta(seconds=10)
     item = {
-        "id": "park-1", "agent_slug": AGENT, "tool": PARK_TOOL, "server": PARK_SERVER,
+        "id": "park-1", "agent_slug": AGENT, "agent_instance_id": PERSON, "tool": PARK_TOOL,
+        "server": PARK_SERVER,
         "arguments": copy.deepcopy(PARK_ARGS), "context": {"reason": "pay invoice"},
         "status": "approved",
         "decision": {"id": "dec-1", "request_id": "park-1", "organization_id": "org-1", "membership_id": "mem-1",
@@ -61,7 +64,7 @@ def park(**overrides):
 def neighbour(**overrides):
     """Another request for the same gateway tool and args, created after the park was consumed."""
     item = {
-        "id": "gw-2", "agent_slug": AGENT, "tool": TOOL, "server": SERVER,
+        "id": "gw-2", "agent_slug": AGENT, "agent_instance_id": PERSON, "tool": TOOL, "server": SERVER,
         "arguments": copy.deepcopy(GATEWAY_ARGS), "context": {}, "status": "pending",
         "created_at": iso(NOW - timedelta(seconds=5)),
     }
@@ -73,7 +76,7 @@ def own(**overrides):
     """The gateway request being decided (``call()``), as withHuman lists it: created 9 s ago, 1 s after the
     park was consumed."""
     item = {
-        "id": "gw-1", "agent_slug": AGENT, "tool": TOOL, "server": SERVER,
+        "id": "gw-1", "agent_slug": AGENT, "agent_instance_id": PERSON, "tool": TOOL, "server": SERVER,
         "arguments": copy.deepcopy(GATEWAY_ARGS), "context": {}, "status": "pending",
         "created_at": iso(NOW - timedelta(seconds=9)),
     }
@@ -885,3 +888,42 @@ def test_decide_does_not_look_at_the_outcome_of_a_park_that_did_not_match():
     other = park(id="park-2", arguments={"Amount": 9},
                  consumption={"consumed_at": seconds_ago(10), "outcome": "success"})
     assert decide(call(), [other, park()], [own()], NOW) == verify.Verdict(True, "park-request=park-1", "park-1")
+
+
+# ---------------------------------------------------------------- per-person (role agents): the same person
+
+def test_decide_approves_a_role_agent_call_backed_by_the_same_persons_park():
+    role = "ops-ops"
+    verdict = decide(call(agent_slug=role), [park(agent_slug=role)], [own(agent_slug=role)], NOW)
+    assert verdict == verify.Verdict(True, "park-request=park-1", "park-1")
+
+
+def test_decide_does_not_use_the_approval_of_another_person():
+    # Sarah's park (instance A) is approved and consumed; Tom (instance B, same role agent) sends the same call.
+    assert_no_approved_park(decide(call(person=OTHER_PERSON), [park()],
+                                   [own(agent_instance_id=OTHER_PERSON)], NOW))
+
+
+@pytest.mark.parametrize("shape", ["missing", "empty", "none"])
+def test_decide_rejects_a_park_that_names_no_person(shape):
+    item = park()
+    if shape == "missing":
+        del item["agent_instance_id"]
+    else:
+        item["agent_instance_id"] = "" if shape == "empty" else None
+    assert_no_approved_park(decide(call(), [item], [own()], NOW))
+
+
+def test_decide_never_matches_two_empty_persons():
+    # "" == "" must not count as "the same person".
+    assert_no_approved_park(decide(call(person=""), [park(agent_instance_id="")],
+                                   [own(agent_instance_id="")], NOW))
+
+
+def test_decide_refuses_when_the_listed_gateway_request_belongs_to_another_person():
+    assert_why(decide(call(), [park()], [own(agent_instance_id=OTHER_PERSON)], NOW), "gateway-request-mismatch")
+
+
+def test_decide_counts_another_persons_identical_call_as_a_second_use():
+    # On purpose agent-wide: this can only send more calls to a person, never fewer.
+    assert_already_used(decide(call(), [park()], [own(), neighbour(agent_instance_id=OTHER_PERSON)], NOW))

@@ -75,12 +75,17 @@ def _names_are_safe(server, tool) -> bool:
 
 @dataclass(frozen=True)
 class GatewayCall:
-    """The gateway request the webhook block asks about (already checked for shape by the bridge)."""
+    """The gateway request the webhook block asks about (already checked for shape by the bridge).
+
+    ``person`` is the withHuman agent instance that made the call: one instance per person (per-person roles,
+    option R), read by the bridge from withHuman's own record of the request, never from the delivery.
+    """
     request_id: str
     server: str
     tool: str
     arguments: dict
     agent_slug: str
+    person: str
 
 
 @dataclass(frozen=True)
@@ -94,6 +99,10 @@ def _is_match(park: dict, call: GatewayCall, park_tool: str, park_server: str, d
               now: datetime) -> bool:
     """Rule 2: every condition must hold for ``park`` to back ``call``."""
     if park.get("agent_slug") != call.agent_slug or park.get("tool") != park_tool:
+        return False
+    # The same person: another person on the same role agent may send the very same call, but their call is
+    # never backed by this person's approval. An empty name never counts as "the same".
+    if not call.person or park.get("agent_instance_id") != call.person:
         return False
     if park.get("server") != park_server or park.get("status") != "approved":
         return False
@@ -164,8 +173,8 @@ def _own_request_verdict(call: GatewayCall, digest: str, neighbours: list, consu
     if created is None or created < consumed:
         return Verdict(False, "gateway-request-before-release")
     arguments = listed.get("arguments")
-    if ((listed.get("agent_slug"), listed.get("server"), listed.get("tool")) !=
-            (call.agent_slug, call.server, call.tool)
+    if ((listed.get("agent_slug"), listed.get("agent_instance_id"), listed.get("server"), listed.get("tool")) !=
+            (call.agent_slug, call.person, call.server, call.tool)
             or not isinstance(arguments, dict) or args_digest(arguments) != digest):
         return Verdict(False, "gateway-request-mismatch")
     return None

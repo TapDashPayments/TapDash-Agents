@@ -618,19 +618,20 @@ Argument values and the key are never logged.
 
 | `why=` | Meaning | What to do |
 |---|---|---|
-| `no-approved-park` | No park request matched: wrong tool name or arguments, not approved, not consumed yet, or consumed more than 120 s before the gateway call | See the two causes below; if the call was simply slow, ask again |
+| `no-approved-park` | No park request matched: wrong tool name or arguments, not approved, not consumed yet, consumed more than 120 s before the gateway call, or approved for another person (a different withHuman instance of the same agent) | See the two causes below; if the call was simply slow, ask again |
 | `ambiguous-park` | Two park requests matched the same call | Look in withHuman for a duplicate park of the same call; nothing runs twice, a person decides |
 | `unsafe-name` | The gateway server or tool name is not plain: `__`, a leading or trailing `-`/`_`, a character outside letters, digits, `-`, `_`, or a Hermes name over 64 characters (Hermes would hash it) | Rename the tool at the source, or add the case to the bridge with a test; until then a person approves each call (a second ask) |
 | `redacted-args` | The approver saw `[redacted]` in the park's arguments, or the call carries a secret-looking key (`password`, `token`, `secret`, `authorization`, `api_key`) or arguments too large to show whole | Expected for such calls: look at the real values and decide |
 | `already-reported` | withHuman's record already holds an outcome for this approval. The plugin never reports outcomes (`report_outcomes=False`), so something else used the approval | Investigate: read the park request's history in withHuman to see what reported an outcome, and find the earlier call that used the approval |
-| `gateway-request-not-listed` | withHuman's list of the agent's requests did not hold the gateway request the webhook was about (not yet visible, or id mismatch) | Ask again; if it repeats, check the key's `request.read.unrouted` permission and withHuman's status |
+| `no-person` | withHuman's record of the gateway call has no agent instance, so the bridge cannot tell which person made it | Should not happen: tell the developer. The call went to a person, so nothing ran unapproved |
+| `gateway-request-not-listed` | withHuman's list of the agent's requests did not hold the gateway request the webhook was about (not yet visible, or id mismatch) | Ask again; if it repeats, check the key's `request.read.unrouted` permission and withHuman's status. Since per-person roles it is checked before the park is matched, so a call that used to show as `no-approved-park` for this reason now shows this one (a person still decides) |
 | `gateway-request-before-release` | The gateway request's `created_at` is missing or unreadable, or is earlier than the park's `consumed_at`, by any amount (no skew is allowed: both stamps are withHuman's own clock): it is not the call the approval released | Expected for an old call someone re-ran; a person decides |
 | `gateway-request-mismatch` | The listed gateway request differs from the webhook's call (agent, server, tool or arguments) | Should not happen; compare the request in withHuman with the call and tell the developer |
 | `neighbours-truncated` | The agent's listing (200 newest requests) has nothing created more than 5 s before the park was consumed, so a second use could be hidden beyond its end | Expected only under heavy traffic; a person decides. Nothing is lost |
 | `neighbours-unsorted` | withHuman's listing of the agent's requests was not newest-first, so the bridge cannot tell whether a second use came in from 5 s before the park was consumed onwards. Fails closed | A person decides. This should not happen with withHuman's listing as documented: tell the developer, and check whether withHuman changed the order |
 | `already-used` | Another gateway request for the same call (or for the same tool with `-` and `_` swapped, with the same arguments or arguments that cannot be compared) was created from 5 s before the approval was consumed onwards, or has no readable `created_at` (a retry, or a replay). The 5 s is margin, so a request made just before the release also counts | Expected for a replay; for a first run, find the earlier gateway request |
 | `no-request-id` | The delivery carried no gateway request id (only real deliveries have one; a preview or test does not) | Nothing for a test; for a real call, tell the developer |
-| `body-not-object`, `type`, `preview`, `malformed`, `arguments-not-object`, `agent`, `no-idempotency-key`, `idempotency-mismatch` | Checks on the webhook delivery itself, before any listing: the body is not a JSON object (`body-not-object`); it is not the gateway-call block (`type`); it is a preview or test (`preview`); it lacks the request or agent objects, or the server or tool names (`malformed`); the arguments are not an object (`arguments-not-object`); the agent is not `proto-agents` (`agent`); it has no `WithHuman-Idempotency-Key` header (`no-idempotency-key`); or the body's key differs from the header (`idempotency-mismatch`) | A test or preview: nothing to do. For a real call: check the webhook endpoint's block and agent in withHuman, then tell the developer. The call went to a person |
+| `body-not-object`, `type`, `preview`, `malformed`, `arguments-not-object`, `agent`, `no-idempotency-key`, `idempotency-mismatch` | Checks on the webhook delivery itself, before any listing: the body is not a JSON object (`body-not-object`); it is not the gateway-call block (`type`); it is a preview or test (`preview`); it lacks the request or agent objects, or the server or tool names (`malformed`); the arguments are not an object (`arguments-not-object`); the agent is not one the bridge trusts (`agent`; the list is in the unit, see [which agents it trusts](#the-gateway-bridge)); it has no `WithHuman-Idempotency-Key` header (`no-idempotency-key`); or the body's key differs from the header (`idempotency-mismatch`) | A test or preview: nothing to do. For a real call: check the webhook endpoint's block and agent in withHuman, then tell the developer. The call went to a person |
 | `error:<ExcClass>` | A bug raised an exception in the bridge or in the verdict code. Only the class name is logged, e.g. `error:KeyError` | The call went to a person, so nothing ran unapproved. Tell the developer the class name and the journal time, and fix it with a test |
 | `no-key` | The bridge's copy of `/etc/durable-park/audit_key` is missing or empty (the service copies it when it starts) | [Store the key](#store-or-rotate-the-bridges-keys), then `sudo systemctl restart durable-park-bridge` |
 | `http-<status>` | withHuman answered the listing with a non-200 status. `http-403`: the key lacks `request.read` or `request.read.unrouted`. `http-401`: the key is revoked | 403: mint a key with the three permissions and store it (see [the key](#the-gateway-bridge)), then restart the bridge. 401: store a new key and restart the bridge. Other statuses: check withHuman's status. The call went to a person |
@@ -819,6 +820,32 @@ for the same action, never an auto-approve.
 open socket to `durable-park-bridge.service`. The service gets `bridge_secret` and `audit_key` as private copies
 (`LoadCredential`), made when it starts. Why: the bot's user cannot stop the bridge or take its port. Never stop the
 socket in normal operation ([rule](#access-and-ground-rules)).
+
+**Which agents it trusts, and which person.** The bridge approves only calls from the agents named in its unit's
+`Environment=DURABLE_PARK_EXPECTED_AGENTS=` line: `proto-agents` today. With per-person roles it is a comma list,
+for example `proto-agents,ops-admin,ops-ops`; the Viewer (`ops-viewer`) is never allowed, and an empty list, a name
+with a space or the Viewer stops the bridge at start with a message (the journal says which). A list that is *set* but
+empty (`Environment=DURABLE_PARK_EXPECTED_AGENTS=`) stops it too; it never falls back to `proto-agents`, so blanking
+the list is a safe way to stop auto-approval. Only agents that may approve things belong in the list: list a
+read-only agent and the bridge would trust it (it refuses the literal name `ops-viewer` as a seat belt, not as the
+rule). It also approves a
+call only when the approved park and the call were made by the **same person** (the same withHuman agent instance,
+read from withHuman's own record of the call): Tom's identical call is never covered by Sarah's approval.
+On start it logs `bridge trusts agents: ...`; check that line after a change.
+
+To change the list (no row `parked`, `approved` or `executing`: [health check](#health-check)): as admin,
+`sudo systemctl edit durable-park-bridge`, add
+```
+[Service]
+Environment=DURABLE_PARK_EXPECTED_AGENTS=proto-agents,ops-admin,ops-ops
+```
+and save, then `sudo systemctl restart durable-park-bridge` and `sudo journalctl -u durable-park-bridge -n 5`. Use a
+drop-in, not an edit of the unit file: `configure_hermes.sh` re-installs the unit file from the repo and would undo
+an edit, but it leaves drop-ins alone. To go back, `sudo systemctl revert durable-park-bridge` and restart.
+Check with `systemctl cat durable-park-bridge` that the `ExecStart=` line has **no** `--expected-agent` flag: a
+flag beats the environment, so a unit installed before per-person roles (it still passes `--expected-agent
+proto-agents`) silently ignores the drop-in until `configure_hermes.sh` re-installs the unit file. The old unit
+with the new code keeps working (it trusts `proto-agents` only).
 
 **The key.** The same file as [the decider name](#name-the-decider-optional), now with exactly three permissions:
 `audit.read`, `request.read`, `request.read.unrouted`. It must not be able to read rules or members, and it cannot

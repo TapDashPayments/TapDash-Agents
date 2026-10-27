@@ -187,7 +187,7 @@ flowchart LR
   gw -->|"checks"| pipe
   pipe -->|"webhook block, signed"| funnelB
   funnelB --> bridge
-  bridge -->|"lists requests (read-only org key):<br/>one consumed approved park, not used before,<br/>and the gateway request itself"| aap
+  bridge -->|"lists requests (read-only org key):<br/>one consumed approved park of the same person,<br/>not used before, and the gateway request itself"| aap
   bridge -->|"approve or human"| pipe
   gw -->|"forwards over the tunnel<br/>(tunnel dials out)"| tunnel
   tunnel -->|"QuickBooks API"| qbo
@@ -224,7 +224,7 @@ flowchart LR
 | approval calls | `plugin/durable_park/gatecall.py` | Builds the withHuman (AAP) request from a ledger row for any tool: server label (`park:<slug>` gateway, `mcp:<alias>` other MCP, `hermes`), secret keys redacted and long strings cut, context (`args_sha256`, platform, session key, and the user id and profile saved with the row when there are any), the agent's top-level `withhuman_context` as the request's reasoning (the `agent_reasoning` field, at most 2000 characters), and one shared gate that is rebuilt when the token file changes (the replaced gate's HTTP client is closed one rebuild later, as a call may still be using it). `build_call` is a pure function of the row. The user id and profile are read from the Hermes session once, when the call is parked, and stored in the row. The executor never reads them again. The SDK hashes the whole body into the idempotency key, so a different body would not find the approval. |
 | breaker | `plugin/durable_park/breaker.py` | Circuit breaker for withHuman outages: after 3 consecutive errors it stays open for 30 s (calls are refused without asking), then lets calls through again until an outcome is recorded; a failure re-opens, a success closes. It records open/close in `breaker_status.json` next to the ledger (written only on a change); it never calls withHuman itself. Started with a status file that still says open (a restart during an outage), it starts open but lets calls through at once, so the first success writes the close. |
 | receiver | `receiver/app.py` | Receives withHuman's signed "request decided" webhook and posts a signed wake to Hermes. |
-| bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). Its digest comparison (`ledger.normalize_args`) drops the top-level `withhuman_context`, which is why the note the park hook moved to the top level (and the gateway strips before forwarding) does not change the match: the park row and the delivered call agree. |
+| bridge | `bridge/app.py`, `bridge/verify.py`, `bridge/whapi.py` | Answers withHuman's pipeline webhook: "is this exact gateway call an approved park, asked for by the same person?" It asks withHuman with the org key (stateless, no ledger); `verify.py` is the pure decision rule. It trusts only the agents named in `DURABLE_PARK_EXPECTED_AGENTS` (today `proto-agents`; the role agents `ops-admin` and `ops-ops` once per-person roles are live; never the Viewer `ops-viewer`). Runs as the system user `dpbridge` and serves the socket systemd holds for it (`--systemd-socket`). Its digest comparison (`ledger.normalize_args`) drops the top-level `withhuman_context`, which is why the note the park hook moved to the top level (and the gateway strips before forwarding) does not change the match: the park row and the delivered call agree. |
 | bridge check | `deploy/bridge_check.py` | Read-only isolation check, run as root by `configure_hermes.sh` right after the bridge answers 401 (the deploy stops if it fails) and by hand ([runbook](runbook.md#health-check)). Seven checks: the socket unit is active and listens on exactly `127.0.0.1:8791`; the service is active, its main process runs as `dpbridge` and the `Groups:` line of its `/proc/<pid>/status` is empty or only `dpbridge`'s own gid; only systemd and that process hold the port; no other process runs `bridge.app`; no user-level `durable-park-bridge*` unit exists for any user; `dpbridge` has the `nologin` shell and is not in `dpwake` or `hermes`; `bridge_secret` is `root:root 0600` (stat only, never read). |
 | links | `plugin/durable_park/links.py` | Builds the link to one request's page in withHuman's review queue (`<app>/queue/<request id>`; the sweep's `--withhuman-url`, default `https://app.withhuman.ai`). The page opens only for a signed-in member and withHuman still checks who may decide, but the link goes only to approvers. Standard library only: the sweep loads it by path. Used by the backup-approver alert, which goes only to the admin alert channels (the Telegram DM, the Teams alert chat, the backup approver's Teams webhook). The bot's own reply in the chat never carries the link: whoever asked must not be handed a way to approve their own request. |
 | pay links | `plugin/durable_park/paylink.py`, `paylink/paylink_app.py` | Authorize.net opens a hosted card form only when a page POSTs the form key to it, so the connector answers with a small page (`launcher_html`) that a chat cannot click (TAP2-82). When an approved `authnet_create_payment_form` or `authnet_create_profile_form` has run, the executor reads the post address and hidden fields out of that page, checks each against a fixed list (Authorize.net's hosted page addresses only; fields `token`, `paymentProfileId`, `shippingAddressId` with fixed shapes), and saves them in one file in `/var/lib/durable-park-paylinks` named by the SHA-256 of a 32-character random link id. The model gets only the link (`<paylink_origin>/pay/<id>`) and is told to give it to the user; it never sees the form key. The outcome line shows the link too (`[durable-park] P-XXXX made an Authorize.net form (...). Pay link: ... (works until 17:20 UTC)`). The pay-link service (user `dppay`, read-only) answers that link with its own page (one "Continue to payment" button that posts the key to Authorize.net; no script, so link previews and mail scanners that open the link send nothing on) until one minute before the form's 15 minutes end, then "This payment link has expired". If no link can be made (not set up, a cut form key, an unexpected page) the model is told to say so, the outcome line says why and the gateway log has an error: never silent. Expired files, and temp files a crash left more than an hour ago, are removed the next time a link is made. Form keys may be up to 8192 characters (a real sandbox key is about 850 to 1400). |
@@ -439,10 +439,18 @@ Notes:
 
 The bridge (`bridge/app.py` for the webhook, `bridge/verify.py` for the rule, `bridge/whapi.py` for the withHuman
 call) holds no state and never opens the ledger. For each signed delivery of the gateway request G it asks withHuman
-(`GET /api/v1/requests`, agent `proto-agents`, newest first, with the organization key `/etc/durable-park/audit_key`)
+(`GET /api/v1/requests`, for the delivery's agent, newest first, with the organization key `/etc/durable-park/audit_key`)
 twice, within a total budget of 3.5 s (withHuman's webhook block gives up at 5 s): once for park requests of the
 Hermes tool name (`q` = that name, 50 items), once for **every** recent request of the agent (no `q`, 200 items:
 Hermes folds `-` into `_`, so a filter on the tool name could miss a second use under the other spelling). Then:
+
+**Which person.** One withHuman agent can have many instances, one per person (per-person roles: the role agents
+`ops-admin` and `ops-ops` each have an instance and a key for every person; see the
+[spec](../../docs/specs/2026-10-26-per-person-roles-design.md), section 6.1). withHuman's own record of G carries the
+instance (`agent_instance_id`); the webhook delivery carries only the agent. So the bridge reads the person from G's
+record in the second list, never from the delivery, and before the rule runs: G missing from the list is
+`gateway-request-not-listed`, G listed without an instance is `no-person`; both ask a person. The rest of the rule
+then compares that one person's name.
 
 1. **Plain names only** (`unsafe-name`, before anything else): the gateway server and the tool must each be ASCII
    words joined by single `-` or `_` (the server's own tool-name shape: no `__`, no leading or trailing separator),
@@ -450,7 +458,8 @@ Hermes folds `-` into `_`, so a filter on the tool name could miss a second use 
    hash suffix). Hermes' name sanitisation then only folds `-` into `_`, and the bridge can name the park exactly.
    A `__` in the tool is refused because the gateway pipeline's money regex allows an optional `quickbooks__`
    prefix that the park regex lacks: `quickbooks__create-bill` must never pair with a park for `create-bill`.
-2. A park request P **matches** only if all hold: same agent, tool = the Hermes tool name, server = `park:<slug>`,
+2. A park request P **matches** only if all hold: same agent, **same person** (P's `agent_instance_id` equals G's,
+   and neither is empty), tool = the Hermes tool name, server = `park:<slug>`,
    status and decision `approved`, `consumed_at` present and within the last **120 s** (5 s of clock skew allowed
    against this host's clock; the approval's own expiry is not read, withHuman already refused to consume an
    expired one), no truncated arguments, and the digest of P's arguments equals G's.
@@ -465,7 +474,7 @@ Hermes folds `-` into `_`, so a filter on the tool name could miss a second use 
    could be hidden beyond the page boundary. Both checks run first, so a doubtful listing never reaches the next two
    steps.
 6. **G itself must be in the listing**, created **at or after** P was consumed (both stamps come from withHuman's
-   clock, so no skew is allowed), with the same agent, server, tool and argument digest
+   clock, so no skew is allowed), with the same agent, person, server, tool and argument digest
    (`gateway-request-not-listed`, `gateway-request-before-release`, `gateway-request-mismatch`).
 7. **Single use, collision-aware:** any other request (not G) of the same agent, not itself a park request, that
    Hermes would map to the **same** park (the same Hermes tool name, so `create-bill` and `create_bill` count as
@@ -473,15 +482,21 @@ Hermes folds `-` into `_`, so a filter on the tool name could miss a second use 
    consumed - in any state, pending, denied or expired too - means the approval is used: ask a person
    (`already-used`). The window is wider than G's on purpose: the model's own call made 3 s before the release
    cannot ride on the executor's call made 2 s after it (the earlier one is refused as before-release, the later as
-   already-used).
+   already-used). This check is agent-wide on purpose: another person's identical call on the same role agent also
+   counts as a use. That can only send more calls to a person, never fewer.
 8. Otherwise approve, naming P's id.
 
-The webhook-level payload checks in `bridge/app.py` (signature, block type, preview flag, agent slug, shapes,
+The webhook-level payload checks in `bridge/app.py` (signature, block type, preview flag, agent slug (one of the
+trusted agents), shapes,
 idempotency key, `request.id`) run **before** this rule; the rule only sees a delivery that passed them.
 
 Anything unexpected - withHuman slow or down, a missing or too-weak key, a bad answer - asks a person. That is a
 second ask for the same action (safe, only noisy). The bridge never raises to withHuman and never auto-approves on
 error. Spec: [bridge verifies approvals in withHuman](../../docs/specs/2026-10-22-bridge-verifies-withhuman.md).
+
+**Limit with many people on one agent:** the first list holds the newest 50 park requests of that tool for the whole
+agent. If 50 newer ones from other people push a person's approved park out of it, the call goes to a person
+(`no-approved-park`): safe, only noisy.
 
 **Limit, check when adding a gateway server:** if a server ever offers two tools that differ only by `-` versus `_`
 (for example `create-bill` and `create_bill`), the bridge cannot tell them apart: they share one park tool name, so
@@ -705,7 +720,7 @@ and re-run against the real code on the VM (2026-10-21):
 | Tool returns an unclear error (session expired, interrupted) | `unknown`, same as above. | Check QuickBooks |
 | Tool returns a clear error | `failed`, error stored; nothing to check. | Fix and ask again |
 | A decision's wake is lost (Hermes down, wake refused) | The sweep re-posts wakes every 5 minutes until the chat is told. | Nobody |
-| Bridge cannot confirm the gateway call (no matching consumed park, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
+| Bridge cannot confirm the gateway call (no matching consumed park, a park another person made, args changed, approval older than 120 s, already used by another gateway request, withHuman slow or down, org key missing or too weak, bridge down, bad signature) | withHuman asks a person instead: a second ask for the same action, still safe. Never auto-approves. | An approver decides ([runbook](runbook.md#an-approver-was-asked-twice-for-one-action)) |
 | The bridge process dies or is restarted | systemd keeps listening on `127.0.0.1:8791` (the socket unit holds the port) and restarts the service after 1 s (`Restart=always`); a delivery meanwhile waits in the socket's backlog or times out, and withHuman asks a person instead. Nobody else can bind the port and answer, for as long as the socket unit is neither stopped nor failed. systemd fails a socket unit when the service it activates trips its start limit (`service-start-limit-hit`, with `Accept=no`) and when the socket trips its own trigger limit, and either frees the port; so the service has `StartLimitIntervalSec=0` (systemd keeps retrying every second, however long the start keeps failing) and the socket has `TriggerLimitIntervalSec=0`. Only an admin's `systemctl stop` or `disable --now` of the socket frees the port, and `bridge_check.py` check 1 fails when it is not active. | Nobody; check the unit if it keeps restarting ([runbook](runbook.md#health-check)) |
 | Bad form (missing required field, wrong type) | Form-checked call blocked before anyone is asked; the model is told the exact problem. | Nobody (the model fixes it) |
 | The agent's `withhuman_context` note was not moved to the top level, was dropped, or could not be checked for (rules or arguments unreadable, an error, a tool that declares its own field, a note left inside or removed, a search cut short, a note shortened or missing for the approver) | The call goes on with the original arguments, approval is unaffected; the note may reach the server instead of the approver. The sweep prints one chat line per tool and kind for each new key and detail (naming the first place and counting the others), and again after 24 hours while the count keeps growing. | See [runbook](runbook.md#the-agents-note-could-not-be-moved) |

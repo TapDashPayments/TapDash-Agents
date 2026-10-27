@@ -22,8 +22,7 @@ SOCKET = "durable-park-bridge.socket"
 SERVICE = "durable-park-bridge.service"
 BRIDGE_ARGV = ["/opt/durable-park/bin/python", "-B", "-m", "bridge.app", "--systemd-socket",
                "--secret-file", "/run/credentials/durable-park-bridge.service/bridge_secret",
-               "--key-file", "/run/credentials/durable-park-bridge.service/audit_key",
-               "--expected-agent", "proto-agents"]
+               "--key-file", "/run/credentials/durable-park-bridge.service/audit_key"]
 HEALTHY_SS = ('LISTEN 0      2048   127.0.0.1:8791 0.0.0.0:*    '
               'users:(("systemd",pid=1,fd=40),("python",pid=4242,fd=3))\n')
 

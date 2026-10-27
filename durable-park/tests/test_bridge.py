@@ -34,6 +34,8 @@ SERVER = "quickbooks"
 ARGS = {"Amount": 5, "CustomerRef": {"value": "58"}, "withhuman_scope": "default"}
 PRIVATE_VALUE = "ACME-PRIVATE-VALUE-123"
 PARK_TOOL, PARK_SERVER = expected_park(SERVER, TOOL)
+PERSON = "inst_A"  # withHuman instance of the person who asked (live records carry agent_instance_id)
+ROLE_AGENTS = ("proto-agents", "ops-admin", "ops-ops")
 
 
 def sign(body: bytes, *, secret=SECRET, t=NOW):
@@ -66,7 +68,7 @@ def iso(offset: float) -> str:
 
 
 def park_item(*, id="park_req_1", args=None, consumed=-10, tool=PARK_TOOL, server=PARK_SERVER,
-              slug="proto-agents", outcome=None, expires=None):
+              slug="proto-agents", outcome=None, expires=None, instance=PERSON):
     """The park request withHuman lists after the model asked, a person approved and the executor consumed it.
 
     The live shape: the listing's ``decision`` has no ``expires_at`` (the bridge never reads one) and ``consumption``
@@ -83,17 +85,18 @@ def park_item(*, id="park_req_1", args=None, consumed=-10, tool=PARK_TOOL, serve
     if outcome is not None:
         consumption["outcome"] = outcome
     return {
-        "id": id, "agent_slug": slug, "tool": tool, "server": server,
+        "id": id, "agent_slug": slug, "agent_instance_id": instance, "tool": tool, "server": server,
         "arguments": ARGS if args is None else args, "context": {},
         "status": "approved", "decision": decision, "consumption": consumption,
         "created_at": iso(consumed - 120), "deadline_at": iso(86400),
     }
 
 
-def gateway_item(*, id, created, args=None, server=SERVER, tool=TOOL, status="pending", slug="proto-agents"):
+def gateway_item(*, id, created, args=None, server=SERVER, tool=TOOL, status="pending", slug="proto-agents",
+                 instance=PERSON):
     """A request that came through the gateway (what the webhook block is asked about)."""
     return {
-        "id": id, "agent_slug": slug, "tool": tool, "server": server,
+        "id": id, "agent_slug": slug, "agent_instance_id": instance, "tool": tool, "server": server,
         "arguments": ARGS if args is None else args, "context": {},
         "status": status,
         "created_at": iso(created), "deadline_at": iso(created + 600),
@@ -122,8 +125,13 @@ def lister():
 
 @pytest.fixture
 def client(lister):
-    return TestClient(create_app(secret=SECRET, lister=lister, expected_agent="proto-agents",
+    return TestClient(create_app(secret=SECRET, lister=lister, expected_agents=("proto-agents",),
                                  clock=lambda: NOW))
+
+
+@pytest.fixture
+def role_client(lister):
+    return TestClient(create_app(secret=SECRET, lister=lister, expected_agents=ROLE_AGENTS, clock=lambda: NOW))
 
 
 def listing(*items):
@@ -369,7 +377,7 @@ def test_malformed_but_signed_body_goes_to_human_without_asking_withhuman(client
 
 def test_missing_secret_answers_401_to_everything(tmp_path, lister):
     assert load_secret(str(tmp_path / "absent")) is None
-    app = create_app(secret=None, lister=lister, expected_agent="proto-agents", clock=lambda: NOW)
+    app = create_app(secret=None, lister=lister, expected_agents=("proto-agents",), clock=lambda: NOW)
     resp = deliver(TestClient(app))
     assert resp.status_code == 401 and resp.content == b""
     assert lister.calls == []
@@ -663,7 +671,7 @@ def test_missing_request_id_logs_why_no_request_id(client, caplog):
 def test_both_list_calls_get_one_deadline_of_monotonic_now_plus_three_and_a_half(lister):
     arm(lister)
     ticks = iter([1000.0, 1001.0, 1002.0, 1003.0])
-    app = create_app(secret=SECRET, lister=lister, expected_agent="proto-agents", clock=lambda: NOW,
+    app = create_app(secret=SECRET, lister=lister, expected_agents=("proto-agents",), clock=lambda: NOW,
                      monotonic=lambda: next(ticks))
     deliver(TestClient(app))
     assert [c["deadline"] for c in lister.calls] == [1003.5, 1003.5]
@@ -671,9 +679,9 @@ def test_both_list_calls_get_one_deadline_of_monotonic_now_plus_three_and_a_half
 
 def test_park_age_is_judged_against_the_injected_clock(lister):
     arm(lister)  # consumed 10 s before NOW
-    late = create_app(secret=SECRET, lister=lister, expected_agent="proto-agents", clock=lambda: NOW + 200)
+    late = create_app(secret=SECRET, lister=lister, expected_agents=("proto-agents",), clock=lambda: NOW + 200)
     human(deliver(TestClient(late)))  # 210 s old at the gateway call: outside the 120 s window
-    on_time = create_app(secret=SECRET, lister=lister, expected_agent="proto-agents", clock=lambda: NOW)
+    on_time = create_app(secret=SECRET, lister=lister, expected_agents=("proto-agents",), clock=lambda: NOW)
     approves(TestClient(on_time))
 
 
@@ -729,11 +737,19 @@ def test_human_line_names_already_used(client, lister, caplog):
     assert "outcome=human" in line and "why=already-used" in line
 
 
-def test_human_line_names_no_approved_park(client, caplog):
+def test_human_line_names_no_approved_park(client, lister, caplog):
     caplog.set_level(logging.INFO, logger="durable_park.bridge")
-    deliver(client)  # withHuman holds nothing
+    lister.by_q[None] = listing(gateway_item(id="req_1", created=-5))  # the call itself is listed; no park exists
+    deliver(client)
     (line,) = bridge_lines(caplog)
     assert "outcome=human" in line and "why=no-approved-park" in line
+
+
+def test_human_line_names_a_gateway_request_that_is_not_listed_yet(client, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    deliver(client)  # withHuman lists nothing at all, so not even the call being decided
+    (line,) = bridge_lines(caplog)
+    assert "outcome=human" in line and "why=gateway-request-not-listed" in line
 
 
 def test_responses_never_contain_argument_values(client, lister):
@@ -763,21 +779,22 @@ def test_ledger_and_delivery_store_are_gone_from_the_bridge():
 # ---- config ----------------------------------------------------------------------------------
 
 def test_parse_args_defaults_and_env(monkeypatch):
-    for name in ("DURABLE_PARK_BRIDGE_SECRET_FILE", "DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_WH_API_BASE",
-                 "DURABLE_PARK_WH_KEY_FILE"):
+    for name in ("DURABLE_PARK_BRIDGE_SECRET_FILE", "DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_EXPECTED_AGENTS",
+                 "DURABLE_PARK_WH_API_BASE", "DURABLE_PARK_WH_KEY_FILE"):
         monkeypatch.delenv(name, raising=False)
     ns = parse_args([])
-    assert (ns.secret_file, ns.host, ns.port, ns.expected_agent, ns.api_base, ns.key_file) == (
-        DEFAULT_SECRET_FILE, "127.0.0.1", 8791, "proto-agents", DEFAULT_API_BASE, DEFAULT_KEY_FILE)
+    assert (ns.secret_file, ns.host, ns.port, ns.expected_agents, ns.api_base, ns.key_file) == (
+        DEFAULT_SECRET_FILE, "127.0.0.1", 8791, ("proto-agents",), DEFAULT_API_BASE, DEFAULT_KEY_FILE)
     assert DEFAULT_SECRET_FILE == "/etc/durable-park/bridge_secret"
 
 
 def test_parse_args_env_overrides(monkeypatch):
+    monkeypatch.delenv("DURABLE_PARK_EXPECTED_AGENTS", raising=False)
     monkeypatch.setenv("DURABLE_PARK_EXPECTED_AGENT", "agent-z")
     monkeypatch.setenv("DURABLE_PARK_WH_API_BASE", "https://wh.example/api/v1")
     monkeypatch.setenv("DURABLE_PARK_WH_KEY_FILE", "/env/key")
     ns = parse_args([])
-    assert (ns.expected_agent, ns.api_base, ns.key_file) == ("agent-z", "https://wh.example/api/v1", "/env/key")
+    assert (ns.expected_agents, ns.api_base, ns.key_file) == (("agent-z",), "https://wh.example/api/v1", "/env/key")
 
 
 def test_parse_args_flags_beat_env(monkeypatch):
@@ -959,3 +976,172 @@ def test_main_with_systemd_socket_and_no_socket_from_systemd_serves_nothing(monk
     with pytest.raises(SystemExit) as exc:
         bridge_app.main(["--systemd-socket", "--secret-file", str(secret), "--key-file", str(key)])
     assert exc.value.code == NO_SYSTEMD_SOCKET
+
+
+# ---- per-person: role agents and the same person ------------------------------------------------
+
+def role_payload(slug="ops-ops", **kw):
+    return payload(slug=slug, **kw)
+
+
+def arm_role(lister, *, slug="ops-ops", park_instance=PERSON, call_instance=PERSON):
+    arm(lister, park=park_item(slug=slug, instance=park_instance),
+        neighbours=[gateway_item(id="req_1", created=-5, slug=slug, instance=call_instance)])
+
+
+@pytest.mark.parametrize("slug", ["proto-agents", "ops-admin", "ops-ops"])
+def test_role_agent_is_accepted(role_client, lister, slug):
+    arm_role(lister, slug=slug)
+    approves(role_client, body_obj=role_payload(slug))
+
+
+def test_viewer_agent_is_never_approved(role_client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm_role(lister, slug="ops-viewer")  # even with a perfectly matching park and request
+    human(deliver(role_client, role_payload("ops-viewer")))
+    assert last_why(caplog) == "agent"
+    assert lister.calls == []  # not even asked withHuman
+
+
+def test_unknown_agent_goes_to_a_person(role_client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm_role(lister, slug="ops-someone")
+    human(deliver(role_client, role_payload("ops-someone")))
+    assert last_why(caplog) == "agent"
+
+
+def test_approval_of_another_person_is_not_used(role_client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm_role(lister, park_instance="inst_A", call_instance="inst_B")
+    human(deliver(role_client, role_payload()))
+    assert last_why(caplog) == "no-approved-park"
+
+
+@pytest.mark.parametrize("instance", [None, ""])
+def test_gateway_request_that_names_no_person_goes_to_a_person(role_client, lister, caplog, instance):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm_role(lister, park_instance=instance, call_instance=instance)  # "" == "" must not pass as the same person
+    human(deliver(role_client, role_payload()))
+    assert last_why(caplog) == "no-person"
+
+
+def test_the_person_comes_from_withhumans_record_not_from_the_webhook_body(role_client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm_role(lister, park_instance="inst_A", call_instance="inst_B")
+    body = role_payload()
+    body["agent"]["instance_id"] = "inst_A"  # a claim inside the delivery must not be believed
+    body["request"]["agent_instance_id"] = "inst_A"
+    human(deliver(role_client, body))
+    assert last_why(caplog) == "no-approved-park"
+
+
+def test_second_identical_call_from_another_person_goes_to_a_person(role_client, lister, caplog):
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    arm(lister, park=park_item(slug="ops-ops"),
+        neighbours=[gateway_item(id="req_1", created=-5, slug="ops-ops"),
+                    gateway_item(id="req_2", created=-4, slug="ops-ops", instance="inst_B")])
+    human(deliver(role_client, role_payload()))
+    assert last_why(caplog) == "already-used"
+
+
+# ---- per-person: the list of trusted agents on the command line ---------------------------------
+
+def test_expected_agents_flag_takes_a_comma_list(monkeypatch):
+    for name in ("DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_EXPECTED_AGENTS"):
+        monkeypatch.delenv(name, raising=False)
+    ns = parse_args(["--expected-agents", "proto-agents,ops-admin,ops-ops"])
+    assert ns.expected_agents == ("proto-agents", "ops-admin", "ops-ops")
+
+
+def test_old_single_expected_agent_flag_still_works(monkeypatch):
+    for name in ("DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_EXPECTED_AGENTS"):
+        monkeypatch.delenv(name, raising=False)
+    assert parse_args(["--expected-agent", "proto-agents"]).expected_agents == ("proto-agents",)
+
+
+def test_expected_agents_env_is_read_and_beats_the_old_env(monkeypatch):
+    monkeypatch.setenv("DURABLE_PARK_EXPECTED_AGENT", "old-agent")
+    monkeypatch.setenv("DURABLE_PARK_EXPECTED_AGENTS", "proto-agents,ops-ops")
+    assert parse_args([]).expected_agents == ("proto-agents", "ops-ops")
+
+
+def test_expected_agents_flag_beats_env(monkeypatch):
+    monkeypatch.setenv("DURABLE_PARK_EXPECTED_AGENTS", "proto-agents,ops-ops")
+    assert parse_args(["--expected-agents", "proto-agents"]).expected_agents == ("proto-agents",)
+
+
+def test_nothing_set_trusts_only_the_original_agent(monkeypatch):
+    for name in ("DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_EXPECTED_AGENTS"):
+        monkeypatch.delenv(name, raising=False)
+    assert parse_args([]).expected_agents == ("proto-agents",)
+
+
+@pytest.mark.parametrize("name", ["DURABLE_PARK_EXPECTED_AGENTS", "DURABLE_PARK_EXPECTED_AGENT"])
+@pytest.mark.parametrize("bad", ["", " ", "proto-agents,", "ops-viewer", "proto-agents,ops-viewer"])
+def test_an_emptied_or_viewer_env_list_stops_the_bridge_instead_of_falling_back(monkeypatch, capsys, name, bad):
+    # blanking the list to stop auto-approval must never quietly trust the default agent instead
+    for other in ("DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_EXPECTED_AGENTS"):
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(name, bad)
+    with pytest.raises(SystemExit) as stopped:
+        parse_args([])
+    assert stopped.value.code == 2
+    assert "expected" in capsys.readouterr().err
+
+
+def test_an_empty_new_env_list_is_not_rescued_by_the_old_env_name(monkeypatch):
+    monkeypatch.setenv("DURABLE_PARK_EXPECTED_AGENTS", "")
+    monkeypatch.setenv("DURABLE_PARK_EXPECTED_AGENT", "proto-agents")
+    with pytest.raises(SystemExit) as stopped:
+        parse_args([])
+    assert stopped.value.code == 2
+
+
+def test_repeated_agents_are_listed_once(monkeypatch):
+    monkeypatch.delenv("DURABLE_PARK_EXPECTED_AGENT", raising=False)
+    monkeypatch.delenv("DURABLE_PARK_EXPECTED_AGENTS", raising=False)
+    assert parse_args(["--expected-agents", "proto-agents,ops-ops,proto-agents"]).expected_agents == (
+        "proto-agents", "ops-ops")
+
+
+@pytest.mark.parametrize("bad", ["", " ", "proto-agents,,ops-ops", "proto-agents, ops-ops", "a b", ",",
+                                 "proto-agents,ops-viewer", "ops-viewer"])
+def test_a_bad_or_viewer_agent_list_is_refused_at_start(monkeypatch, capsys, bad):
+    for name in ("DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_EXPECTED_AGENTS"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(SystemExit) as stopped:
+        parse_args(["--expected-agents", bad])
+    assert stopped.value.code == 2
+    assert "expected" in capsys.readouterr().err
+
+
+def test_both_agent_flags_together_are_refused(monkeypatch):
+    for name in ("DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_EXPECTED_AGENTS"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(SystemExit) as stopped:
+        parse_args(["--expected-agent", "proto-agents", "--expected-agents", "ops-ops"])
+    assert stopped.value.code == 2
+
+
+def test_the_bridge_service_names_its_trusted_agents_in_the_environment():
+    from pathlib import Path
+    unit = (Path(__file__).resolve().parents[1] / "deploy" / "durable-park-bridge.service").read_text()
+    assert "Environment=DURABLE_PARK_EXPECTED_AGENTS=proto-agents\n" in unit
+    assert "--expected-agent" not in unit  # a flag would beat the environment line
+
+
+def test_main_hands_the_trusted_agents_to_the_app_and_logs_them(monkeypatch, tmp_path, caplog):
+    import uvicorn
+    caplog.set_level(logging.INFO, logger="durable_park.bridge")
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: None)
+    monkeypatch.setattr(bridge_app, "create_app", lambda **kw: seen.update(kw))
+    for name in ("DURABLE_PARK_EXPECTED_AGENT", "DURABLE_PARK_EXPECTED_AGENTS"):
+        monkeypatch.delenv(name, raising=False)
+    secret, key = tmp_path / "secret", tmp_path / "key"
+    secret.write_text(SECRET)
+    key.write_text(FAKE_KEY)
+    bridge_app.main(["--secret-file", str(secret), "--key-file", str(key),
+                     "--expected-agents", "proto-agents,ops-admin,ops-ops"])
+    assert seen["expected_agents"] == ("proto-agents", "ops-admin", "ops-ops")
+    assert "bridge trusts agents: proto-agents, ops-admin, ops-ops" in bridge_lines(caplog)
