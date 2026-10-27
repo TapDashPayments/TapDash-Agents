@@ -13,7 +13,7 @@ It works for any tool and service: the rules are read from Hermes on every call,
 
 **Which tools.** Only the form-checked tools: names that fully match one of the form-checked patterns
 (`form_checked_tools`; default `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`: the
-QuickBooks create/update/delete of the 12 money types, the six DocuSign writes (slug `docusign` or `docusign_demo`), and every Maverick, accept.blue and Authorize.net tool
+QuickBooks create/update/delete of the 12 money types, the six DocuSign writes (`createEnvelope`, `updateEnvelope` and four Maestro workflow tools; slug `docusign` or `docusign_demo`), and every Maverick, accept.blue and Authorize.net tool
 (`mcp__wh__maverick__maverick_*`, `mcp__wh__acceptblue__ablue_*`, `mcp__wh__authnet__authnet_*`)), set in
 `plugins.entries.durable-park.settings.form_checked_tools` ([settings](architecture.md#plugin-settings); the old
 name `risky_tools` is ignored with a warning). Every other tool call is not form-checked but is still asked about (see [architecture](architecture.md#4-tool-call-form-check-then-one-question-to-withhuman)).
