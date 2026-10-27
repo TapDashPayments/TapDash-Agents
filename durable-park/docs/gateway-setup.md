@@ -165,14 +165,14 @@ through the same `wh` gateway as QuickBooks, and every call goes through the sam
 
 | Slug | URL | Scope (sign-in) | Granted to `proto-agents` | Agent's names |
 | --- | --- | --- | --- | --- |
-| `supabase-crm-dev` | `https://mcp.supabase.com/mcp?project_ref=jtwkxbagxuxjzlurgnim&read_only=true&features=database,docs,debugging` (only the `tapdash-crm-dev` project, read-only) | `crm_dev_readonly` | all 7 tools (`execute_sql` always asks a person) | `mcp__wh__supabase_crm_dev__*` |
+| `supabase-crm-dev` | `https://mcp.supabase.com/mcp?project_ref=jtwkxbagxuxjzlurgnim` (only the `tapdash-crm-dev` project; **full access** since 2026-10-26, server revision 2, Yaakov's call: read and write, all of Supabase's default tool groups) | `crm_dev_readonly` (the name is old and fixed for good: renaming a scope drops its sign-in. It is **not** read-only any more) | all tools, now and future (20 today) | `mcp__wh__supabase_crm_dev__*` |
 | `monday` | `https://mcp.monday.com/mcp` | `tapdash_agents` (tapdashagents@gmail.com on tapdash.monday.com) | the 33 read tools only | `mcp__wh__monday__*` |
 | `docusign-demo` | `https://mcp-d.docusign.com/mcp` (DocuSign developer/demo) | `demo_user` (integration key `7b89fd67-...`, redirect `https://app.withhuman.ai/auth/gateway/oauth/callback`) | the 22 read tools only | `mcp__wh__docusign_demo__*` |
 
 ```mermaid
 flowchart LR
   agent["Hermes agent<br/>(proto-agents)"] -->|"tool call, parked and asked first"| wh["withHuman gateway<br/>(approval rules, revision 16)"]
-  wh -->|"read: approved; anything else: bridge or a person"| sb["Supabase MCP<br/>(tapdash-crm-dev, read-only)"]
+  wh -->|"listed reads: approved; anything else, other reads included: bridge or a person"| sb["Supabase MCP<br/>(tapdash-crm-dev, full access)"]
   wh -->|"same rules"| mo["monday MCP<br/>(tapdash.monday.com)"]
   wh -->|"same rules"| ds["DocuSign MCP<br/>(demo account)"]
 ```
@@ -186,6 +186,17 @@ To give it another **read** tool: grant it and add it to both read lists for tha
 The gateway read lists name each tool twice, bare (`list_tables`) and with the server in front
 (`supabase-crm-dev__list_tables`), on purpose: like the QuickBooks rule (`^(quickbooks__)?`), they accept either form the
 gateway may send. The outer rule already checks the server, so the second form widens nothing.
+
+**Supabase full access (2026-10-26).** Yaakov asked for the normal Supabase connection with full access, where
+anything that is not a read asks a person. The rules already do that: only the 6 read tools in rules 22 and 25 run
+without asking; every other Supabase tool (`execute_sql`, `apply_migration`, `deploy_edge_function`, the branch
+tools) asks a person, because the park rule has no match and the gateway sends it to the bridge. `execute_sql` asks
+even for a plain `select`, because a rule cannot tell a read from a write inside SQL text. Six new read tools
+(`generate_typescript_types`, `get_edge_function`, `get_project_url`, `get_publishable_keys`, `list_branches`,
+`list_edge_functions`) also ask until they are added to both read lists (next pipeline revision). Supabase's own
+docs say this server is "only designed for development and testing" and must never be connected to production
+data ([Supabase MCP security](https://supabase.com/docs/guides/ai-tools/mcp#security-risks)); for the real CRM, see
+Linear TAP2-69. The gateway was restarted at 23:55 UTC (ledger empty) so Hermes listed the 20 tools.
 
 What the reads can show the agent (and the full Langfuse traces): monday holds live business data (items, people,
 meeting summaries and transcripts, file links); DocuSign agreement details can hold personal data; Supabase
