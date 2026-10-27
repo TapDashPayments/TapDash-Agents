@@ -172,7 +172,7 @@ through the same `wh` gateway as QuickBooks, and every call goes through the sam
 ```mermaid
 flowchart LR
   agent["Hermes agent<br/>(proto-agents)"] -->|"tool call, parked and asked first"| wh["withHuman gateway<br/>(approval rules, revision 16)"]
-  wh -->|"read: approved; anything else: bridge or a person"| sb["Supabase MCP<br/>(tapdash-crm-dev, full access)"]
+  wh -->|"listed reads: approved; anything else, other reads included: bridge or a person"| sb["Supabase MCP<br/>(tapdash-crm-dev, full access)"]
   wh -->|"same rules"| mo["monday MCP<br/>(tapdash.monday.com)"]
   wh -->|"same rules"| ds["DocuSign MCP<br/>(demo account)"]
 ```
