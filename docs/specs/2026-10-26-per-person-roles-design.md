@@ -147,9 +147,9 @@ Everything else in this design is the same for both. The plan picks one after th
   also lists the Hermes helper tools a Viewer needs just to answer (the Tool Search tools `tool_search`,
   `tool_describe`, `tool_call`, and `clarify`).
 - **Rules (new pipeline revision, saved by Yaakov):**
-  1. **First block:** a Viewer call that is not on the Viewer read list is refused. It sits before every other rule,
-     including "Money server: always a person".
-  2. A Viewer call on the read list is approved.
+  1. **First block:** a Viewer call on the Viewer read list is approved.
+  2. **Second block:** every other Viewer call is refused. Both sit before every other rule, including "Money server:
+     always a person". (This order needs no "not" condition, which withHuman's rules do not have.)
   3. Every `slug equals proto-agents` condition also accepts the Ops and Admin agents. Ops therefore keeps today's
      auto-approved changes (section 2). `proto-agents` stays until the default profile moves, then a later
      revision removes it.
@@ -172,8 +172,10 @@ Everything else in this design is the same for both. The plan picks one after th
 
 - Each person's profile is created **blank** from a template (never cloned: cloning copies keys). The template
   sets today's lockdown, the plugin set, `plugins.entries.durable-park.settings.token_file` (an existing
-  durable-park setting) pointing at that person's key file, and `secrets.command.command` =
-  `/opt/durable-park/libexec/hermes-secrets <profile>`. Key files follow one naming rule: `/etc/durable-park/instances/<profile>.token` (the default
+  durable-park setting) pointing at that person's key file, and `secrets.command.enabled: true`,
+  `secrets.command.override_existing: true` and `secrets.command.command` =
+  `/opt/durable-park/libexec/hermes-secrets <profile>` (the switch is off by default in Hermes, and without the
+  override a key already in the environment would win). Key files follow one naming rule: `/etc/durable-park/instances/<profile>.token` (the default
   profile keeps `/etc/durable-park/instance_token`).
 - `not-set-up`: same lockdown and plugin, no tools, and a short persona that answers "you're not set up yet, ask an
   admin". It still runs the model (a small cost) and its reply depends on the model following the persona; it can
