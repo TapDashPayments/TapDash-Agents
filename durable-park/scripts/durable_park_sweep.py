@@ -217,9 +217,11 @@ def _post_teams(webhook_url: str, text: str) -> None:
     ALERT line on stdout (so it reaches the chat like any other alert) and one line on stderr, both with only the
     error type or HTTP code, because the URL is a secret."""
     try:
-        card = {"type": "message", "attachments": [{
+        summary_text = _clean(text, 100)
+        card = {"type": "message", "summary": summary_text, "attachments": [{
             "contentType": "application/vnd.microsoft.card.adaptive",
-            "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "content": {"type": "AdaptiveCard", "summary": summary_text,
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                         "version": "1.4", "msteams": {"width": "Full"},
                         "body": [{"type": "TextBlock", "text": text, "wrap": True}]}}]}
         request = urllib.request.Request(webhook_url, data=json.dumps(card).encode("utf-8"),
