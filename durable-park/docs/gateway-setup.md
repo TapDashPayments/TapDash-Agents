@@ -167,7 +167,7 @@ through the same `wh` gateway as QuickBooks, and every call goes through the sam
 | --- | --- | --- | --- | --- |
 | `supabase-crm-dev` | `https://mcp.supabase.com/mcp?project_ref=jtwkxbagxuxjzlurgnim` (only the `tapdash-crm-dev` project; **full access** since 2026-10-26, server revision 2, Yaakov's call: read and write, all of Supabase's default tool groups) | `crm_dev_readonly` (the name is old and fixed for good: renaming a scope drops its sign-in. It is **not** read-only any more) | all tools, now and future (20 today) | `mcp__wh__supabase_crm_dev__*` |
 | `monday` | `https://mcp.monday.com/mcp` | `tapdash_agents` (tapdashagents@gmail.com on tapdash.monday.com) | the 33 read tools only | `mcp__wh__monday__*` |
-| `docusign-demo` | `https://mcp-d.docusign.com/mcp` (DocuSign developer/demo) | `demo_user` (integration key `7b89fd67-...`, redirect `https://app.withhuman.ai/auth/gateway/oauth/callback`) | the 22 read tools only | `mcp__wh__docusign_demo__*` |
+| `docusign-demo` | `https://mcp-d.docusign.com/mcp` (DocuSign developer/demo) | `demo_user` (integration key `7b89fd67-...`, redirect `https://app.withhuman.ai/auth/gateway/oauth/callback`) | the 22 read tools plus 6 write tools = 28 (grant revision 2, 2026-10-27): `createEnvelope`, `createEnvelopeFromTemplate`, `updateEnvelope` (also how an envelope is voided), `updateEnvelopeRecipients`, `updateEnvelopeTabs`, `sendReminder`. Every write asks a person | `mcp__wh__docusign_demo__*` |
 
 ```mermaid
 flowchart LR
@@ -737,8 +737,7 @@ slug. Every "ask an approver" uses the escalation path `notify-yaakov-yehuda`.
 | 12 | `ask-unruled-call` | everything else (any agent, any tool no block names) | Ask an approver. Nothing unruled is auto-approved (replaced `approve-every-call`, which approved it) |
 
 The exact tool lists and regexes are in the JSON file; the file wins over this table. A tool that no block names
-falls to block 10 (proto-agents) or block 12 (any other agent), so a person decides. If DocuSign is ever added, its six write tools need their own block (their
-names are in `DEFAULT_FORM_CHECKED_TOOLS` in `park_hook.py`); until then a DocuSign call would reach block 10.
+falls to block 10 (proto-agents) or block 12 (any other agent), so a person decides. DocuSign demo already has its own blocks (`pa-park-docusign-read` and `gw-docusign`, see [architecture.md](architecture.md)): the 22 reads approve, and every other DocuSign tool (the 6 granted writes) asks a person at park time (block 10) and then goes to the bridge at the gateway.
 
 If the bridge is down, answers `401` or times out, the webhook block fails and the call goes to a human
 (withHuman: "no accepted answer after the attempts -> human review"), so an outage never auto-approves. The same

@@ -58,8 +58,7 @@ Lookups and the servers' own `auto` calls skip the saving and waiting: the rules
 
 1. The agent calls a risky tool: for example a create, update or delete of one of 12 QuickBooks money types, or any
    Maverick, accept.blue or Authorize.net call that is not a lookup or on the server's `auto` list. Those are the calls
-   the pipeline sends to a person. (The form check also knows six DocuSign writes; DocuSign demo is connected as a
-   remote server, so they are asked before they run.)
+   the pipeline sends to a person. (DocuSign demo is connected as a remote server: its 22 reads run without asking, and its 6 granted writes, which send, change or void an envelope or send a reminder, ask a person.)
 2. The plugin checks the call against the tool's rules, saves it in a ledger and opens an approval request.
    The agent is told it is waiting.
 3. An approver approves in withHuman. A signed webhook wakes the plugin, which tells the original chat.

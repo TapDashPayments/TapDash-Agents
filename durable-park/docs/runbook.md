@@ -1551,12 +1551,12 @@ tool call; the plugin no longer has a list of tools that need approval. To make 
 to the pipeline. The plugin's list only says which tools get the [form check](form-check.md) before withHuman is
 asked (and which ones the form self-check watches).
 
-Example: put a new gateway server's write tool (say DocuSign `createEnvelope`) through the full path. Every place
+Example: put a new gateway server's write tool (say a new server's `send_thing`) through the full path. Every place
 that has to agree:
 
-1. **withHuman**: register the server (e.g. slug `docusign`) and grant it to agent `proto-agents`, granting only the
+1. **withHuman**: register the server (e.g. slug `newserver`) and grant it to agent `proto-agents`, granting only the
    gateway servers the agent needs (spec section 7, Q5) ([gateway-setup.md](gateway-setup.md#human-step-b-task-2-step-4-register-the-server)). Add a pipeline rule that
-   sends its `park:docusign` request to a person, and add it to pipeline **block 2** (`block-06ebcdd6`), so the bridge decides its
+   sends its `park:newserver` request to a person, and add it to pipeline **block 2** (`block-06ebcdd6`), so the bridge decides its
    replays (it asks withHuman for the matching park, by the Hermes name `mcp__wh__<slug>__<tool>`) ([block 2](gateway-setup.md#human-step-c-task-7-step-5-endpoint-secret-pipeline)).
 2. **Hermes MCP filter**: `deploy/hermes_mcp.sh` only lets `quickbooks__*`, `maverick__*`, `acceptblue__*`, `authnet__*`,
    `supabase-crm-dev__*`, `monday__*` and `docusign-demo__*` tools in (`TOOL_INCLUDE`),
@@ -1568,7 +1568,7 @@ that has to agree:
    list is `/etc/durable-park/allowed_toolsets`, spec §9 D15), not a code edit.
 4. **Form-checked list**: the plugin form-checks tools matching the form-checked patterns (setting
    `plugins.entries.durable-park.settings.form_checked_tools`, see [Plugin settings](#plugin-settings); default
-   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's six write tools and every Maverick,
+   `DEFAULT_FORM_CHECKED_TOOLS` in `plugin/durable_park/park_hook.py`). DocuSign's `createEnvelope` and `updateEnvelope` (plus four Maestro workflow tools we do not grant) and every Maverick,
    accept.blue and Authorize.net tool are already in the default (those three last: index 0 stays the QuickBooks pattern the pipeline test pins). Leaving a tool off this list does **not** let it through: it is still asked about.
 5. **Docs**: the pipeline table and system map in [architecture.md](architecture.md), this runbook, the setup guide.
 6. **Test**: unit tests for the new pattern, then one live park, approve and run.
