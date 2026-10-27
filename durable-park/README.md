@@ -123,6 +123,7 @@ not importable (CI) and run on the VM ([runbook](docs/runbook.md#check-durable-p
 | [acceptance-2026-10-21-tool-search.md](docs/acceptance-2026-10-21-tool-search.md) | See what was verified when Hermes Tool Search was switched on, and the other live settings changed that day (the record) |
 | [acceptance-2026-10-22-langfuse.md](docs/acceptance-2026-10-22-langfuse.md) | See what was tested and audited when Langfuse tracing was switched on (the record) |
 | [acceptance-2026-10-25-maverick-remote.md](docs/acceptance-2026-10-25-maverick-remote.md) | See what was tested when Maverick, Supabase, Monday and DocuSign were connected (the record) |
+| [acceptance-2026-10-27-docusign.md](docs/acceptance-2026-10-27-docusign.md) | See what was proven for DocuSign demo (the 28-tool grant and the list-templates job) and what is still to do (the record) |
 | [acceptance-2026-10-25-acceptblue-authnet.md](docs/acceptance-2026-10-25-acceptblue-authnet.md) | See what was tested when accept.blue and Authorize.net were switched on (the record) |
 | [spike-2026-10-27-per-person-roles.md](docs/spike-2026-10-27-per-person-roles.md) | See what the per-person roles test (plan Task 1) found, and the answers later tasks use (the record) |
 | [plans/](docs/plans/) | The original build plan (historical) |
