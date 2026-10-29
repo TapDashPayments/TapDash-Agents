@@ -54,7 +54,10 @@ STYLE = ("body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;ma
          "padding:0 1rem;text-align:center;color:#1a1a1a;background:#fff}"
          "h1{font-size:1.4rem}p{line-height:1.5}"
          "button{font-size:1.1rem;padding:.75rem 1.5rem;border:0;border-radius:.5rem;background:#1a56db;color:#fff;"
-         "cursor:pointer}")
+         "cursor:pointer;transition:background-color .15s ease}"
+         "button:hover{background:#1d4ed8}"
+         "button:focus-visible{outline:2px solid #1d4ed8;outline-offset:2px}"
+         "button:active{background:#1e40af}")
 _STYLE_HASH = base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode()
 CSP = (f"default-src 'none'; style-src 'sha256-{_STYLE_HASH}'; script-src 'none'; "
        f"form-action {' '.join(_HOSTS)}; base-uri 'none'; frame-ancestors 'none'")
