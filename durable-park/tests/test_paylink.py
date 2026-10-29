@@ -242,6 +242,12 @@ def test_the_style_hash_in_the_policy_matches_the_style():
     assert f"style-src 'sha256-{digest}'" in paylink_app.CSP and f"<style>{paylink_app.STYLE}</style>" in paylink_app.gone_page()
 
 
+def test_paylink_button_accessibility_styles():
+    assert "button:hover" in paylink_app.STYLE
+    assert "button:focus-visible" in paylink_app.STYLE
+    assert "button:active" in paylink_app.STYLE
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("path", ["/pay/" + "A" * 32, "/pay/short", "/pay/" + "A" * 31 + "!"])
 async def test_service_unknown_or_malformed_links_are_gone(folder, path):
