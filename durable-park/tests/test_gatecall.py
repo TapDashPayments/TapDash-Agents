@@ -266,6 +266,23 @@ def test_lift_is_idempotent_and_does_not_mutate_its_input():
     assert lift_gateway_context(once, GW_SCHEMA) == once
 
 
+def test_lift_structural_copy_isolation_on_mutation():
+    """Verify input non-mutation and structural copy isolation when context lifting occurs."""
+    nested = {"criteria": "x", "withhuman_context": "note", "deep": {"items": [1, 2]}}
+    args = {"params": nested, "unmodified": {"a": [3, 4]}}
+    before = copy.deepcopy(args)
+
+    res = lift_gateway_context(args, GW_SCHEMA)
+
+    assert args == before
+    assert res is not args
+    assert res["params"] is not nested
+    # Mutating top-level and edited sub-dict on res does not alter args
+    res["withhuman_context"] = "changed"
+    res["params"]["criteria"] = "modified"
+    assert args["params"]["criteria"] == "x"
+
+
 def park_with_args(tmp_path, args):
     ledger = Ledger(str(tmp_path / "ledger.db"))
     return ledger.park(session_key="agent:main:telegram:dm:42", session_id="s", tool_call_id="c",
