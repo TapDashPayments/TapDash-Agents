@@ -54,7 +54,10 @@ STYLE = ("body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;ma
          "padding:0 1rem;text-align:center;color:#1a1a1a;background:#fff}"
          "h1{font-size:1.4rem}p{line-height:1.5}"
          "button{font-size:1.1rem;padding:.75rem 1.5rem;border:0;border-radius:.5rem;background:#1a56db;color:#fff;"
-         "cursor:pointer}")
+         "cursor:pointer;transition:background-color .15s ease}"
+         "button:hover{background:#1e40af}"
+         "button:active{background:#1e3a8a}"
+         "button:focus-visible{outline:2px solid #1e40af;outline-offset:2px}")
 _STYLE_HASH = base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode()
 CSP = (f"default-src 'none'; style-src 'sha256-{_STYLE_HASH}'; script-src 'none'; "
        f"form-action {' '.join(_HOSTS)}; base-uri 'none'; frame-ancestors 'none'")
@@ -73,7 +76,7 @@ def _head(title: str) -> str:
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<meta name="referrer" content="no-referrer"><meta name="robots" content="noindex,nofollow">'
-            f"<title>{html.escape(title)}</title><style>{STYLE}</style></head><body>")
+            f"<title>{html.escape(title)}</title><style>{STYLE}</style></head><body><main>")
 
 GONE_TITLE = "Payment link expired"
 GONE_BODY = ("<h1>This payment link has expired</h1>"
@@ -125,11 +128,11 @@ def pay_page(record: dict[str, Any]) -> str:
     return (_head(title) + f"<h1>{esc(title)}</h1>{lead}"
             "<p>You will enter your card on Authorize.net's secure page, not here.</p>"
             f'<form method="post" action="{esc(record["post_url"])}">{inputs}'
-            f'<button type="submit">{button}</button></form></body></html>')
+            f'<button type="submit">{button}</button></form></main></body></html>')
 
 
 def gone_page() -> str:
-    return _head(GONE_TITLE) + GONE_BODY + "</body></html>"
+    return _head(GONE_TITLE) + GONE_BODY + "</main></body></html>"
 
 
 def create_app(*, folder: str = DEFAULT_FOLDER, clock=time.time) -> Starlette:
