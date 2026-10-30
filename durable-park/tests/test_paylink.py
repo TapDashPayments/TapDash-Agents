@@ -240,6 +240,9 @@ def test_the_style_hash_in_the_policy_matches_the_style():
 
     digest = base64.b64encode(hashlib.sha256(paylink_app.STYLE.encode()).digest()).decode()
     assert f"style-src 'sha256-{digest}'" in paylink_app.CSP and f"<style>{paylink_app.STYLE}</style>" in paylink_app.gone_page()
+    assert "button:hover" in paylink_app.STYLE
+    assert "button:active" in paylink_app.STYLE
+    assert "button:focus-visible" in paylink_app.STYLE
 
 
 @pytest.mark.anyio

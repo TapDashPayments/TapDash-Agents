@@ -56,6 +56,7 @@ STYLE = ("body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;ma
          "button{font-size:1.1rem;padding:.75rem 1.5rem;border:0;border-radius:.5rem;background:#1a56db;color:#fff;"
          "cursor:pointer;transition:background-color .15s ease}"
          "button:hover{background:#1e40af}"
+         "button:active{background:#1e3a8a}"
          "button:focus-visible{outline:2px solid #1e40af;outline-offset:2px}")
 _STYLE_HASH = base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode()
 CSP = (f"default-src 'none'; style-src 'sha256-{_STYLE_HASH}'; script-src 'none'; "
