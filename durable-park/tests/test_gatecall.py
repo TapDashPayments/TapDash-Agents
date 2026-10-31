@@ -494,6 +494,15 @@ def test_note_key_spellings(name):
     assert is_note_key(name)
 
 
+def test_note_key_string_subclass():
+    class StrSubclass(str):
+        pass
+
+    assert is_note_key(StrSubclass("withhuman_context"))
+    assert is_note_key(StrSubclass("withHumanContext"))
+    assert not is_note_key(StrSubclass("other_field"))
+
+
 @pytest.mark.parametrize("name", ["withhuman_scope", "withhuman_context_x", "withhuman_contexts", "context", "", 5, None])
 def test_other_keys_are_not_the_note(name):
     assert not is_note_key(name)

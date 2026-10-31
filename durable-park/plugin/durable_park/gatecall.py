@@ -241,7 +241,7 @@ def is_note_key(key: Any) -> bool:
     ⚡ Optimization: Fast path length check and exact string equality (~1.6x speedup).
     "withhumancontext" is 16 chars; strings shorter than 16 chars cannot equal it when stripped.
     """
-    if type(key) is not str or len(key) < 16:
+    if not isinstance(key, str) or len(key) < 16:
         return False
     if key == CONTEXT_FIELD:
         return True
