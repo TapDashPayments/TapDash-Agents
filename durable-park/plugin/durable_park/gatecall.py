@@ -243,7 +243,7 @@ def is_note_key(key: Any) -> bool:
     """
     if not isinstance(key, str) or str.__len__(key) < 16:
         return False
-    if key == CONTEXT_FIELD:
+    if str.__eq__(key, CONTEXT_FIELD):
         return True
     return _NOT_ALNUM.sub("", key.lower()) == "withhumancontext"
 
