@@ -494,6 +494,25 @@ def test_note_key_spellings(name):
     assert is_note_key(name)
 
 
+def test_note_key_string_subclass():
+    class StrSubclass(str):
+        pass
+
+    class WeirdLenSubclass(str):
+        def __len__(self):
+            return 0  # custom __len__ should not fool str.__len__ check
+
+    class WeirdEqSubclass(str):
+        def __eq__(self, other):
+            return False  # custom __eq__ should not fool str.__eq__ check
+
+    assert is_note_key(StrSubclass("withhuman_context"))
+    assert is_note_key(StrSubclass("withHumanContext"))
+    assert not is_note_key(StrSubclass("other_field"))
+    assert is_note_key(WeirdLenSubclass("withhuman_context"))
+    assert is_note_key(WeirdEqSubclass("withhuman_context"))
+
+
 @pytest.mark.parametrize("name", ["withhuman_scope", "withhuman_context_x", "withhuman_contexts", "context", "", 5, None])
 def test_other_keys_are_not_the_note(name):
     assert not is_note_key(name)
