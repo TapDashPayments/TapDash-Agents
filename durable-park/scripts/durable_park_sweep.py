@@ -230,6 +230,15 @@ def _err(message: str) -> None:
 TEAMS_WEBHOOK_ENV = "TEAMS_ALERT_WEBHOOK_URL"  # a secret: read from the environment only, never printed
 TEAMS_TIMEOUT_SECONDS = 10
 TEAMS_SUMMARY_LIMIT = 500
+_URL_RE = re.compile(r"https?://[^\s)]+")
+
+
+def _teams_summary(text: str) -> str:
+    """A bounded plain-text summary for notification toasts and screen readers.
+    URLs are replaced with [link] so review-queue links don't leak on lock-screen
+    popups, and length is capped at TEAMS_SUMMARY_LIMIT."""
+    cleaned = _URL_RE.sub("[link]", text)
+    return cleaned if len(cleaned) <= TEAMS_SUMMARY_LIMIT else cleaned[:TEAMS_SUMMARY_LIMIT - 3] + "..."
 
 
 class _Tee:
@@ -256,7 +265,7 @@ def _post_teams(webhook_url: str, text: str) -> None:
     ALERT line on stdout (so it reaches the chat like any other alert) and one line on stderr, both with only the
     error type or HTTP code, because the URL is a secret."""
     try:
-        summary = text if len(text) <= TEAMS_SUMMARY_LIMIT else text[:TEAMS_SUMMARY_LIMIT - 3] + "..."
+        summary = _teams_summary(text)
         card = {"type": "message", "attachments": [{
             "contentType": "application/vnd.microsoft.card.adaptive",
             "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",

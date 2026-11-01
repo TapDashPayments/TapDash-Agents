@@ -1107,16 +1107,22 @@ def _card_text(body):
     assert card["type"] == "AdaptiveCard" and card["version"] == "1.4"
     assert card["$schema"] == "http://adaptivecards.io/schemas/adaptive-card.json"
     assert card.get("msteams") == {"width": "Full"}
-    expected_summary = card["body"][0]["text"]
-    if len(expected_summary) > sweep.TEAMS_SUMMARY_LIMIT:
-        expected_summary = expected_summary[:sweep.TEAMS_SUMMARY_LIMIT - 3] + "..."
-    assert card.get("summary") == expected_summary
+    assert card.get("summary") == sweep._teams_summary(card["body"][0]["text"])
     assert len(card["body"]) == 1 and card["body"][0]["type"] == "TextBlock" and card["body"][0]["wrap"] is True
     return card["body"][0]["text"]
 
 
-def test_teams_summary_is_bounded_for_large_alerts(world, monkeypatch):
+def test_teams_summary_is_bounded_and_redacts_urls(world, monkeypatch):
     sent = _teams(monkeypatch)
+    text_with_url = "approval waiting: https://app.withhuman.ai/queue/req-123. decide soon."
+    sweep._post_teams(TEAMS_URL, text_with_url)
+    assert len(sent) == 1
+    card = sent[0][1]["attachments"][0]["content"]
+    assert "https://" not in card["summary"]
+    assert "[link]" in card["summary"]
+    assert card["body"][0]["text"] == text_with_url
+
+    sent.clear()
     large_text = "x" * 600
     sweep._post_teams(TEAMS_URL, large_text)
     assert len(sent) == 1
