@@ -229,6 +229,7 @@ def _err(message: str) -> None:
 
 TEAMS_WEBHOOK_ENV = "TEAMS_ALERT_WEBHOOK_URL"  # a secret: read from the environment only, never printed
 TEAMS_TIMEOUT_SECONDS = 10
+TEAMS_SUMMARY_LIMIT = 500
 
 
 class _Tee:
@@ -255,11 +256,12 @@ def _post_teams(webhook_url: str, text: str) -> None:
     ALERT line on stdout (so it reaches the chat like any other alert) and one line on stderr, both with only the
     error type or HTTP code, because the URL is a secret."""
     try:
+        summary = text if len(text) <= TEAMS_SUMMARY_LIMIT else text[:TEAMS_SUMMARY_LIMIT - 3] + "..."
         card = {"type": "message", "attachments": [{
             "contentType": "application/vnd.microsoft.card.adaptive",
             "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                         "version": "1.4", "msteams": {"width": "Full"},
-                        "summary": text,
+                        "summary": summary,
                         "body": [{"type": "TextBlock", "text": text, "wrap": True}]}}]}
         request = urllib.request.Request(webhook_url, data=json.dumps(card).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})

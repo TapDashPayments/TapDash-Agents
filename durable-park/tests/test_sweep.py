@@ -1107,9 +1107,22 @@ def _card_text(body):
     assert card["type"] == "AdaptiveCard" and card["version"] == "1.4"
     assert card["$schema"] == "http://adaptivecards.io/schemas/adaptive-card.json"
     assert card.get("msteams") == {"width": "Full"}
-    assert card.get("summary") == card["body"][0]["text"]
+    expected_summary = card["body"][0]["text"]
+    if len(expected_summary) > sweep.TEAMS_SUMMARY_LIMIT:
+        expected_summary = expected_summary[:sweep.TEAMS_SUMMARY_LIMIT - 3] + "..."
+    assert card.get("summary") == expected_summary
     assert len(card["body"]) == 1 and card["body"][0]["type"] == "TextBlock" and card["body"][0]["wrap"] is True
     return card["body"][0]["text"]
+
+
+def test_teams_summary_is_bounded_for_large_alerts(world, monkeypatch):
+    sent = _teams(monkeypatch)
+    large_text = "x" * 600
+    sweep._post_teams(TEAMS_URL, large_text)
+    assert len(sent) == 1
+    card = sent[0][1]["attachments"][0]["content"]
+    assert len(card["summary"]) == sweep.TEAMS_SUMMARY_LIMIT
+    assert card["summary"].endswith("...")
 
 
 def test_teams_off_without_a_webhook_setting(world, monkeypatch):

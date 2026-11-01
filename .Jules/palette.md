@@ -7,5 +7,5 @@ In plain English: Teams alert cards used to squish into a narrow ~400px column, 
 
 ## 2026-10-27 - Root-level Summary Property for Teams Adaptive Cards
 
-**Learning:** Adaptive Cards posted to Microsoft Teams without a root-level `summary` property fail to announce card content in notification toasts, mobile lock-screen popups, and assistive screen reader previews. Providing a plain-text `summary` at the Adaptive Card root level ensures notifications and accessibility tools can immediately announce the alert message without depending on full card rendering.
-**Action:** Always include `"summary": <plain text>` at the Adaptive Card root level alongside `"msteams": {"width": "Full"}` when constructing Teams notifications.
+**Learning:** Adaptive Cards posted to Microsoft Teams without a root-level `summary` property fail to announce card content in notification toasts, mobile lock-screen popups, and assistive screen reader previews. Providing a plain-text `summary` (bounded to 500 characters) at the Adaptive Card root level ensures notifications and accessibility tools can immediately announce the alert message without depending on full card rendering or risking webhook payload limits.
+**Action:** Always include `"summary": <plain text>` (bounded) at the Adaptive Card root level alongside `"msteams": {"width": "Full"}` when constructing Teams notifications.
