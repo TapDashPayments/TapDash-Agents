@@ -249,9 +249,9 @@ class _Tee:
         return getattr(self.inner, name)
 
 
-_URL_RE = re.compile(r"https?://\S+")
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 MAX_TEAMS_PAYLOAD_BYTES = 28 * 1024  # Teams webhook 28 KB limit
-MAX_TEAMS_TEXT_CHARS = 4000
+MAX_CHUNK_CHARS = 3500
 
 
 def _teams_summary(text: str, limit: int = 1000) -> str:
@@ -261,32 +261,52 @@ def _teams_summary(text: str, limit: int = 1000) -> str:
     return sanitized if len(sanitized) <= limit else sanitized[:limit - 3] + "..."
 
 
+def _split_chunks(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+    """Split multi-line text into bounded chunks without dropping or truncating alert lines."""
+    lines = text.strip().split("\n")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current and (current_len + line_len > max_chars):
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [text]
+
+
 def _post_teams(webhook_url: str, text: str) -> None:
     """POST ``text`` to the Teams webhook (a Power Automate "Post card in a chat or channel" flow, which rejects
-    plain ``{"text": ...}``) as an Adaptive Card. A failure is never silent and never stops the sweep: one plain
-    ALERT line on stdout (so it reaches the chat like any other alert) and one line on stderr, both with only the
-    error type or HTTP code, because the URL is a secret."""
-    try:
-        body_text = text if len(text) <= MAX_TEAMS_TEXT_CHARS else text[:MAX_TEAMS_TEXT_CHARS - 3] + "..."
-        summary_text = _teams_summary(body_text)
-        card = {"type": "message", "summary": summary_text, "attachments": [{
-            "contentType": "application/vnd.microsoft.card.adaptive",
-            "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                        "version": "1.4", "fallbackText": summary_text, "summary": summary_text,
-                        "speak": summary_text, "msteams": {"width": "Full"},
-                        "body": [{"type": "TextBlock", "text": body_text, "wrap": True}]}}]}
-        payload = json.dumps(card).encode("utf-8")
-        if len(payload) > MAX_TEAMS_PAYLOAD_BYTES:
-            _err("teams alert payload exceeded 28 KB limit")
-            return
-        request = urllib.request.Request(webhook_url, data=payload,
-                                         headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=TEAMS_TIMEOUT_SECONDS):
-            pass
-    except Exception as exc:  # noqa: BLE001 - a dead Teams webhook must not stop the sweep
-        reason = f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
-        _err(f"teams alert failed ({reason})")
-        print(f"durable-park ALERT: Teams post failed ({reason}).", flush=True)
+    plain ``{"text": ...}``) as Adaptive Cards. Chunks long text so alert lines are never truncated. A failure is
+    never silent and never stops the sweep: one plain ALERT line on stdout and one line on stderr."""
+    for chunk in _split_chunks(text):
+        try:
+            summary_text = _teams_summary(chunk)
+            card = {"type": "message", "summary": summary_text, "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                            "version": "1.4", "fallbackText": summary_text, "summary": summary_text,
+                            "speak": summary_text, "msteams": {"width": "Full"},
+                            "body": [{"type": "TextBlock", "text": chunk, "wrap": True}]}}]}
+            payload = json.dumps(card).encode("utf-8")
+            if len(payload) > MAX_TEAMS_PAYLOAD_BYTES:
+                _err("teams alert failed (PayloadTooLarge)")
+                print("durable-park ALERT: Teams post failed (PayloadTooLarge).", flush=True)
+                continue
+            request = urllib.request.Request(webhook_url, data=payload,
+                                             headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=TEAMS_TIMEOUT_SECONDS):
+                pass
+        except Exception as exc:  # noqa: BLE001 - a dead Teams webhook must not stop the sweep
+            reason = f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
+            _err(f"teams alert failed ({reason})")
+            print(f"durable-park ALERT: Teams post failed ({reason}).", flush=True)
 
 
 def _age_start(row) -> datetime | None:

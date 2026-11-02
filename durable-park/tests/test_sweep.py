@@ -1136,10 +1136,24 @@ def test_teams_gets_the_alert_lines_the_sweep_printed(world, monkeypatch, capsys
 
 
 def test_teams_summary_redacts_urls_and_bounds_length():
-    raw = "Alert with URL: https://app.withhuman.ai/queue/req-123 and details"
+    raw = "Alert with URL: HTTPS://app.withhuman.ai/queue/req-123 and details"
     summary = sweep._teams_summary(raw)
-    assert "https://" not in summary and "[link]" in summary
+    assert "https://" not in summary.lower() and "[link]" in summary
     assert len(sweep._teams_summary("X" * 2000, limit=50)) <= 50
+
+
+def test_teams_splits_large_text_into_chunks(monkeypatch):
+    sent = _teams(monkeypatch)
+    lines = [f"Line {i}: alert detail here" for i in range(250)]
+    full_text = "\n".join(lines)
+    assert len(full_text) > sweep.MAX_CHUNK_CHARS
+    sweep._post_teams(TEAMS_URL, full_text)
+    assert len(sent) > 1
+    # Verify all lines are preserved across chunks
+    received_lines = []
+    for _, payload in sent:
+        received_lines.extend(_card_text(payload).splitlines())
+    assert received_lines == lines
 
 
 def test_teams_not_posted_when_there_is_no_alert(world, monkeypatch):
