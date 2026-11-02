@@ -1101,12 +1101,16 @@ def _teams(monkeypatch, outcome=200):
 def _card_text(body):
     """Assert ``body`` is the Adaptive Card wrapper Power Automate "Post card" flows require; return its text."""
     assert body["type"] == "message" and len(body["attachments"]) == 1
+    assert body.get("summary") == sweep._teams_summary(body["attachments"][0]["content"]["body"][0]["text"])
     attachment = body["attachments"][0]
     assert attachment["contentType"] == "application/vnd.microsoft.card.adaptive"
     card = attachment["content"]
     assert card["type"] == "AdaptiveCard" and card["version"] == "1.4"
     assert card["$schema"] == "http://adaptivecards.io/schemas/adaptive-card.json"
     assert card.get("msteams") == {"width": "Full"}
+    assert card.get("fallbackText") == body["summary"]
+    assert card.get("summary") == body["summary"]
+    assert card.get("speak") == body["summary"]
     assert len(card["body"]) == 1 and card["body"][0]["type"] == "TextBlock" and card["body"][0]["wrap"] is True
     return card["body"][0]["text"]
 
@@ -1129,6 +1133,27 @@ def test_teams_gets_the_alert_lines_the_sweep_printed(world, monkeypatch, capsys
     text = _card_text(sent[0][1])
     assert text == printed.strip()
     assert pid in text and '"n"' not in text  # no argument values
+
+
+def test_teams_summary_redacts_urls_and_bounds_length():
+    raw = "Alert with URL: HTTPS://app.withhuman.ai/queue/req-123 and details"
+    summary = sweep._teams_summary(raw)
+    assert "https://" not in summary.lower() and "[link]" in summary
+    assert len(sweep._teams_summary("X" * 2000, limit=50)) <= 50
+
+
+def test_teams_splits_large_text_into_chunks(monkeypatch):
+    sent = _teams(monkeypatch)
+    lines = [f"Line {i}: alert detail here" for i in range(250)]
+    full_text = "\n".join(lines)
+    assert len(full_text) > sweep.MAX_CHUNK_CHARS
+    sweep._post_teams(TEAMS_URL, full_text)
+    assert len(sent) > 1
+    # Verify all lines are preserved across chunks
+    received_lines = []
+    for _, payload in sent:
+        received_lines.extend(_card_text(payload).splitlines())
+    assert received_lines == lines
 
 
 def test_teams_not_posted_when_there_is_no_alert(world, monkeypatch):
