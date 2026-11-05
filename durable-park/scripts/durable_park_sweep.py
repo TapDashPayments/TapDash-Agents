@@ -249,16 +249,27 @@ class _Tee:
         return getattr(self.inner, name)
 
 
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _teams_summary(text: str, limit: int = 250) -> str:
+    """A bounded, single-line alert summary for notification toasts and screen readers with URLs redacted."""
+    collapsed = " ".join(_URL_PATTERN.sub("[link]", text).split()).strip()
+    return collapsed if len(collapsed) <= limit else collapsed[:limit - 3] + "..."
+
+
 def _post_teams(webhook_url: str, text: str) -> None:
     """POST ``text`` to the Teams webhook (a Power Automate "Post card in a chat or channel" flow, which rejects
     plain ``{"text": ...}``) as an Adaptive Card. A failure is never silent and never stops the sweep: one plain
     ALERT line on stdout (so it reaches the chat like any other alert) and one line on stderr, both with only the
     error type or HTTP code, because the URL is a secret."""
     try:
-        card = {"type": "message", "attachments": [{
+        summary = _teams_summary(text)
+        card = {"type": "message", "summary": summary, "attachments": [{
             "contentType": "application/vnd.microsoft.card.adaptive",
             "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                         "version": "1.4", "msteams": {"width": "Full"},
+                        "fallbackText": summary, "summary": summary,
                         "body": [{"type": "TextBlock", "text": text, "wrap": True}]}}]}
         request = urllib.request.Request(webhook_url, data=json.dumps(card).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
