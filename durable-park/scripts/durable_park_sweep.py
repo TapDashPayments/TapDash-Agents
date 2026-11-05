@@ -249,7 +249,7 @@ class _Tee:
         return getattr(self.inner, name)
 
 
-_URL_PATTERN = re.compile(r"https?://\S+")
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 def _teams_summary(text: str, limit: int = 250) -> str:

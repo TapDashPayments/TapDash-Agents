@@ -1166,11 +1166,11 @@ def test_a_crashing_sweep_still_posts_what_it_printed_and_raises(world, monkeypa
 
 def test_teams_summary_redacts_urls_and_bounds_length():
     raw = ("durable-park: approval for P-1234 (authnet_charge) still waiting after 4 min.\n"
-           "Decide it in withHuman: https://withhuman.example.com/queue/req_987654321")
+           "Decide it in withHuman: https://withhuman.example.com/queue/req_987654321 and HTTPS://OTHER.EXAMPLE.COM/X")
     summary = sweep._teams_summary(raw)
-    assert "https://" not in summary
-    assert "http://" not in summary
-    assert "[link]" in summary
+    assert "https://" not in summary.lower()
+    assert "http://" not in summary.lower()
+    assert summary.count("[link]") == 2
     assert "\n" not in summary
     assert summary.startswith("durable-park: approval for P-1234 (authnet_charge) still waiting after 4 min. Decide it in withHuman: [link]")
 
