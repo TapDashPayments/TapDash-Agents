@@ -142,7 +142,7 @@ GATEWAY_UNIT = "hermes-gateway"
 SYSTEMCTL_TIMEOUT = 5  # seconds
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
-_URL = re.compile(r"https?://\S+")
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 def _load_ledger_module():

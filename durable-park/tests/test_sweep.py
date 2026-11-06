@@ -1165,9 +1165,9 @@ def test_a_crashing_sweep_still_posts_what_it_printed_and_raises(world, monkeypa
 
 def test_teams_summary_redacts_urls():
     text = ("durable-park: approval for P-1234 (tool) still waiting after 3 min. "
-            "Decide it in withHuman: https://app.withhuman.ai/approvals/req-123\nSecond line")
+            "Decide it in withHuman: HTTPS://app.withhuman.ai/approvals/req-123\nSecond line")
     summary = sweep._teams_summary(text)
-    assert "https://" not in summary
+    assert "https://" not in summary.lower()
     assert "[link]" in summary
     assert "Second line" not in summary
     assert len(summary) <= 120
