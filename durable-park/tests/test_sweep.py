@@ -1101,12 +1101,14 @@ def _teams(monkeypatch, outcome=200):
 def _card_text(body):
     """Assert ``body`` is the Adaptive Card wrapper Power Automate "Post card" flows require; return its text."""
     assert body["type"] == "message" and len(body["attachments"]) == 1
+    assert "summary" in body and body["summary"]
     attachment = body["attachments"][0]
     assert attachment["contentType"] == "application/vnd.microsoft.card.adaptive"
     card = attachment["content"]
     assert card["type"] == "AdaptiveCard" and card["version"] == "1.4"
     assert card["$schema"] == "http://adaptivecards.io/schemas/adaptive-card.json"
     assert card.get("msteams") == {"width": "Full"}
+    assert card.get("fallbackText") == body["summary"]
     assert len(card["body"]) == 1 and card["body"][0]["type"] == "TextBlock" and card["body"][0]["wrap"] is True
     return card["body"][0]["text"]
 
@@ -1159,6 +1161,16 @@ def test_a_crashing_sweep_still_posts_what_it_printed_and_raises(world, monkeypa
     with pytest.raises(RuntimeError, match="bug"):  # the sweep's own error is not hidden
         world.main(monkeypatch)
     assert len(sent) == 1 and "outcome UNKNOWN" in _card_text(sent[0][1])
+
+
+def test_teams_summary_redacts_urls():
+    text = ("durable-park: approval for P-1234 (tool) still waiting after 3 min. "
+            "Decide it in withHuman: https://app.withhuman.ai/approvals/req-123\nSecond line")
+    summary = sweep._teams_summary(text)
+    assert "https://" not in summary
+    assert "[link]" in summary
+    assert "Second line" not in summary
+    assert len(summary) <= 120
 
 
 

@@ -142,6 +142,7 @@ GATEWAY_UNIT = "hermes-gateway"
 SYSTEMCTL_TIMEOUT = 5  # seconds
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 _STAMP = "%Y-%m-%dT%H:%M:%S.%fZ"
+_URL = re.compile(r"https?://\S+")
 
 
 def _load_ledger_module():
@@ -249,16 +250,26 @@ class _Tee:
         return getattr(self.inner, name)
 
 
+def _teams_summary(text: str, limit: int = 120) -> str:
+    """A short, single-line summary with URLs redacted to ``[link]`` so lock screens and notification toasts
+    never display sensitive approval links."""
+    first = text.split("\n", 1)[0].strip()
+    redacted = _URL.sub("[link]", first)
+    return _clean(redacted, limit)
+
+
 def _post_teams(webhook_url: str, text: str) -> None:
     """POST ``text`` to the Teams webhook (a Power Automate "Post card in a chat or channel" flow, which rejects
     plain ``{"text": ...}``) as an Adaptive Card. A failure is never silent and never stops the sweep: one plain
     ALERT line on stdout (so it reaches the chat like any other alert) and one line on stderr, both with only the
     error type or HTTP code, because the URL is a secret."""
     try:
-        card = {"type": "message", "attachments": [{
+        summary = _teams_summary(text)
+        card = {"type": "message", "summary": summary, "attachments": [{
             "contentType": "application/vnd.microsoft.card.adaptive",
             "content": {"type": "AdaptiveCard", "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                         "version": "1.4", "msteams": {"width": "Full"},
+                        "fallbackText": summary,
                         "body": [{"type": "TextBlock", "text": text, "wrap": True}]}}]}
         request = urllib.request.Request(webhook_url, data=json.dumps(card).encode("utf-8"),
                                          headers={"Content-Type": "application/json"})
