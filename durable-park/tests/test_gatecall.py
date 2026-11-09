@@ -499,6 +499,17 @@ def test_other_keys_are_not_the_note(name):
     assert not is_note_key(name)
 
 
+def test_custom_str_subclass_safely_handled():
+    class ShortReportingStr(str):
+        def __len__(self):
+            return 2  # custom __len__ reporting below 16
+
+    custom_note = ShortReportingStr("withhuman_context")
+    custom_non_note = ShortReportingStr("amount")
+    assert is_note_key(custom_note)
+    assert not is_note_key(custom_non_note)
+
+
 @pytest.mark.parametrize("args,paths", [
     ({"params": {"criteria": {"withhuman_context": "x"}}}, ["params.criteria.withhuman_context"]),
     ({"params": [{"a": 1, "withhuman_context": "x"}]}, ["params[*].withhuman_context"]),
